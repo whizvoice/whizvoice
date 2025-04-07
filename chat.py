@@ -22,45 +22,41 @@ def chat():
                 model="claude-3-7-sonnet-20250219",
                 max_tokens=1000,
                 messages=[{"role": "user", "content": user_input}],
-                system="You have access to a tool called 'get_asana_tasks' that you MUST use whenever users ask about Asana tasks or tasks due today. Do not try to answer Asana-related questions without using this tool first.",
-                tools=tools
+                system="You have access to a tool called 'get_asana_tasks' that you MUST use whenever users ask about Asana tasks or tasks due today.",
+                tools=tools,
+                tool_choice={"type": "tool", "name": "get_asana_tasks"} if 'asana' in user_input.lower() else None
             )
             
-            # Print initial response
-            print("Chatbot:", message.content[0].text)
+            print("DEBUG: Response type:", message.content[0].type)  # Debug print
             
-            # Add debug prints
-            print("DEBUG: Content type:", message.content[0].type)
-            if hasattr(message.content[0], 'tool_calls'):
-                print("DEBUG: Has tool_calls")
-                print("DEBUG: Tool calls:", message.content[0].tool_calls)
-            
-            # Handle tool calls if any
-            if hasattr(message.content[0], 'tool_calls') and message.content[0].tool_calls:
-                for tool_call in message.content[0].tool_calls:
-                    print("DEBUG: Tool call name:", tool_call.name)
-                    if tool_call.name == 'get_asana_tasks':
-                        print("Fetching Asana tasks...")
-                        tasks = get_asana_tasks()
-                        
-                        # Add tool response to messages
-                        messages = [
-                            {"role": "user", "content": user_input},
-                            {"role": "assistant", "content": message.content[0].text},
-                            {"role": "tool", "name": "get_asana_tasks", "content": json.dumps(tasks)}
-                        ]
-                        
-                        # Get final response from Claude with tool results
-                        message = client.messages.create(
-                            model="claude-3-7-sonnet-20250219",
-                            max_tokens=1000,
-                            messages=messages,
-                            system="You have access to an Asana integration tool that can fetch tasks due today."
-                        )
-                        print("Chatbot:", message.content[0].text)
+            # Handle the response based on its type
+            if message.content[0].type == 'text':
+                print("Chatbot:", message.content[0].text)
+            elif message.content[0].type == 'tool_use':
+                print("Fetching Asana tasks...")
+                tasks = get_asana_tasks()
+                print("DEBUG: Got tasks:", tasks)
+                
+                # Add tool response to messages - using assistant role instead of tool
+                messages = [
+                    {"role": "user", "content": user_input},
+                    {"role": "assistant", "content": f"Here are the tasks I found: {json.dumps(tasks)}"}
+                ]
+                
+                # Get final response from Claude with tool results
+                message = client.messages.create(
+                    model="claude-3-7-sonnet-20250219",
+                    max_tokens=1000,
+                    messages=messages,
+                    system="You have access to an Asana integration tool that can fetch tasks due today."
+                )
+                print("Chatbot:", message.content[0].text)
+            else:
+                print("DEBUG: Unexpected response type:", message.content[0].type)
             
         except Exception as e:
             print("Chatbot: Sorry, I encountered an error:", str(e))
+            print("DEBUG: Full error:", e)  # Debug print
 
 if __name__ == "__main__":
     chat()
