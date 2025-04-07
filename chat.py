@@ -24,7 +24,7 @@ def chat():
                 messages=[{"role": "user", "content": user_input}],
                 system="You have access to two tools: 'get_workspaces' to list Asana workspaces, and 'get_asana_tasks' to fetch tasks. Use get_workspaces when asked about workspaces, and get_asana_tasks when asked about tasks.",
                 tools=tools,
-                tool_choice={"type": "tool", "name": "get_workspaces"} if 'workspace' in user_input.lower() else ({"type": "tool", "name": "get_asana_tasks"} if 'task' in user_input.lower() or 'asana' in user_input.lower() else None)
+                tool_choice={"type": "tool", "name": "get_workspaces"} if 'workspace' in user_input.lower() else ({"type": "tool", "name": "get_asana_tasks"} if 'task' in user_input.lower() or 'asana' in user_input.lower() else {"type": "auto"})
             )
             
             print("DEBUG: Response type:", message.content[0].type)  # Debug print
