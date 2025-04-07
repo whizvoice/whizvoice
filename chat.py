@@ -1,6 +1,6 @@
 from anthropic import Anthropic
 from constants import CLAUDE_API_KEY
-from asana_tools import tools, get_asana_tasks
+from asana_tools import tools, get_asana_tasks, get_workspaces
 import json
 
 def chat():
@@ -22,9 +22,9 @@ def chat():
                 model="claude-3-7-sonnet-20250219",
                 max_tokens=1000,
                 messages=[{"role": "user", "content": user_input}],
-                system="You have access to a tool called 'get_asana_tasks' that you MUST use whenever users ask about Asana tasks or tasks due today.",
+                system="You have access to two tools: 'get_workspaces' to list Asana workspaces, and 'get_asana_tasks' to fetch tasks. Use get_workspaces when asked about workspaces, and get_asana_tasks when asked about tasks.",
                 tools=tools,
-                tool_choice={"type": "tool", "name": "get_asana_tasks"} if 'asana' in user_input.lower() else None
+                tool_choice={"type": "tool", "name": "get_workspaces"} if 'workspace' in user_input.lower() else ({"type": "tool", "name": "get_asana_tasks"} if 'task' in user_input.lower() or 'asana' in user_input.lower() else None)
             )
             
             print("DEBUG: Response type:", message.content[0].type)  # Debug print
@@ -33,14 +33,23 @@ def chat():
             if message.content[0].type == 'text':
                 print("Chatbot:", message.content[0].text)
             elif message.content[0].type == 'tool_use':
-                print("Fetching Asana tasks...")
-                tasks = get_asana_tasks()
-                print("DEBUG: Got tasks:", tasks)
+                print("DEBUG: Tool use content:", vars(message.content[0]))
                 
-                # Add tool response to messages - using assistant role instead of tool
+                tool_name = message.content[0].name
+                tool_args = message.content[0].input  # Changed from parameters to input
+                
+                print(f"Using tool: {tool_name}")
+                if tool_name == 'get_workspaces':
+                    result = get_workspaces()
+                elif tool_name == 'get_asana_tasks':
+                    workspace_gid = tool_args.get('workspace_gid')
+                    result = get_asana_tasks(workspace_gid)
+                
+                print("DEBUG: Got result:", result)
+                
                 messages = [
                     {"role": "user", "content": user_input},
-                    {"role": "assistant", "content": f"Here are the tasks I found: {json.dumps(tasks)}"}
+                    {"role": "assistant", "content": f"Here's what I found: {json.dumps(result)}"}
                 ]
                 
                 # Get final response from Claude with tool results

@@ -4,9 +4,21 @@ from asana.rest import ApiException
 from datetime import datetime
 import json
 
-def get_asana_tasks():
+def get_workspaces():
+    """Get all available workspaces"""
+    configuration = asana.Configuration()
+    configuration.access_token = ASANA_ACCESS_TOKEN
+    api_client = asana.ApiClient(configuration)
+
+    try:
+        workspaces_api = asana.WorkspacesApi(api_client)
+        workspaces = list(workspaces_api.get_workspaces({}))
+        return workspaces
+    except ApiException as e:
+        return f"Error accessing Asana API: {str(e)}"
+
+def get_asana_tasks(workspace_gid=None):
     """Get tasks assigned to the current user that are due today"""
-    # Configure Asana client
     configuration = asana.Configuration()
     configuration.access_token = ASANA_ACCESS_TOKEN
     api_client = asana.ApiClient(configuration)
@@ -16,17 +28,15 @@ def get_asana_tasks():
         users_api = asana.UsersApi(api_client)
         me = users_api.get_user("me", {})
 
-        # Get user's workspaces
-        workspaces_api = asana.WorkspacesApi(api_client)
-        workspaces = list(workspaces_api.get_workspaces({}))
-        
-        if not workspaces:
-            return "No workspaces found"
-        if len(workspaces) < 2:
-            return "Only one workspace found"
-            
-        # Get tasks from second workspace
-        workspace_gid = workspaces[1]['gid']
+        # If no workspace specified, use second workspace
+        if not workspace_gid:
+            workspaces = list(asana.WorkspacesApi(api_client).get_workspaces({}))
+            if not workspaces:
+                return "No workspaces found"
+            if len(workspaces) < 2:
+                return "Only one workspace found"
+            workspace_gid = workspaces[1]['gid']
+
         tasks_api = asana.TasksApi(api_client)
         today = datetime.now().strftime('%Y-%m-%d')
         
@@ -45,11 +55,26 @@ def get_asana_tasks():
 tools = [
     {
         "type": "custom",
-        "name": "get_asana_tasks",
-        "description": "Tool for fetching tasks in Asana.",
+        "name": "get_workspaces",
+        "description": "Get a list of all available Asana workspaces.",
         "input_schema": {
             "type": "object",
             "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "get_asana_tasks",
+        "description": "Get tasks due today from a specific workspace. If no workspace is specified, uses the second workspace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workspace_gid": {
+                    "type": "string",
+                    "description": "The GID of the workspace to get tasks from"
+                }
+            },
             "required": []
         }
     }
