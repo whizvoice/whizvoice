@@ -45,8 +45,11 @@ def get_asana_tasks(workspace_gid=None):
             'assignee': me['gid'],
             'completed_since': 'now',
             'due_on': today,
+            'due_on.exists': 'true',
             'opt_fields': 'name,due_on,completed,projects.name'
         }))
+        # Filter for tasks that have today's date
+        tasks = [task for task in tasks if task.get('due_on') == today]
         return tasks
     except ApiException as e:
         return f"Error accessing Asana API: {str(e)}"
