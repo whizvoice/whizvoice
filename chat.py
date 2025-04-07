@@ -17,7 +17,7 @@ def chat():
         # Get response from Claude
         try:
             message = client.messages.create(
-                model="claude-3-sonnet-20240229",
+                model="claude-3-7-sonnet-20250219",
                 max_tokens=1000,
                 messages=[{
                     "role": "user",
