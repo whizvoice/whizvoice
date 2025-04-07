@@ -24,7 +24,7 @@ def chat():
                 messages=[{"role": "user", "content": user_input}],
                 system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, you have access to a list of tools.",
                 tools=tools,
-                tool_choice={"type": "tool", "name": "get_workspaces"} if 'workspace' in user_input.lower() else ({"type": "tool", "name": "get_asana_tasks"} if 'task' in user_input.lower() or 'asana' in user_input.lower() else {"type": "auto"})
+                tool_choice={"type": "any"} if any(word in user_input.lower() for word in ['asana', 'task', 'workspace']) else {"type": "auto"}
             )
             
             print("DEBUG: Response type:", message.content[0].type)  # Debug print

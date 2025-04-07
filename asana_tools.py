@@ -58,16 +58,6 @@ def get_asana_tasks(workspace_gid=None):
 tools = [
     {
         "type": "custom",
-        "name": "get_workspaces",
-        "description": "Get a list of all available Asana workspaces.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "type": "custom",
         "name": "get_asana_tasks",
         "description": "Get tasks due today from a specific workspace. If no workspace is specified, uses the second workspace.",
         "input_schema": {
@@ -78,6 +68,16 @@ tools = [
                     "description": "The GID of the workspace to get tasks from"
                 }
             },
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "get_workspaces",
+        "description": "Get a list of all available Asana workspaces.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
             "required": []
         }
     }
