@@ -1,1 +1,2 @@
-anthropic>=0.18.1 
+anthropic>=0.18.1
+asana>=3.0.0 
