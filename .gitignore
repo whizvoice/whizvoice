@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables and secrets
+constants.py
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+.DS_Store 
