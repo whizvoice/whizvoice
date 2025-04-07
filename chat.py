@@ -22,7 +22,7 @@ def chat():
                 model="claude-3-7-sonnet-20250219",
                 max_tokens=1000,
                 messages=[{"role": "user", "content": user_input}],
-                system="You have access to two tools: 'get_workspaces' to list Asana workspaces, and 'get_asana_tasks' to fetch tasks. Use get_workspaces when asked about workspaces, and get_asana_tasks when asked about tasks.",
+                system="You are a friendly assistant that can help with anything. Specifically for queries related to Asana or tasks, you have access to a list of tools.",
                 tools=tools,
                 tool_choice={"type": "tool", "name": "get_workspaces"} if 'workspace' in user_input.lower() else ({"type": "tool", "name": "get_asana_tasks"} if 'task' in user_input.lower() or 'asana' in user_input.lower() else {"type": "auto"})
             )
