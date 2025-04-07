@@ -4,7 +4,7 @@ from asana.rest import ApiException
 from datetime import datetime
 import json
 
-def get_workspaces():
+def get_asana_workspaces():
     """Get all available workspaces"""
     configuration = asana.Configuration()
     configuration.access_token = ASANA_ACCESS_TOKEN
@@ -58,8 +58,8 @@ def get_asana_tasks(workspace_gid=None):
 tools = [
     {
         "type": "custom",
-        "name": "get_workspaces",
-        "description": "Get a list of all available Asana workspaces.",
+        "name": "get_asana_workspaces",
+        "description": "Lists all available Asana workspaces. ALWAYS use this tool when the user asks anything about workspaces, like 'show workspaces', 'what workspaces do I have', etc.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -69,13 +69,13 @@ tools = [
     {
         "type": "custom",
         "name": "get_asana_tasks",
-        "description": "Get tasks due today from a specific workspace. If no workspace is specified, uses the second workspace.",
+        "description": "Gets tasks due today. ALWAYS use this tool when the user asks about tasks, like 'show my tasks', 'what's due today', 'what do I need to do', etc.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "workspace_gid": {
                     "type": "string",
-                    "description": "The GID of the workspace to get tasks from"
+                    "description": "Optional: The GID of a specific workspace to get tasks from. If not provided, uses the second workspace."
                 }
             },
             "required": []
