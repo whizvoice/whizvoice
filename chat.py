@@ -17,17 +17,18 @@ def chat():
             break
             
         try:
-            # First message to Claude
-            message = client.messages.create(
+            # First message to Claude using beta endpoint
+            message = client.beta.messages.create(
                 model="claude-3-7-sonnet-20250219",
                 max_tokens=1000,
                 messages=[{"role": "user", "content": user_input}],
                 system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, you have access to a list of tools.",
                 tools=tools,
-                tool_choice={"type": "any"} if any(word in user_input.lower() for word in ['asana', 'task', 'workspace']) else {"type": "auto"}
+                tool_choice={"type": "any"} if any(word in user_input.lower() for word in ['asana', 'task', 'workspace']) else {"type": "auto"},
+                betas=["token-efficient-tools-2025-02-19"]
             )
             
-            print("DEBUG: Response type:", message.content[0].type)  # Debug print
+            print("DEBUG: Response type:", message.content[0].type)
             
             # Handle the response based on its type
             if message.content[0].type == 'text':
@@ -36,7 +37,7 @@ def chat():
                 print("DEBUG: Tool use content:", vars(message.content[0]))
                 
                 tool_name = message.content[0].name
-                tool_args = message.content[0].input  # Changed from parameters to input
+                tool_args = message.content[0].input
                 
                 print(f"Using tool: {tool_name}")
                 if tool_name == 'get_workspaces':
@@ -53,11 +54,12 @@ def chat():
                 ]
                 
                 # Get final response from Claude with tool results
-                message = client.messages.create(
+                message = client.beta.messages.create(
                     model="claude-3-7-sonnet-20250219",
                     max_tokens=1000,
                     messages=messages,
-                    system="You have access to an Asana integration tool that can fetch tasks due today."
+                    system="You have access to an Asana integration tool that can fetch tasks due today.",
+                    betas=["token-efficient-tools-2025-02-19"]
                 )
                 print("Chatbot:", message.content[0].text)
             else:
@@ -65,7 +67,7 @@ def chat():
             
         except Exception as e:
             print("Chatbot: Sorry, I encountered an error:", str(e))
-            print("DEBUG: Full error:", e)  # Debug print
+            print("DEBUG: Full error:", e)
 
 if __name__ == "__main__":
     chat()
