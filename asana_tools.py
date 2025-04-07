@@ -21,7 +21,7 @@ def get_asana_tasks():
 tools = [
     {
         "type": "custom",
-        "name": "get_tasks",
+        "name": "get_asana_tasks",
         "description": "Tool for fetching tasks in Asana.",
         "input_schema": {
             "type": "object",

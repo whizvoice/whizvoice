@@ -22,7 +22,7 @@ def chat():
                 model="claude-3-7-sonnet-20250219",
                 max_tokens=1000,
                 messages=[{"role": "user", "content": user_input}],
-                system="You have access to a tool called 'get_tasks' that you MUST use whenever users ask about Asana tasks or tasks due today. Do not try to answer Asana-related questions without using this tool first.",
+                system="You have access to a tool called 'get_asana_tasks' that you MUST use whenever users ask about Asana tasks or tasks due today. Do not try to answer Asana-related questions without using this tool first.",
                 tools=tools
             )
             
