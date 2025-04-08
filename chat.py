@@ -3,6 +3,20 @@ from constants import CLAUDE_API_KEY
 from asana_tools import tools, get_asana_tasks, get_workspaces
 import json
 
+SYSTEM_PROMPT = """You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary. In this case, please just give the answer and do not reply again to ask clarification questions."""
+
+def send_initial_message(client, user_input):
+    """Send the initial message to Claude and get the response"""
+    return client.beta.messages.create(
+        model="claude-3-7-sonnet-20250219",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": user_input}],
+        system=SYSTEM_PROMPT,
+        tools=tools,
+        tool_choice={"type": "auto"},
+        betas=["token-efficient-tools-2025-02-19"]
+    )
+
 def chat():
     # Initialize Claude client
     client = Anthropic(api_key=CLAUDE_API_KEY)
@@ -17,16 +31,8 @@ def chat():
             break
             
         try:
-            # First message to Claude using beta endpoint
-            message = client.beta.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=1000,
-                messages=[{"role": "user", "content": user_input}],
-                system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, you have access to a list of tools.",
-                tools=tools,
-                tool_choice={"type": "any"} if any(word in user_input.lower() for word in ['asana', 'task', 'workspace']) else {"type": "auto"},
-                betas=["token-efficient-tools-2025-02-19"]
-            )
+            # Get response from Claude
+            message = send_initial_message(client, user_input)
             
             print("DEBUG: Response type:", message.content[0].type)
             
@@ -54,13 +60,7 @@ def chat():
                 ]
                 
                 # Get final response from Claude with tool results
-                message = client.beta.messages.create(
-                    model="claude-3-7-sonnet-20250219",
-                    max_tokens=1000,
-                    messages=messages,
-                    system="You have access to an Asana integration tool that can fetch tasks due today.",
-                    betas=["token-efficient-tools-2025-02-19"]
-                )
+                message = send_initial_message(client, user_input)
                 print("Chatbot:", message.content[0].text)
             else:
                 print("DEBUG: Unexpected response type:", message.content[0].type)

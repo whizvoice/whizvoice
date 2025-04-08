@@ -59,7 +59,7 @@ tools = [
     {
         "type": "custom",
         "name": "get_asana_tasks",
-        "description": "Get tasks due today from a specific workspace. If no workspace is specified, uses the second workspace.",
+        "description": "Get tasks due today from a specific workspace in Asana. If no workspace is specified, uses the second workspace. If you don't know the workspace GID, use the get_workspaces tool to get the workspace GID.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -73,8 +73,8 @@ tools = [
     },
     {
         "type": "custom",
-        "name": "get_workspaces",
-        "description": "Get a list of all available Asana workspaces.",
+        "name": "get_asana_workspaces",
+        "description": "Get information about Asana workspaces.",
         "input_schema": {
             "type": "object",
             "properties": {},
