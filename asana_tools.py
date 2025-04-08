@@ -4,7 +4,7 @@ from asana.rest import ApiException
 from datetime import datetime
 import json
 
-def get_workspaces():
+def get_asana_workspaces():
     """Get all available workspaces"""
     configuration = asana.Configuration()
     configuration.access_token = ASANA_ACCESS_TOKEN
