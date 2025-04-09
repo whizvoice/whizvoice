@@ -3,6 +3,7 @@ import asana
 from asana.rest import ApiException
 from datetime import datetime, timedelta
 import json
+from preferences import get_preference, set_preference
 
 def get_date_range(range_str=None):
     """Convert date range string to start and end dates"""
@@ -51,14 +52,17 @@ def get_asana_tasks(workspace_gid=None, start_date=None, end_date=None):
         users_api = asana.UsersApi(api_client)
         me = users_api.get_user("me", {})
 
-        # If no workspace specified, use second workspace
+        # If no workspace specified, try preference then default to second
         if not workspace_gid:
-            workspaces = list(asana.WorkspacesApi(api_client).get_workspaces({}))
-            if not workspaces:
-                return "No workspaces found"
-            if len(workspaces) < 2:
-                return "Only one workspace found"
-            workspace_gid = workspaces[1]['gid']  # Use second workspace
+            workspace_gid = get_preference('asana_workspace_preference')
+            
+            if not workspace_gid:
+                workspaces = list(asana.WorkspacesApi(api_client).get_workspaces({}))
+                if not workspaces:
+                    return "No workspaces found"
+                if len(workspaces) < 2:
+                    return "Only one workspace found"
+                workspace_gid = workspaces[1]['gid']
 
         # Handle date defaults
         today = datetime.now().strftime('%Y-%m-%d')
@@ -93,6 +97,31 @@ def get_current_date():
 tools = [
     {
         "type": "custom",
+        "name": "set_workspace_preference",
+        "description": "Set your preferred Asana workspace. Pass the workspace GID to make it the default.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workspace_gid": {
+                    "type": "string",
+                    "description": "The GID of your preferred workspace"
+                }
+            },
+            "required": ["workspace_gid"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "get_workspace_preference",
+        "description": "Get your currently preferred Asana workspace GID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
         "name": "get_current_date",
         "description": "Get today's date in YYYY-MM-DD format. Use this to format dates correctly when querying tasks.",
         "input_schema": {
@@ -104,7 +133,7 @@ tools = [
     {
         "type": "custom",
         "name": "get_asana_tasks",
-        "description": "Get tasks from Asana within a specific date range. Dates must be in YYYY-MM-DD format (e.g., '2024-03-15'). Use get_current_date to get today's date in the correct format.",
+        "description": "Get tasks from Asana within a specific date range. Dates must be in YYYY-MM-DD format (e.g., '2024-03-15'). Use get_current_date to get today's date in the correct format. If you're not sure what workspace to use, check the user's workspace preference. If the user doesn't have a preference set, ask them to choose a preferred workspace and save that preference.",
         "input_schema": {
             "type": "object",
             "properties": {

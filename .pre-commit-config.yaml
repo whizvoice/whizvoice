@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: python-tests
         name: run python tests with coverage
-        entry: bash -c 'python -m coverage run -m unittest -v tests/test_chat.py tests/test_asana_tools.py && python -m coverage report'
+        entry: bash -c 'python -m coverage run -m unittest -v tests/test_chat.py tests/test_asana_tools.py tests/test_preferences.py && python -m coverage report'
         language: system
         pass_filenames: false
         types: [python]

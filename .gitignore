@@ -40,4 +40,7 @@ htmlcov/
 constants.py
 .env
 .venv
-.DS_Store 
+.DS_Store
+
+# User preferences
+user_preferences.json 

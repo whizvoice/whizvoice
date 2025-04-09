@@ -48,7 +48,7 @@ The project includes unit tests for both the Asana integration and chat function
 ### Running All Tests
 
 ```bash
-python -m unittest discover tests
+python -m unittest $(find tests/ -name "test_*.py" ! -name "*integration*")
 ```
 
 ### Test Coverage
