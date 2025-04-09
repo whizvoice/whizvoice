@@ -1,6 +1,6 @@
 # whizvoice
 
-A simple command-line chatbot powered by Claude AI.
+A simple command-line chatbot powered by Claude AI with Asana integration.
 
 ## Setup Instructions
 
@@ -18,25 +18,49 @@ python -m venv venv
 source venv/bin/activate
 ```
 
+- On Windows:
+
+```
+.\venv\Scripts\activate
+```
+
 3. Install requirements:
 
 ```
 pip install -r requirements.txt
 ```
 
-4. Create a `constants.py` file with your Claude API key:
+4. Create a `constants.py` file with your API keys:
 
 ```
-CLAUDE_API_KEY = "your-api-key-here"
+CLAUDE_API_KEY = "your-claude-api-key"
+ASANA_ACCESS_TOKEN = "your-asana-token"
 ```
 
-5. Run the chatbot:
+## Running the Chatbot
 
 ```
 python chat.py
 ```
 
-## Usage
+## Running Tests
 
-- Type your message and press Enter to get a response from Claude
-- Type 'quit' to exit the chatbot
+The project includes unit tests for both the Asana integration and chat functionality.
+
+### Running All Tests
+
+```
+python -m unittest discover tests
+```
+
+### Test Coverage
+
+To run tests with coverage report:
+
+```
+# Run tests with coverage
+coverage run -m unittest discover tests
+
+# Generate coverage report
+coverage report
+```

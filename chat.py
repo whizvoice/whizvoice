@@ -20,9 +20,40 @@ def send_message_to_claude(client, messages, include_tools=True):
     
     return client.messages.create(**params)
 
+def execute_tool(tool_name, tool_args):
+    """Execute a tool and return its result"""
+    if tool_name == 'get_asana_workspaces':
+        return get_asana_workspaces()
+    elif tool_name == 'get_asana_tasks':
+        workspace_gid = tool_args.get('workspace_gid')
+        return get_asana_tasks(workspace_gid)
+    raise ValueError(f"Unknown tool: {tool_name}")
+
+class ChatSession:
+    def __init__(self, client):
+        self.client = client
+        self.messages = []
+    
+    def handle_message(self, user_input):
+        """Process a single message and return the final response"""
+        self.messages = [{"role": "user", "content": user_input}]
+        message = send_message_to_claude(self.client, self.messages)
+        
+        while message.stop_reason == 'tool_use':
+            tool_block = next(block for block in message.content if block.type == 'tool_use')
+            result = execute_tool(tool_block.name, tool_block.input)
+            
+            self.messages.extend([
+                {"role": "assistant", "content": "Using tool: " + tool_block.name},
+                {"role": "assistant", "content": f"Tool result: {json.dumps(result)}"}
+            ])
+            message = send_message_to_claude(self.client, self.messages)
+        
+        return message
+
 def chat():
-    # Initialize Claude client
     client = Anthropic(api_key=CLAUDE_API_KEY)
+    session = ChatSession(client)
     
     print("Chatbot: Hello! I'm Claude with Asana integration. Type 'quit' to exit.")
     
@@ -34,34 +65,9 @@ def chat():
             break
             
         try:
-            # Start conversation with user input
-            messages = [{"role": "user", "content": user_input}]
-            message = send_message_to_claude(client, messages)
-            
-            while message.stop_reason == 'tool_use':
-                # Find the ToolUseBlock in the content
-                tool_block = next(block for block in message.content if block.type == 'tool_use')
-                tool_name = tool_block.name
-                tool_args = tool_block.input
-                
-                print(f"DEBUG: Using tool: {tool_name}")
-                if tool_name == 'get_asana_workspaces':
-                    result = get_asana_workspaces()
-                elif tool_name == 'get_asana_tasks':
-                    workspace_gid = tool_args.get('workspace_gid')
-                    result = get_asana_tasks(workspace_gid)
-                
-                # Add tool response to messages
-                messages.extend([
-                    {"role": "assistant", "content": "Using tool: " + tool_name},  # Changed from message.content[0].text
-                    {"role": "assistant", "content": f"Tool result: {json.dumps(result)}"}
-                ])
-                message = send_message_to_claude(client, messages)
-                
-            # Get final response from Claude with tool results
-            if message.content[0].type == 'text':  # Only print if it's text
+            message = session.handle_message(user_input)
+            if message.content[0].type == 'text':
                 print(f"Chatbot: {message.content[0].text}")
-            
         except Exception as e:
             print("Chatbot: Sorry, I encountered an error:", str(e))
             print("DEBUG: Full error:", e)
