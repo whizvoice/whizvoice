@@ -2,8 +2,8 @@ repos:
   - repo: local
     hooks:
       - id: python-tests
-        name: run python tests
-        entry: python -m unittest discover tests
+        name: run python tests with coverage
+        entry: bash -c 'coverage run -m unittest discover tests && coverage report --fail-under=80'
         language: system
         pass_filenames: false
         types: [python]
