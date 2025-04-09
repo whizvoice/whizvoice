@@ -1,6 +1,6 @@
 from anthropic import Anthropic
 from constants import CLAUDE_API_KEY
-from asana_tools import tools, get_asana_tasks, get_asana_workspaces
+from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date
 import json
 
 SYSTEM_PROMPT = """You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary. In this case, please just give the answer and do not reply again to ask clarification questions."""
@@ -26,7 +26,11 @@ def execute_tool(tool_name, tool_args):
         return get_asana_workspaces()
     elif tool_name == 'get_asana_tasks':
         workspace_gid = tool_args.get('workspace_gid')
-        return get_asana_tasks(workspace_gid)
+        start_date = tool_args.get('start_date')
+        end_date = tool_args.get('end_date')
+        return get_asana_tasks(workspace_gid, start_date, end_date)
+    elif tool_name == 'get_current_date':
+        return get_current_date()
     raise ValueError(f"Unknown tool: {tool_name}")
 
 class ChatSession:

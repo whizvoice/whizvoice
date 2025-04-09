@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch, MagicMock
-from datetime import datetime
-from asana_tools import get_asana_workspaces, get_asana_tasks
+from datetime import datetime, timedelta
+from asana_tools import get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date
 
 class TestAsanaTools(unittest.TestCase):
     def setUp(self):
@@ -64,8 +64,8 @@ class TestAsanaTools(unittest.TestCase):
             'workspace': 'workspace1',
             'assignee': 'user1',
             'completed_since': 'now',
-            'due_on': self.today,
-            'due_on.exists': 'true',
+            'due_on.after': '2025-04-08',
+            'due_on.before': '2025-04-08',
             'opt_fields': 'name,due_on,completed,projects.name'
         })
 
@@ -100,8 +100,8 @@ class TestAsanaTools(unittest.TestCase):
             'workspace': 'workspace2',
             'assignee': 'user1',
             'completed_since': 'now',
-            'due_on': self.today,
-            'due_on.exists': 'true',
+            'due_on.after': '2025-04-08',
+            'due_on.before': '2025-04-08',
             'opt_fields': 'name,due_on,completed,projects.name'
         })
 
@@ -119,6 +119,81 @@ class TestAsanaTools(unittest.TestCase):
         
         # Assert
         self.assertEqual(result, "No workspaces found")
+
+    def test_get_date_range(self):
+        """Test date range parsing"""
+        today = datetime.now().date()
+        
+        # Test default (no range)
+        start, end = get_date_range()
+        self.assertEqual(start, today)
+        self.assertEqual(end, today)
+        
+        # Test week range
+        start, end = get_date_range('week')
+        self.assertEqual(start, today)
+        self.assertEqual(end, today + timedelta(days=7))
+        
+        # Test month range
+        start, end = get_date_range('month')
+        self.assertEqual(start, today)
+        self.assertEqual(end, today + timedelta(days=30))
+        
+        # Test invalid range defaults to today
+        start, end = get_date_range('invalid')
+        self.assertEqual(start, today)
+        self.assertEqual(end, today)
+
+    @patch('asana.TasksApi')
+    @patch('asana.WorkspacesApi')
+    @patch('asana.UsersApi')
+    @patch('asana.ApiClient')
+    def test_get_tasks_with_date_range(self, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
+        """Test getting tasks with date range"""
+        # Setup mocks
+        mock_user_api = MagicMock()
+        mock_users_api.return_value = mock_user_api
+        mock_user_api.get_user.return_value = {'gid': 'user1'}
+        
+        mock_tasks = [
+            {'gid': 'task1', 'name': 'Task 1', 'due_on': '2024-03-15'},
+            {'gid': 'task2', 'name': 'Task 2', 'due_on': '2024-03-16'},
+            {'gid': 'task3', 'name': 'Task 3', 'due_on': '2024-03-17'}
+        ]
+        
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.get_tasks.return_value = mock_tasks
+        
+        # Test getting tasks for specific date range
+        result = get_asana_tasks('workspace1', start_date='2024-03-15', end_date='2024-03-16')
+        
+        # Should get first two tasks
+        self.assertEqual(len(result), 2)
+        
+        # Verify correct API parameters
+        mock_task_api.get_tasks.assert_called_with({
+            'workspace': 'workspace1',
+            'assignee': 'user1',
+            'completed_since': 'now',
+            'due_on.after': '2024-03-15',
+            'due_on.before': '2024-03-16',
+            'opt_fields': 'name,due_on,completed,projects.name'
+        })
+
+    def test_get_current_date(self):
+        """Test getting current date"""
+        result = get_current_date()
+        
+        # Should return today's date in YYYY-MM-DD format
+        today = datetime.now().strftime('%Y-%m-%d')
+        self.assertEqual(result, today)
+        
+        # Should be in correct format
+        try:
+            datetime.strptime(result, '%Y-%m-%d')
+        except ValueError:
+            self.fail("Date not in YYYY-MM-DD format")
 
 if __name__ == '__main__':
     unittest.main() 
