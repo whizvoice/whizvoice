@@ -78,7 +78,7 @@ class ChatSession:
             })
             
             message = send_message_to_claude(self.client, self.messages)
-            print(f"DEBUG: Tool response message: {message}")
+        self.messages.append({"role": "assistant", "content": message.content})
         
         return message
 

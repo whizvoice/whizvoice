@@ -4,9 +4,13 @@ from datetime import datetime, timedelta
 from asana_tools import get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date
 
 class TestAsanaTools(unittest.TestCase):
-    def setUp(self):
+    @patch('asana_tools.datetime')
+    def setUp(self, mock_datetime):
         """Set up test fixtures"""
-        self.today = datetime.now().strftime('%Y-%m-%d')
+        # Mock datetime.now() to return a fixed date
+        self.fixed_date = datetime(2024, 3, 15)
+        mock_datetime.now.return_value = self.fixed_date
+        self.today = self.fixed_date.strftime('%Y-%m-%d')
         
         # Mock workspace data
         self.mock_workspaces = [
@@ -41,9 +45,11 @@ class TestAsanaTools(unittest.TestCase):
     @patch('asana.WorkspacesApi')
     @patch('asana.UsersApi')
     @patch('asana.ApiClient')
-    def test_get_tasks_with_workspace(self, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
+    @patch('asana_tools.datetime')
+    def test_get_tasks_with_workspace(self, mock_datetime, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
         """Test getting tasks with specific workspace"""
         # Setup mocks
+        mock_datetime.now.return_value = self.fixed_date
         mock_user_api = MagicMock()
         mock_users_api.return_value = mock_user_api
         mock_user_api.get_user.return_value = {'gid': 'user1'}
@@ -64,8 +70,8 @@ class TestAsanaTools(unittest.TestCase):
             'workspace': 'workspace1',
             'assignee': 'user1',
             'completed_since': 'now',
-            'due_on.after': '2025-04-08',
-            'due_on.before': '2025-04-08',
+            'due_on.after': self.today,
+            'due_on.before': self.today,
             'opt_fields': 'name,due_on,completed,projects.name'
         })
 
@@ -73,9 +79,11 @@ class TestAsanaTools(unittest.TestCase):
     @patch('asana.WorkspacesApi')
     @patch('asana.UsersApi')
     @patch('asana.ApiClient')
-    def test_get_tasks_default_workspace(self, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
+    @patch('asana_tools.datetime')
+    def test_get_tasks_default_workspace(self, mock_datetime, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
         """Test getting tasks using default (second) workspace"""
         # Setup mocks
+        mock_datetime.now.return_value = self.fixed_date
         mock_user_api = MagicMock()
         mock_users_api.return_value = mock_user_api
         mock_user_api.get_user.return_value = {'gid': 'user1'}
@@ -100,8 +108,8 @@ class TestAsanaTools(unittest.TestCase):
             'workspace': 'workspace2',
             'assignee': 'user1',
             'completed_since': 'now',
-            'due_on.after': '2025-04-08',
-            'due_on.before': '2025-04-08',
+            'due_on.after': self.today,
+            'due_on.before': self.today,
             'opt_fields': 'name,due_on,completed,projects.name'
         })
 
@@ -120,9 +128,11 @@ class TestAsanaTools(unittest.TestCase):
         # Assert
         self.assertEqual(result, "No workspaces found")
 
-    def test_get_date_range(self):
+    @patch('asana_tools.datetime')
+    def test_get_date_range(self, mock_datetime):
         """Test date range parsing"""
-        today = datetime.now().date()
+        mock_datetime.now.return_value = self.fixed_date
+        today = self.fixed_date.date()
         
         # Test default (no range)
         start, end = get_date_range()
@@ -181,13 +191,14 @@ class TestAsanaTools(unittest.TestCase):
             'opt_fields': 'name,due_on,completed,projects.name'
         })
 
-    def test_get_current_date(self):
+    @patch('asana_tools.datetime')
+    def test_get_current_date(self, mock_datetime):
         """Test getting current date"""
+        mock_datetime.now.return_value = self.fixed_date
         result = get_current_date()
         
-        # Should return today's date in YYYY-MM-DD format
-        today = datetime.now().strftime('%Y-%m-%d')
-        self.assertEqual(result, today)
+        # Should return mocked date in YYYY-MM-DD format
+        self.assertEqual(result, self.today)
         
         # Should be in correct format
         try:
