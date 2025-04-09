@@ -13,9 +13,9 @@ class TestChat(unittest.TestCase):
         mock_response.content = [MagicMock(type='text', text='Here are your workspaces')]
         mock_response.stop_reason = None
         
-        # Create mock client
+        # Create mock client with beta messages
         mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
+        mock_client.beta.messages.create.return_value = mock_response
         
         # Test chat session
         session = ChatSession(mock_client)
@@ -25,7 +25,7 @@ class TestChat(unittest.TestCase):
         self.assertEqual(response.content[0].type, 'text')
         
         # Verify client was called correctly
-        mock_client.messages.create.assert_called_once()
+        mock_client.beta.messages.create.assert_called_once()
 
 if __name__ == '__main__':
     unittest.main() 

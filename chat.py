@@ -16,13 +16,14 @@ def send_message_to_claude(client, messages, include_tools=True):
         "max_tokens": 1000,
         "messages": messages,
         "system": SYSTEM_PROMPT,
+        "betas": ["token-efficient-tools-2025-02-19"]
     }
     
     if include_tools:
         params["tools"] = tools
         params["tool_choice"] = {"type": "auto"}
     
-    return client.messages.create(**params)
+    return client.beta.messages.create(**params)
 
 def execute_tool(tool_name, tool_args):
     """Execute a tool and return its result"""
@@ -77,6 +78,7 @@ class ChatSession:
             })
             
             message = send_message_to_claude(self.client, self.messages)
+            print(f"DEBUG: Tool response message: {message}")
         
         return message
 

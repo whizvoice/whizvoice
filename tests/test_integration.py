@@ -28,7 +28,9 @@ class TestChatIntegration(unittest.TestCase):
 
     @patch('chat.get_asana_workspaces')
     @patch('chat.get_asana_tasks')
-    def test_haiku_then_asana_workflow(self, mock_get_tasks, mock_get_workspaces):
+    @patch('chat.get_preference')
+    @patch('chat.set_preference')
+    def test_haiku_then_asana_workflow(self, mock_set_pref, mock_get_pref, mock_get_tasks, mock_get_workspaces):
         """Test that Claude can switch between non-tool and tool responses appropriately"""
         # Setup mock returns
         mock_workspaces = [
@@ -42,6 +44,8 @@ class TestChatIntegration(unittest.TestCase):
         ]
         mock_get_workspaces.return_value = mock_workspaces
         mock_get_tasks.return_value = mock_tasks
+        mock_get_pref.return_value = None  # No workspace preference set initially
+        mock_set_pref.return_value = True  # Successfully set preference
         
         # Create real Claude client (only mock Asana)
         client = Anthropic(api_key=CLAUDE_API_KEY)
@@ -61,11 +65,17 @@ class TestChatIntegration(unittest.TestCase):
         tasks_response = session.handle_message("What tasks do I have in Asana?")
         
         mock_get_workspaces.assert_called_once()
-        self.assertEqual(mock_get_tasks.call_count, 2)  # Check that it was called twice
+        mock_get_pref.assert_called()  # Should check for workspace preference
+        
+        # Set workspace preference
+        workspace_pref_response = session.handle_message("work task workspace please")
+        
+        mock_get_tasks.assert_called_once()
+        mock_set_pref.assert_called_once_with('asana_workspace_preference', 'workspace2')  # Should set preference to Work Tasks workspace
         
         # Response should be text about tasks
-        self.assertEqual(tasks_response.content[0].type, 'text')
-        tasks_text = tasks_response.content[0].text.lower()
+        self.assertEqual(workspace_pref_response.content[0].type, 'text')
+        tasks_text = workspace_pref_response.content[0].text.lower()
         self.assertIn('task', tasks_text)
 
 if __name__ == '__main__':
