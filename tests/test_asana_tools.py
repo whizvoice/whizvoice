@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
-from asana_tools import get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date
+from asana_tools import get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date, get_parent_tasks
 
 class TestAsanaTools(unittest.TestCase):
     @patch('asana_tools.datetime')
@@ -80,13 +80,17 @@ class TestAsanaTools(unittest.TestCase):
     @patch('asana.UsersApi')
     @patch('asana.ApiClient')
     @patch('asana_tools.datetime')
-    def test_get_tasks_default_workspace(self, mock_datetime, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
+    @patch('asana_tools.get_preference')
+    def test_get_tasks_default_workspace(self, mock_get_pref, mock_datetime, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
         """Test getting tasks using default (second) workspace"""
         # Setup mocks
         mock_datetime.now.return_value = self.fixed_date
         mock_user_api = MagicMock()
         mock_users_api.return_value = mock_user_api
         mock_user_api.get_user.return_value = {'gid': 'user1'}
+        
+        # Mock preference to return None (no preference set)
+        mock_get_pref.return_value = None
         
         mock_workspace_api = MagicMock()
         mock_workspaces_api.return_value = mock_workspace_api
@@ -112,6 +116,9 @@ class TestAsanaTools(unittest.TestCase):
             'due_on.before': self.today,
             'opt_fields': 'name,due_on,completed,projects.name'
         })
+        
+        # Verify get_preference was called
+        mock_get_pref.assert_called_once_with('asana_workspace_preference')
 
     @patch('asana.WorkspacesApi')
     @patch('asana.ApiClient')
@@ -205,6 +212,106 @@ class TestAsanaTools(unittest.TestCase):
             datetime.strptime(result, '%Y-%m-%d')
         except ValueError:
             self.fail("Date not in YYYY-MM-DD format")
+
+    @patch('asana.TasksApi')
+    @patch('asana.WorkspacesApi')
+    @patch('asana.UsersApi')
+    @patch('asana.ApiClient')
+    @patch('asana_tools.datetime')
+    @patch('asana_tools.get_preference')
+    def test_get_parent_tasks(self, mock_get_pref, mock_datetime, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
+        """Test getting parent tasks (tasks with subtasks)"""
+        # Setup mocks
+        mock_datetime.now.return_value = self.fixed_date
+        mock_user_api = MagicMock()
+        mock_users_api.return_value = mock_user_api
+        mock_user_api.get_user.return_value = {'gid': 'user1'}
+        
+        # Mock preference to return None (no preference set)
+        mock_get_pref.return_value = None
+        
+        # Create mock tasks with some having subtasks
+        mock_tasks = [
+            {'gid': 'task1', 'name': 'Parent Task 1', 'num_subtasks': 3, 'completed': False},
+            {'gid': 'task2', 'name': 'Regular Task', 'num_subtasks': 0, 'completed': False},
+            {'gid': 'task3', 'name': 'Parent Task 2', 'num_subtasks': 2, 'completed': False},
+            {'gid': 'task4', 'name': 'Completed Parent', 'num_subtasks': 5, 'completed': True}
+        ]
+        
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.get_tasks.return_value = mock_tasks
+        
+        # Call function with specific workspace
+        result = get_parent_tasks('workspace1')
+        
+        # Assert - should only get tasks with subtasks that are not completed
+        expected_tasks = [task for task in mock_tasks 
+                         if task.get('num_subtasks', 0) > 0 and 
+                         not task.get('completed', False)]
+        self.assertEqual(result, expected_tasks)
+        self.assertEqual(len(result), 2)  # Should only get 2 parent tasks
+        
+        # Verify correct API calls
+        mock_task_api.get_tasks.assert_called_once_with({
+            'workspace': 'workspace1',
+            'assignee': 'user1',
+            'completed_since': 'now',
+            'opt_fields': 'name,due_on,completed,projects.name,num_subtasks'
+        })
+        
+        # Verify get_preference was not called since we provided a workspace
+        mock_get_pref.assert_not_called()
+
+    @patch('asana.TasksApi')
+    @patch('asana.WorkspacesApi')
+    @patch('asana.UsersApi')
+    @patch('asana.ApiClient')
+    @patch('asana_tools.datetime')
+    @patch('asana_tools.get_preference')
+    def test_get_parent_tasks_with_preference(self, mock_get_pref, mock_datetime, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
+        """Test getting parent tasks with a workspace preference set"""
+        # Setup mocks
+        mock_datetime.now.return_value = self.fixed_date
+        mock_user_api = MagicMock()
+        mock_users_api.return_value = mock_user_api
+        mock_user_api.get_user.return_value = {'gid': 'user1'}
+        
+        # Mock preference to return a workspace
+        mock_get_pref.return_value = 'preferred_workspace'
+        
+        # Create mock tasks with some having subtasks
+        mock_tasks = [
+            {'gid': 'task1', 'name': 'Parent Task 1', 'num_subtasks': 3, 'completed': False},
+            {'gid': 'task2', 'name': 'Regular Task', 'num_subtasks': 0, 'completed': False},
+            {'gid': 'task3', 'name': 'Parent Task 2', 'num_subtasks': 2, 'completed': False},
+            {'gid': 'task4', 'name': 'Completed Parent', 'num_subtasks': 5, 'completed': True}
+        ]
+        
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.get_tasks.return_value = mock_tasks
+        
+        # Call function without specifying a workspace
+        result = get_parent_tasks()
+        
+        # Assert - should only get tasks with subtasks that are not completed
+        expected_tasks = [task for task in mock_tasks 
+                         if task.get('num_subtasks', 0) > 0 and 
+                         not task.get('completed', False)]
+        self.assertEqual(result, expected_tasks)
+        self.assertEqual(len(result), 2)  # Should only get 2 parent tasks
+        
+        # Verify correct API calls
+        mock_task_api.get_tasks.assert_called_once_with({
+            'workspace': 'preferred_workspace',
+            'assignee': 'user1',
+            'completed_since': 'now',
+            'opt_fields': 'name,due_on,completed,projects.name,num_subtasks'
+        })
+        
+        # Verify get_preference was called
+        mock_get_pref.assert_called_once_with('asana_workspace_preference')
 
 if __name__ == '__main__':
     unittest.main() 

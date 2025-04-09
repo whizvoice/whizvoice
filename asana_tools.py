@@ -93,6 +93,52 @@ def get_current_date():
     """Get today's date in YYYY-MM-DD format"""
     return datetime.now().strftime('%Y-%m-%d')
 
+def get_parent_tasks(workspace_gid=None):
+    """Get all parent tasks (tasks with subtasks) in a workspace
+    
+    Args:
+        workspace_gid (str, optional): Workspace to get tasks from. Defaults to preferred workspace.
+    """
+    configuration = asana.Configuration()
+    configuration.access_token = ASANA_ACCESS_TOKEN
+    api_client = asana.ApiClient(configuration)
+
+    try:
+        # Get current user
+        users_api = asana.UsersApi(api_client)
+        me = users_api.get_user("me", {})
+
+        # If no workspace specified, try preference then default to second
+        if not workspace_gid:
+            workspace_gid = get_preference('asana_workspace_preference')
+            
+            if not workspace_gid:
+                workspaces = list(asana.WorkspacesApi(api_client).get_workspaces({}))
+                if not workspaces:
+                    return "No workspaces found"
+                if len(workspaces) < 2:
+                    return "Only one workspace found"
+                workspace_gid = workspaces[1]['gid']
+            
+        tasks_api = asana.TasksApi(api_client)
+        
+        # Get all tasks in the workspace
+        tasks = list(tasks_api.get_tasks({
+            'workspace': workspace_gid,
+            'assignee': me['gid'],
+            'completed_since': 'now',
+            'opt_fields': 'name,due_on,completed,projects.name,num_subtasks'
+        }))
+        
+        # Filter tasks to only those with subtasks and not completed
+        parent_tasks = [task for task in tasks 
+                       if task.get('num_subtasks', 0) > 0 and 
+                       not task.get('completed', False)]
+        
+        return parent_tasks
+    except ApiException as e:
+        return f"Error accessing Asana API: {str(e)}"
+
 # Define available tools
 tools = [
     {
@@ -160,6 +206,21 @@ tools = [
         "input_schema": {
             "type": "object",
             "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "get_parent_tasks",
+        "description": "Get all parent tasks (tasks with subtasks) that are not completed in a workspace. If no workspace is specified, it will use your preferred workspace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workspace_gid": {
+                    "type": "string",
+                    "description": "The GID of the workspace to get tasks from"
+                }
+            },
             "required": []
         }
     }
