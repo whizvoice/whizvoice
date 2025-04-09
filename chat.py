@@ -42,11 +42,24 @@ class ChatSession:
         while message.stop_reason == 'tool_use':
             tool_block = next(block for block in message.content if block.type == 'tool_use')
             result = execute_tool(tool_block.name, tool_block.input)
+            print(f"DEBUG: Using tool: {tool_block.name} with input: {tool_block.input}")
             
-            self.messages.extend([
-                {"role": "assistant", "content": "Using tool: " + tool_block.name},
-                {"role": "assistant", "content": f"Tool result: {json.dumps(result)}"}
-            ])
+            # Add tool use message first
+            self.messages.append({
+                "role": "assistant",
+                "content": [tool_block]
+            })
+            
+            # Then add tool result
+            self.messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_block.id,
+                    "content": json.dumps(result)
+                }]
+            })
+            
             message = send_message_to_claude(self.client, self.messages)
         
         return message
