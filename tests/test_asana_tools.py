@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
-from asana_tools import get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date, get_parent_tasks
+from asana_tools import get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date, get_parent_tasks, create_asana_task
 
 class TestAsanaTools(unittest.TestCase):
     @patch('asana_tools.datetime')
@@ -62,7 +62,7 @@ class TestAsanaTools(unittest.TestCase):
         result = get_asana_tasks('workspace1')
         
         # Assert
-        expected_tasks = [task for task in self.mock_tasks if task['due_on'] == self.today]
+        expected_tasks = [task for task in self.mock_tasks if task.get('due_on') == self.today]
         self.assertEqual(result, expected_tasks)
         
         # Verify correct API calls
@@ -70,8 +70,6 @@ class TestAsanaTools(unittest.TestCase):
             'workspace': 'workspace1',
             'assignee': 'user1',
             'completed_since': 'now',
-            'due_on.after': self.today,
-            'due_on.before': self.today,
             'opt_fields': 'name,due_on,completed,projects.name'
         })
 
@@ -92,10 +90,12 @@ class TestAsanaTools(unittest.TestCase):
         # Mock preference to return None (no preference set)
         mock_get_pref.return_value = None
         
+        # Mock workspaces
         mock_workspace_api = MagicMock()
         mock_workspaces_api.return_value = mock_workspace_api
-        mock_workspace_api.get_workspaces.return_value = self.mock_workspaces
+        mock_workspaces_api.get_workspaces.return_value = self.mock_workspaces
         
+        # Mock task API
         mock_task_api = MagicMock()
         mock_tasks_api.return_value = mock_task_api
         mock_task_api.get_tasks.return_value = self.mock_tasks
@@ -103,17 +103,28 @@ class TestAsanaTools(unittest.TestCase):
         # Call function without workspace
         result = get_asana_tasks()
         
+        # Assert - should return error message when no preference is set
+        self.assertEqual(result, "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool.")
+        
+        # Verify get_preference was called
+        mock_get_pref.assert_called_once_with('asana_workspace_preference')
+        
+        # Now test with a preference set
+        mock_get_pref.reset_mock()
+        mock_get_pref.return_value = 'workspace2'
+        
+        # Call function without workspace
+        result = get_asana_tasks()
+        
         # Assert
-        expected_tasks = [task for task in self.mock_tasks if task['due_on'] == self.today]
+        expected_tasks = [task for task in self.mock_tasks if task.get('due_on') == self.today]
         self.assertEqual(result, expected_tasks)
         
-        # Verify it used the second workspace
-        mock_task_api.get_tasks.assert_called_once_with({
+        # Verify it used the preferred workspace
+        mock_task_api.get_tasks.assert_called_with({
             'workspace': 'workspace2',
             'assignee': 'user1',
             'completed_since': 'now',
-            'due_on.after': self.today,
-            'due_on.before': self.today,
             'opt_fields': 'name,due_on,completed,projects.name'
         })
         
@@ -122,18 +133,25 @@ class TestAsanaTools(unittest.TestCase):
 
     @patch('asana.WorkspacesApi')
     @patch('asana.ApiClient')
-    def test_get_tasks_no_workspaces(self, mock_client, mock_workspaces_api):
+    @patch('asana_tools.get_preference')
+    def test_get_tasks_no_workspaces(self, mock_get_pref, mock_client, mock_workspaces_api):
         """Test handling no workspaces case"""
         # Setup mock to return empty workspace list
         mock_api = MagicMock()
         mock_workspaces_api.return_value = mock_api
         mock_api.get_workspaces.return_value = []
         
+        # Mock preference to return None
+        mock_get_pref.return_value = None
+        
         # Call function
         result = get_asana_tasks()
         
         # Assert
-        self.assertEqual(result, "No workspaces found")
+        self.assertEqual(result, "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool.")
+        
+        # Verify get_preference was called
+        mock_get_pref.assert_called_once_with('asana_workspace_preference')
 
     @patch('asana_tools.datetime')
     def test_get_date_range(self, mock_datetime):
@@ -193,8 +211,6 @@ class TestAsanaTools(unittest.TestCase):
             'workspace': 'workspace1',
             'assignee': 'user1',
             'completed_since': 'now',
-            'due_on.after': '2024-03-15',
-            'due_on.before': '2024-03-16',
             'opt_fields': 'name,due_on,completed,projects.name'
         })
 
@@ -309,6 +325,149 @@ class TestAsanaTools(unittest.TestCase):
             'completed_since': 'now',
             'opt_fields': 'name,due_on,completed,projects.name,num_subtasks'
         })
+        
+        # Verify get_preference was called
+        mock_get_pref.assert_called_once_with('asana_workspace_preference')
+
+    @patch('asana.TasksApi')
+    @patch('asana.WorkspacesApi')
+    @patch('asana.UsersApi')
+    @patch('asana.ApiClient')
+    @patch('asana_tools.datetime')
+    @patch('asana_tools.get_preference')
+    def test_create_asana_task(self, mock_get_pref, mock_datetime, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
+        """Test creating a task in Asana"""
+        # Setup mocks
+        mock_datetime.now.return_value = self.fixed_date
+        mock_user_api = MagicMock()
+        mock_users_api.return_value = mock_user_api
+        mock_user_api.get_user.return_value = {'gid': 'user1'}
+        
+        # Mock preference to return None (no preference set)
+        mock_get_pref.return_value = None
+        
+        # Mock workspaces
+        mock_workspace_api = MagicMock()
+        mock_workspaces_api.return_value = mock_workspace_api
+        mock_workspace_api.get_workspaces.return_value = self.mock_workspaces
+        
+        # Mock task creation
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.create_task.return_value = {'gid': 'new_task1', 'name': 'New Task'}
+        
+        # Call function with specific workspace
+        result = create_asana_task('New Task', 'workspace1', '2024-03-20', 'Task notes')
+        
+        # Assert
+        self.assertEqual(result['gid'], 'new_task1')
+        self.assertEqual(result['name'], 'New Task')
+        
+        # Verify correct API calls
+        mock_task_api.create_task.assert_called_once_with(
+            body={'data': {
+                'name': 'New Task',
+                'workspace': 'workspace1',
+                'assignee': 'user1',
+                'due_on': '2024-03-20',
+                'notes': 'Task notes'
+            }},
+            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+        )
+        
+        # Verify get_preference was not called since we provided a workspace
+        mock_get_pref.assert_not_called()
+        
+    @patch('asana.TasksApi')
+    @patch('asana.WorkspacesApi')
+    @patch('asana.UsersApi')
+    @patch('asana.ApiClient')
+    @patch('asana_tools.datetime')
+    @patch('asana_tools.get_preference')
+    def test_create_asana_subtask(self, mock_get_pref, mock_datetime, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
+        """Test creating a subtask in Asana"""
+        # Setup mocks
+        mock_datetime.now.return_value = self.fixed_date
+        mock_user_api = MagicMock()
+        mock_users_api.return_value = mock_user_api
+        mock_user_api.get_user.return_value = {'gid': 'user1'}
+        
+        # Mock preference to return None (no preference set)
+        mock_get_pref.return_value = None
+        
+        # Mock workspaces
+        mock_workspace_api = MagicMock()
+        mock_workspaces_api.return_value = mock_workspace_api
+        mock_workspace_api.get_workspaces.return_value = self.mock_workspaces
+        
+        # Mock task creation
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.create_subtask_for_task.return_value = {'gid': 'new_subtask1', 'name': 'New Subtask'}
+        
+        # Call function with specific workspace and parent task
+        result = create_asana_task('New Subtask', 'workspace1', '2024-03-20', 'Subtask notes', 'parent_task1')
+        
+        # Assert
+        self.assertEqual(result['gid'], 'new_subtask1')
+        self.assertEqual(result['name'], 'New Subtask')
+        
+        # Verify correct API calls
+        mock_task_api.create_subtask_for_task.assert_called_once_with(
+            task_gid='parent_task1',
+            body={'data': {
+                'name': 'New Subtask',
+                'workspace': 'workspace1',
+                'assignee': 'user1',
+                'due_on': '2024-03-20',
+                'notes': 'Subtask notes'
+            }},
+            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+        )
+        
+        # Verify get_preference was not called since we provided a workspace
+        mock_get_pref.assert_not_called()
+        
+    @patch('asana.TasksApi')
+    @patch('asana.WorkspacesApi')
+    @patch('asana.UsersApi')
+    @patch('asana.ApiClient')
+    @patch('asana_tools.datetime')
+    @patch('asana_tools.get_preference')
+    def test_create_asana_task_with_preference(self, mock_get_pref, mock_datetime, mock_client, mock_users_api, mock_workspaces_api, mock_tasks_api):
+        """Test creating a task in Asana with a workspace preference set"""
+        # Setup mocks
+        mock_datetime.now.return_value = self.fixed_date
+        mock_user_api = MagicMock()
+        mock_users_api.return_value = mock_user_api
+        mock_user_api.get_user.return_value = {'gid': 'user1'}
+        
+        # Mock preference to return a workspace
+        mock_get_pref.return_value = 'preferred_workspace'
+        
+        # Mock task creation
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.create_task.return_value = {'gid': 'new_task1', 'name': 'New Task'}
+        
+        # Call function without specifying a workspace
+        result = create_asana_task('New Task', due_date='2024-03-20', notes='Task notes')
+        
+        # Assert
+        self.assertEqual(result['gid'], 'new_task1')
+        self.assertEqual(result['name'], 'New Task')
+        
+        # Verify correct API calls
+        mock_task_api.create_task.assert_called_once_with(
+            body={'data': {
+                'name': 'New Task',
+                'workspace': 'preferred_workspace',
+                'assignee': 'user1',
+                'due_on': '2024-03-20',
+                'notes': 'Task notes'
+            }},
+            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+        )
         
         # Verify get_preference was called
         mock_get_pref.assert_called_once_with('asana_workspace_preference')

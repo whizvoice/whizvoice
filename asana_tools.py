@@ -6,7 +6,6 @@ import json
 from preferences import get_preference, set_preference
 
 def get_date_range(range_str=None):
-    """Convert date range string to start and end dates"""
     today = datetime.now().date()
     
     if not range_str:  # Default to today
@@ -23,7 +22,6 @@ def get_date_range(range_str=None):
     return today, today  # Default to today if range not recognized
 
 def get_asana_workspaces():
-    """Get all available workspaces"""
     configuration = asana.Configuration()
     configuration.access_token = ASANA_ACCESS_TOKEN
     api_client = asana.ApiClient(configuration)
@@ -36,89 +34,62 @@ def get_asana_workspaces():
         return f"Error accessing Asana API: {str(e)}"
 
 def get_asana_tasks(workspace_gid=None, start_date=None, end_date=None):
-    """Get tasks assigned to the current user within a date range
-    
-    Args:
-        workspace_gid (str, optional): Workspace to get tasks from. Defaults to second workspace.
-        start_date (str, optional): Start date in YYYY-MM-DD format. Defaults to today.
-        end_date (str, optional): End date in YYYY-MM-DD format. Defaults to start_date.
-    """
     configuration = asana.Configuration()
     configuration.access_token = ASANA_ACCESS_TOKEN
     api_client = asana.ApiClient(configuration)
 
+    if not workspace_gid:
+        workspace_gid = get_preference('asana_workspace_preference')
+        if not workspace_gid:
+            return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
     try:
         # Get current user
         users_api = asana.UsersApi(api_client)
         me = users_api.get_user("me", {})
 
-        # If no workspace specified, try preference then default to second
-        if not workspace_gid:
-            workspace_gid = get_preference('asana_workspace_preference')
-            
-            if not workspace_gid:
-                workspaces = list(asana.WorkspacesApi(api_client).get_workspaces({}))
-                if not workspaces:
-                    return "No workspaces found"
-                if len(workspaces) < 2:
-                    return "Only one workspace found"
-                workspace_gid = workspaces[1]['gid']
-
         # Handle date defaults
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = get_current_date()
         if not start_date:
             start_date = today
         if not end_date:
             end_date = start_date
             
         tasks_api = asana.TasksApi(api_client)
+        
+        # Get tasks using the regular Tasks API
         tasks = list(tasks_api.get_tasks({
             'workspace': workspace_gid,
             'assignee': me['gid'],
             'completed_since': 'now',
-            'due_on.after': start_date,
-            'due_on.before': end_date,
             'opt_fields': 'name,due_on,completed,projects.name'
         }))
+
+        # Filter out any tasks that don't have a due date
+        tasks = [task for task in tasks if task.get('due_on') is not None]
         
-        # Filter tasks to match date range
-        tasks = [task for task in tasks 
-                if task.get('due_on') and 
-                start_date <= task['due_on'] <= end_date]
+        # Filter tasks by date range
+        tasks = [task for task in tasks if start_date <= task['due_on'] <= end_date]
+        
         return tasks
     except ApiException as e:
         return f"Error accessing Asana API: {str(e)}"
 
 def get_current_date():
-    """Get today's date in YYYY-MM-DD format"""
     return datetime.now().strftime('%Y-%m-%d')
 
 def get_parent_tasks(workspace_gid=None):
-    """Get all parent tasks (tasks with subtasks) in a workspace
-    
-    Args:
-        workspace_gid (str, optional): Workspace to get tasks from. Defaults to preferred workspace.
-    """
     configuration = asana.Configuration()
     configuration.access_token = ASANA_ACCESS_TOKEN
     api_client = asana.ApiClient(configuration)
 
+    if not workspace_gid:
+        workspace_gid = get_preference('asana_workspace_preference')
+        if not workspace_gid:
+            return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
     try:
         # Get current user
         users_api = asana.UsersApi(api_client)
         me = users_api.get_user("me", {})
-
-        # If no workspace specified, try preference then default to second
-        if not workspace_gid:
-            workspace_gid = get_preference('asana_workspace_preference')
-            
-            if not workspace_gid:
-                workspaces = list(asana.WorkspacesApi(api_client).get_workspaces({}))
-                if not workspaces:
-                    return "No workspaces found"
-                if len(workspaces) < 2:
-                    return "Only one workspace found"
-                workspace_gid = workspaces[1]['gid']
             
         tasks_api = asana.TasksApi(api_client)
         
@@ -138,6 +109,46 @@ def get_parent_tasks(workspace_gid=None):
         return parent_tasks
     except ApiException as e:
         return f"Error accessing Asana API: {str(e)}"
+
+def create_asana_task(name, workspace_gid=None, due_date=None, notes=None, parent_task_gid=None):
+    configuration = asana.Configuration()
+    configuration.access_token = ASANA_ACCESS_TOKEN
+    api_client = asana.ApiClient(configuration)
+
+    if not workspace_gid:
+        workspace_gid = get_preference('asana_workspace_preference')
+        if not workspace_gid:
+            return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
+
+    try:
+        # Get current user
+        users_api = asana.UsersApi(api_client)
+        me = users_api.get_user("me", {})
+            
+        tasks_api = asana.TasksApi(api_client)
+        
+        # Prepare task data
+        task_data = {
+            'name': name,
+            'workspace': workspace_gid,
+            'assignee': me['gid']
+        }
+        
+        # Add optional fields if provided
+        if due_date:
+            task_data['due_on'] = due_date
+        if notes:
+            task_data['notes'] = notes
+            
+        # Create the task
+        if parent_task_gid is None:
+            new_task = tasks_api.create_task(body={'data': task_data}, opts={'opt_fields': 'name,due_on,completed,projects.name'})
+        else:
+            new_task = tasks_api.create_subtask_for_task(body={'data': task_data}, task_gid=parent_task_gid, opts={'opt_fields': 'name,due_on,completed,projects.name'})
+
+        return new_task
+    except ApiException as e:
+        return f"Error creating Asana task: {str(e)}"
 
 # Define available tools
 tools = [
@@ -169,7 +180,7 @@ tools = [
     {
         "type": "custom",
         "name": "get_current_date",
-        "description": "Get today's date in YYYY-MM-DD format. Use this to format dates correctly when querying tasks.",
+        "description": "Get today's date in YYYY-MM-DD format.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -179,21 +190,21 @@ tools = [
     {
         "type": "custom",
         "name": "get_asana_tasks",
-        "description": "Get tasks from Asana within a specific date range. Dates must be in YYYY-MM-DD format (e.g., '2024-03-15'). Use get_current_date to get today's date in the correct format. If you're not sure what workspace to use, check the user's workspace preference. If the user doesn't have a preference set, ask them to choose a preferred workspace and save that preference.",
+        "description": "Get tasks assigned to the current user within a date range. If no workspace is specified, the user's preferred workspace is used automatically. If the user doesn't specify the date, no need to include start_date or end_date; it will default to today.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "workspace_gid": {
                     "type": "string",
-                    "description": "The GID of the workspace to get tasks from"
+                    "description": "Workspace to get tasks from. If no workspace is specified, the user's preferred workspace is used automatically." 
                 },
                 "start_date": {
                     "type": "string",
-                    "description": "Start date in YYYY-MM-DD format. Use get_current_date to get today's date."
+                    "description": "Start date in YYYY-MM-DD format. Defaults to today."
                 },
                 "end_date": {
                     "type": "string",
-                    "description": "End date in YYYY-MM-DD format. Use get_current_date to get today's date."
+                    "description": "End date in YYYY-MM-DD format. Defaults to start_date."
                 }
             },
             "required": []
@@ -202,7 +213,7 @@ tools = [
     {
         "type": "custom",
         "name": "get_asana_workspaces",
-        "description": "Get information about Asana workspaces.",
+        "description": "Get all available workspaces.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -212,16 +223,47 @@ tools = [
     {
         "type": "custom",
         "name": "get_parent_tasks",
-        "description": "Get all parent tasks (tasks with subtasks) that are not completed in a workspace. If no workspace is specified, it will use your preferred workspace.",
+        "description": "Get all parent tasks (tasks with subtasks) in a workspace.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "workspace_gid": {
                     "type": "string",
-                    "description": "The GID of the workspace to get tasks from"
+                    "description": "Workspace to get tasks from. Please use the user's preferred workspace if they haven't specified one, and give them the opportunity to set a preferred workspace if they haven't already."
                 }
             },
             "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "create_asana_task",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. If no workspace is specified, the user's preferred workspace is used automatically. Before using this tool, please guess what the parent task should be based on the name of the task and existing parent tasks, and confirm with the user.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the task to create"
+                },
+                "workspace_gid": {
+                    "type": "string",
+                    "description": "Workspace to create the task in. If no workspace is specified, the user's preferred workspace is used automatically."
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "Due date in YYYY-MM-DD format. Defaults to today."
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Notes/description for the task. Defaults to None."
+                },
+                "parent_task_gid": {
+                    "type": "string",
+                    "description": "GID of the parent task if this is a subtask. While it is not required, please try to provide a parent task GID if possible to prevent tasks from getting lost in the user's inbox."
+                }
+            },
+            "required": ["name"]
         }
     }
 ] 
