@@ -1,7 +1,9 @@
 import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
-from asana_tools import get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date, get_parent_tasks, create_asana_task
+from asana_tools import get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
+from asana.rest import ApiException
+from preferences import set_preference, get_preference
 
 class TestAsanaTools(unittest.TestCase):
     @patch('asana_tools.datetime')
@@ -349,14 +351,14 @@ class TestAsanaTools(unittest.TestCase):
         # Mock workspaces
         mock_workspace_api = MagicMock()
         mock_workspaces_api.return_value = mock_workspace_api
-        mock_workspace_api.get_workspaces.return_value = self.mock_workspaces
+        mock_workspaces_api.get_workspaces.return_value = self.mock_workspaces
         
         # Mock task creation
         mock_task_api = MagicMock()
         mock_tasks_api.return_value = mock_task_api
         mock_task_api.create_task.return_value = {'gid': 'new_task1', 'name': 'New Task'}
         
-        # Call function with specific workspace
+        # Test creating task with specific due date
         result = create_asana_task('New Task', 'workspace1', '2024-03-20', 'Task notes')
         
         # Assert
@@ -370,6 +372,22 @@ class TestAsanaTools(unittest.TestCase):
                 'workspace': 'workspace1',
                 'assignee': 'user1',
                 'due_on': '2024-03-20',
+                'notes': 'Task notes'
+            }},
+            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+        )
+        
+        # Test creating task with default due date (today)
+        mock_task_api.reset_mock()
+        result = create_asana_task('New Task', 'workspace1', notes='Task notes')
+        
+        # Verify correct API calls with today's date
+        mock_task_api.create_task.assert_called_once_with(
+            body={'data': {
+                'name': 'New Task',
+                'workspace': 'workspace1',
+                'assignee': 'user1',
+                'due_on': self.today,
                 'notes': 'Task notes'
             }},
             opts={'opt_fields': 'name,due_on,completed,projects.name'}
@@ -450,7 +468,7 @@ class TestAsanaTools(unittest.TestCase):
         mock_tasks_api.return_value = mock_task_api
         mock_task_api.create_task.return_value = {'gid': 'new_task1', 'name': 'New Task'}
         
-        # Call function without specifying a workspace
+        # Test creating task with specific due date
         result = create_asana_task('New Task', due_date='2024-03-20', notes='Task notes')
         
         # Assert
@@ -469,8 +487,113 @@ class TestAsanaTools(unittest.TestCase):
             opts={'opt_fields': 'name,due_on,completed,projects.name'}
         )
         
+        # Test creating task with default due date (today)
+        mock_task_api.reset_mock()
+        result = create_asana_task('New Task', notes='Task notes')
+        
+        # Verify correct API calls with today's date
+        mock_task_api.create_task.assert_called_once_with(
+            body={'data': {
+                'name': 'New Task',
+                'workspace': 'preferred_workspace',
+                'assignee': 'user1',
+                'due_on': self.today,
+                'notes': 'Task notes'
+            }},
+            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+        )
+        
         # Verify get_preference was called
-        mock_get_pref.assert_called_once_with('asana_workspace_preference')
+        mock_get_pref.assert_called_with('asana_workspace_preference')
+
+    @patch('asana.TasksApi')
+    @patch('asana.ApiClient')
+    def test_change_task_parent(self, mock_client, mock_tasks_api):
+        """Test changing a task's parent"""
+        # Mock task API
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        
+        # Create a mock response for set_parent_for_task
+        mock_response = {
+            'gid': 'task123',
+            'name': 'Test Task',
+            'parent': {'gid': 'parent456', 'name': 'New Parent Task'}
+        }
+        mock_task_api.set_parent_for_task.return_value = mock_response
+        
+        # Test setting a new parent
+        result = change_task_parent('task123', 'parent456')
+        
+        # Assert
+        self.assertEqual(result['gid'], 'task123')
+        self.assertEqual(result['parent']['gid'], 'parent456')
+        
+        # Verify correct API calls
+        mock_task_api.set_parent_for_task.assert_called_once_with(
+            body={'data': {'parent': 'parent456'}},
+            task_gid='task123',
+            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+        )
+        
+        # Test removing parent (making task standalone)
+        mock_task_api.reset_mock()
+        mock_response = {
+            'gid': 'task123',
+            'name': 'Test Task',
+            'parent': None
+        }
+        mock_task_api.set_parent_for_task.return_value = mock_response
+        
+        result = change_task_parent('task123', None)
+        
+        # Assert
+        self.assertEqual(result['gid'], 'task123')
+        self.assertIsNone(result['parent'])
+        
+        # Verify correct API calls
+        mock_task_api.set_parent_for_task.assert_called_once_with(
+            body={'data': {'parent': None}},
+            task_gid='task123',
+            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+        )
+
+    @patch('preferences.load_preferences')
+    @patch('preferences.save_preferences')
+    def test_set_workspace_preference(self, mock_save_prefs, mock_load_prefs):
+        """Test setting workspace preference"""
+        # Mock load_preferences to return a dict
+        mock_load_prefs.return_value = {'asana_workspace_preference': None}
+        
+        # Mock save_preferences to return success
+        mock_save_prefs.return_value = True
+        
+        # Call function
+        result = set_preference('asana_workspace_preference', 'workspace1')
+        
+        # Assert
+        self.assertTrue(result)
+        
+        # Verify load_preferences was called
+        mock_load_prefs.assert_called_once()
+        
+        # Verify save_preferences was called with the updated preferences
+        mock_save_prefs.assert_called_once_with({'asana_workspace_preference': 'workspace1'})
+        
+    @patch('preferences.load_preferences')
+    def test_get_workspace_preference(self, mock_load_prefs):
+        """Test getting workspace preference"""
+        # Mock load_preferences to return a dict with a workspace
+        mock_load_prefs.return_value = {'asana_workspace_preference': 'workspace1'}
+        
+        # Call function
+        result = get_preference('asana_workspace_preference')
+        
+        # Assert
+        self.assertEqual(result, 'workspace1')
+        
+        # Verify load_preferences was called
+        mock_load_prefs.assert_called_once()
 
 if __name__ == '__main__':
     unittest.main() 

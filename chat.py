@@ -3,7 +3,7 @@ import traceback
 
 from anthropic import Anthropic
 from constants import CLAUDE_API_KEY
-from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task
+from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
 from preferences import set_preference, get_preference
 
 
@@ -51,6 +51,10 @@ def execute_tool(tool_name, tool_args):
         notes = tool_args.get('notes')
         parent_task_gid = tool_args.get('parent_task_gid')
         return create_asana_task(name, workspace_gid, due_date, notes, parent_task_gid)
+    elif tool_name == 'change_task_parent':
+        task_gid = tool_args.get('task_gid')
+        new_parent_gid = tool_args.get('new_parent_gid')
+        return change_task_parent(task_gid, new_parent_gid)
     raise ValueError(f"Unknown tool: {tool_name}")
 
 class ChatSession:

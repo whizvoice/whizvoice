@@ -127,16 +127,19 @@ def create_asana_task(name, workspace_gid=None, due_date=None, notes=None, paren
             
         tasks_api = asana.TasksApi(api_client)
         
+        # Set due_date to today if not provided
+        if due_date is None:
+            due_date = get_current_date()
+        
         # Prepare task data
         task_data = {
             'name': name,
             'workspace': workspace_gid,
-            'assignee': me['gid']
+            'assignee': me['gid'],
+            'due_on': due_date
         }
         
         # Add optional fields if provided
-        if due_date:
-            task_data['due_on'] = due_date
         if notes:
             task_data['notes'] = notes
             
@@ -149,6 +152,24 @@ def create_asana_task(name, workspace_gid=None, due_date=None, notes=None, paren
         return new_task
     except ApiException as e:
         return f"Error creating Asana task: {str(e)}"
+
+def change_task_parent(task_gid, new_parent_gid=None):
+    configuration = asana.Configuration()
+    configuration.access_token = ASANA_ACCESS_TOKEN
+    api_client = asana.ApiClient(configuration)
+
+    try:
+        tasks_api = asana.TasksApi(api_client)
+        # Update the task's parent
+        updated_task = tasks_api.set_parent_for_task(
+            body={'data': {'parent': new_parent_gid}},
+            task_gid=task_gid,
+            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+        )
+        print(f"DEBUG: Updated task: {updated_task}")
+        return updated_task
+    except ApiException as e:
+        return f"Error changing task parent: {str(e)}"
 
 # Define available tools
 tools = [
@@ -264,6 +285,25 @@ tools = [
                 }
             },
             "required": ["name"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "change_task_parent",
+        "description": "Change the parent task of an existing task. If new_parent_gid is None, the task will become a standalone task (no parent).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_gid": {
+                    "type": "string",
+                    "description": "The GID of the task to update"
+                },
+                "new_parent_gid": {
+                    "type": "string",
+                    "description": "The GID of the new parent task. If None, the task will become a standalone task."
+                }
+            },
+            "required": ["task_gid"]
         }
     }
 ] 
