@@ -31,9 +31,9 @@ sudo service nginx reload
 2. Set up HTTPS with Let's Encrypt:
 
 ```
-sudo certbot certonly --force-renewal -a webroot -w /var/www/antimonopoly.club -d antimonopoly.club -w /var/www/antimonopoly.club -d www.antimonopoly.club
+sudo certbot certonly --force-renewal -a webroot -w /var/www/whizvoice/whizvoice.com -d whizvoice.com -w /var/www/whizvoice/whizvoice.com -d www.whizvoice.com
 
-sudo ln -fs /var/www/antimonopoly.club/nginx/antimonopoly.club.conf /etc/nginx/conf.d/antimonopoly.club.conf
+sudo ln -fs /var/www/whizvoice/whizvoice.com/nginx/whizvoice.com.conf /etc/nginx/conf.d/whizvoice.com.conf
 
 sudo service nginx reload
 ```
