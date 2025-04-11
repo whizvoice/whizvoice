@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Whiz Voice - Work Hands Free</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        'courier': ['"Courier Prime"', 'monospace'],
+                    },
+                    colors: {
+                        'whiz-yellow': '#F8DE7E',
+                    },
+                    animation: {
+                        'float': 'float 3s ease-in-out infinite',
+                    },
+                    keyframes: {
+                        float: {
+                            '0%, 100%': { transform: 'translateY(0)' },
+                            '50%': { transform: 'translateY(-10px)' },
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body class="font-courier bg-whiz-yellow m-0 p-0 flex flex-col items-center justify-center min-h-screen text-center">
+    <div class="max-w-3xl p-8">
+        <div class="mb-6">
+            <img src="whizrobot.svg" alt="Whiz Voice Robot Logo" class="w-36 h-auto mx-auto animate-float">
+        </div>
+        <h1 class="text-5xl font-bold mb-2">Whiz Voice</h1>
+        <div class="text-2xl mb-8">Work hands free</div>
+
+
+        <div class="text-xl mb-8">
+            <a href="https://whizvoice.substack.com" class="underline">Subscribe for updates.</a> Already voice-pilled? Frustrated with Google Assistant? Join our beta waitlist
+        </div>
+        
+        <div class="mb-12">
+            <a href="https://forms.gle/DFH1mqaCZ9j9aesd9" target="_blank" class="inline-block bg-gray-800 text-white no-underline py-3 px-6 rounded-full text-lg font-bold transition-all duration-300 hover:bg-gray-700 hover:-translate-y-0.5">Join Waitlist</a>
+        </div>
+        
+        <div class="text-sm mt-8">
+            Made with ♥ by <a href="https://x.com/ruthgracewong" target="_blank" class="text-gray-800 no-underline font-bold transition-colors duration-300 hover:text-gray-600 hover:underline">Ruth Grace Wong</a> and <a href="https://github.com/arturtsurkan" target="_blank" class="text-gray-800 no-underline font-bold transition-colors duration-300 hover:text-gray-600 hover:underline">Artur Tsurkan</a>
+        </div>
+    </div>
+</body>
+</html> 
