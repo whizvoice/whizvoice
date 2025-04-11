@@ -1,0 +1,17 @@
+server {
+	listen 80;
+    listen [::]:80;
+	server_name whizvoice.com www.whizvoice.com;
+
+    # Set global root
+    root /var/www/whizvoice/whizvoice.com;
+
+    location / {
+        index index.html;
+    }
+
+    location /.well-known/acme-challenge/ {
+        allow all;
+        try_files $uri =404;
+    }
+}
