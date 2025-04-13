@@ -1,8 +1,10 @@
-from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import json
+import os
+import traceback
 
 from anthropic import Anthropic
 from constants import CLAUDE_API_KEY
@@ -48,57 +50,76 @@ async def websocket_endpoint(websocket: WebSocket):
     session_id = "ws_" + str(id(websocket))
     chat_sessions[session_id] = []
     
+    # Send welcome message
+    await websocket.send_text("Hello! I'm Claude with Asana integration.")
+    
     try:
         while True:
-            # Receive message from client
-            message = await websocket.receive_text()
-            
-            # Process message similar to HTTP endpoint
-            chat_sessions[session_id].append({"role": "user", "content": message})
-            
-            response = client.beta.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=1000,
-                messages=chat_sessions[session_id],
-                system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
-                tools=tools,
-                tool_choice={"type": "auto"}
-            )
-            
-            # Handle tool calls
-            while response.stop_reason == 'tool_use':
-                tool_block = next(block for block in response.content if block.type == 'tool_use')
-                result = execute_tool(tool_block.name, tool_block.input)
+            try:
+                # Receive message from client
+                message = await websocket.receive_text()
                 
-                chat_sessions[session_id].extend([
-                    {"role": "assistant", "content": [tool_block]},
-                    {"role": "user", "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": json.dumps(result)
-                    }]}
-                ])
-                
+                # Process message similar to HTTP endpoint
+                chat_sessions[session_id].append({"role": "user", "content": message})
                 response = client.beta.messages.create(
                     model="claude-3-7-sonnet-20250219",
                     max_tokens=1000,
                     messages=chat_sessions[session_id],
                     system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
                     tools=tools,
-                    tool_choice={"type": "auto"}
+                    tool_choice={"type": "auto"},
+                    betas=["token-efficient-tools-2025-02-19"]
                 )
-            
-            # Add assistant response to session
-            chat_sessions[session_id].append({"role": "assistant", "content": response.content})
-            
-            # Send response back to client
-            if response.content[0].type == 'text':
-                await websocket.send_text(response.content[0].text)
-            else:
-                await websocket.send_text("Error: Unexpected response format")
+                
+                # Handle tool calls
+                while response.stop_reason == 'tool_use':
+                    tool_block = next(block for block in response.content if block.type == 'tool_use')
+                    result = execute_tool(tool_block.name, tool_block.input)
+                    
+                    chat_sessions[session_id].extend([
+                        {"role": "assistant", "content": [tool_block]},
+                        {"role": "user", "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tool_block.id,
+                            "content": json.dumps(result)
+                        }]}
+                    ])
+                    
+                    response = client.beta.messages.create(
+                        model="claude-3-7-sonnet-20250219",
+                        max_tokens=1000,
+                        messages=chat_sessions[session_id],
+                        system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
+                        tools=tools,
+                        tool_choice={"type": "auto"},
+                        betas=["token-efficient-tools-2025-02-19"]
+                    )
+                
+                # Add assistant response to session
+                chat_sessions[session_id].append({"role": "assistant", "content": response.content})
+                
+                # Send response back to client
+                if response.content[0].type == 'text':
+                    await websocket.send_text(response.content[0].text)
+                else:
+                    await websocket.send_text("Error: Unexpected response format")
+                    
+            except WebSocketDisconnect:
+                # Clean up the session
+                if session_id in chat_sessions:
+                    del chat_sessions[session_id]
+                break
+            except Exception as e:
+                # Handle other errors
+                await websocket.send_text(f"Error: {str(e)}")
+                await websocket.send_text(f"{traceback.print_exc()}")
+                continue
                 
     except Exception as e:
-        await websocket.close()
+        # Handle any other errors that might occur
+        if session_id in chat_sessions:
+            del chat_sessions[session_id]
+        raise
 
 def execute_tool(tool_name, tool_args):
     """Execute a tool and return its result"""

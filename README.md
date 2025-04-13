@@ -37,8 +37,17 @@ pre-commit install
 
 ## Running the Chatbot
 
-```bash
-python chat.py
+### Development server
+```
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+`chat.py` is the old script that doesn't have a web server 
+
+### Production server
+
+```
+uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
 ## Running Tests

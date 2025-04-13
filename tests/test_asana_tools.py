@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
 from asana_tools import get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from asana.rest import ApiException
+from asana.rest import ApiException as AsanaError
 from preferences import set_preference, get_preference
 
 class TestAsanaTools(unittest.TestCase):

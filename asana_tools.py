@@ -1,6 +1,6 @@
 from constants import ASANA_ACCESS_TOKEN
 import asana
-from asana.rest import ApiException
+from asana.rest import ApiException as AsanaError
 from datetime import datetime, timedelta
 import json
 from preferences import get_preference, set_preference
@@ -30,7 +30,7 @@ def get_asana_workspaces():
         workspaces_api = asana.WorkspacesApi(api_client)
         workspaces = list(workspaces_api.get_workspaces({}))
         return workspaces
-    except ApiException as e:
+    except AsanaError as e:
         return f"Error accessing Asana API: {str(e)}"
 
 def get_asana_tasks(workspace_gid=None, start_date=None, end_date=None):
@@ -71,7 +71,7 @@ def get_asana_tasks(workspace_gid=None, start_date=None, end_date=None):
         tasks = [task for task in tasks if start_date <= task['due_on'] <= end_date]
         
         return tasks
-    except ApiException as e:
+    except AsanaError as e:
         return f"Error accessing Asana API: {str(e)}"
 
 def get_current_date():
@@ -107,7 +107,7 @@ def get_parent_tasks(workspace_gid=None):
                        not task.get('completed', False)]
         
         return parent_tasks
-    except ApiException as e:
+    except AsanaError as e:
         return f"Error accessing Asana API: {str(e)}"
 
 def create_asana_task(name, workspace_gid=None, due_date=None, notes=None, parent_task_gid=None):
@@ -150,7 +150,7 @@ def create_asana_task(name, workspace_gid=None, due_date=None, notes=None, paren
             new_task = tasks_api.create_subtask_for_task(body={'data': task_data}, task_gid=parent_task_gid, opts={'opt_fields': 'name,due_on,completed,projects.name'})
 
         return new_task
-    except ApiException as e:
+    except AsanaError as e:
         return f"Error creating Asana task: {str(e)}"
 
 def change_task_parent(task_gid, new_parent_gid=None):
@@ -168,7 +168,7 @@ def change_task_parent(task_gid, new_parent_gid=None):
         )
         print(f"DEBUG: Updated task: {updated_task}")
         return updated_task
-    except ApiException as e:
+    except AsanaError as e:
         return f"Error changing task parent: {str(e)}"
 
 # Define available tools
