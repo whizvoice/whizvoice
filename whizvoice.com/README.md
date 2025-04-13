@@ -6,7 +6,7 @@ Landing page for Whiz Voice
 
 This runs on an Alma Linux server.
 
-0. clone repo
+0. clone repo to /var/www
 
 ```
 git clone git@github.com:ruthgrace/whizvoice.git
