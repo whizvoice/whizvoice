@@ -35,14 +35,41 @@ ASANA_ACCESS_TOKEN = "your-asana-token"
 pre-commit install
 ```
 
+6. set up service
+
+```bash
+sudo cp whizvoice.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable whizvoice
+sudo systemctl start whizvoice
+```
+
+check the status
+```bash
+sudo systemctl status whizvoice
+```
+
 ## Running the Chatbot
 
 ### Development server
+
 ```
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 `chat.py` is the old script that doesn't have a web server 
+
+Run on mac to communicate with the server via websocket
+
+installation
+```
+brew install websocat
+```
+
+connect
+```
+websocat ws://REDACTED_SERVER_IP:8000/chat
+```
 
 ### Production server
 
