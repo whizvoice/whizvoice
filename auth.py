@@ -16,7 +16,8 @@ SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "your-secret-key-for-jwt-should-be
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 GOOGLE_CLIENT_IDS = [
-    os.environ.get("GOOGLE_CLIENT_ID", "your-google-client-id-here")
+    os.environ.get("GOOGLE_CLIENT_ID", "your-web-client-id.apps.googleusercontent.com"),
+    "2815827813-se3l1u83nqbtda59dtplcbbjsr38oqln.apps.googleusercontent.com"  # Add your new web client ID here
 ]
 
 class AuthError(Exception):
