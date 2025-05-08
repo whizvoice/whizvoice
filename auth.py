@@ -16,8 +16,8 @@ SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "your-secret-key-for-jwt-should-be
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 GOOGLE_CLIENT_IDS = [
-    os.environ.get("GOOGLE_CLIENT_ID", "your-web-client-id.apps.googleusercontent.com"),
-    "2815827813-se3l1u83nqbtda59dtplcbbjsr38oqln.apps.googleusercontent.com"  # Add your new web client ID here
+    "2815827813-se3l1u83nqbtda59dtplcbbjsr38oqln.apps.googleusercontent.com",  # Web client ID
+    "2815827813-kdkrisushm16fsi95533kmll1usm3uco.apps.googleusercontent.com"   # Android client ID
 ]
 
 class AuthError(Exception):
@@ -57,13 +57,18 @@ def verify_google_token(token: str) -> Dict:
     Verify a Google ID token and return the claims
     """
     try:
+        print(f"Attempting to verify Google token with client IDs: {GOOGLE_CLIENT_IDS}")
         # Specify the CLIENT_ID of the app that accesses the backend
         for client_id in GOOGLE_CLIENT_IDS:
             try:
+                print(f"Trying to verify with client ID: {client_id}")
                 idinfo = id_token.verify_oauth2_token(token, requests.Request(), client_id)
+                print(f"Token verification successful with client ID: {client_id}")
+                print(f"Token info: {idinfo}")
                 
                 # ID token is valid. Get the user's Google Account ID
                 if idinfo.get('iss') not in ['accounts.google.com', 'https://accounts.google.com']:
+                    print(f"Invalid issuer: {idinfo.get('iss')}")
                     continue  # Try the next client ID if issuer is wrong
                 
                 return {
@@ -73,14 +78,16 @@ def verify_google_token(token: str) -> Dict:
                     "picture": idinfo.get("picture"),
                     "email_verified": idinfo.get("email_verified", False)
                 }
-            except ValueError:
-                # Invalid token or wrong client ID for this token
+            except ValueError as e:
+                print(f"Token verification failed with client ID {client_id}: {str(e)}")
                 continue
         
         # If we get here, token was not verified with any client ID
+        print("Token verification failed with all client IDs")
         raise AuthError("Invalid Google token")
     
     except Exception as e:
+        print(f"Unexpected error during token verification: {str(e)}")
         raise AuthError(f"Token verification failed: {str(e)}")
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
