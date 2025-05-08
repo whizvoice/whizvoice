@@ -11,7 +11,7 @@ import logging
 from anthropic import Anthropic
 from constants import CLAUDE_API_KEY
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from preferences import set_preference, get_preference
+from preferences import set_preference, get_preference, ensure_user_and_prefs
 from auth import verify_google_token, create_access_token, get_current_user, AuthError
 
 # Configure logging
@@ -67,6 +67,9 @@ async def login_with_google(token_request: GoogleTokenRequest):
     try:
         # Verify the Google token
         user_info = verify_google_token(token_request.token)
+
+        # Ensure user and preferences exist
+        ensure_user_and_prefs(user_info["sub"], email=user_info["email"])
         
         # Create a JWT token for our service
         token_data = {
