@@ -1,15 +1,22 @@
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import json
 import os
 import traceback
+import logging
 
 from anthropic import Anthropic
 from constants import CLAUDE_API_KEY
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
 from preferences import set_preference, get_preference
+from auth import verify_google_token, create_access_token, get_current_user, AuthError
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="WhizVoice API",
@@ -37,54 +44,114 @@ class ChatResponse(BaseModel):
     content: str
     session_id: str
 
+class GoogleTokenRequest(BaseModel):
+    token: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: Dict[str, Any]
+
 # Store active chat sessions
 chat_sessions = {}
+
+# User sessions mapping - maps user IDs to their chat sessions
+user_sessions = {}
 
 @app.get("/")
 async def root():
     return {"message": "Welcome to WhizVoice API"}
 
+@app.post("/auth/google", response_model=TokenResponse)
+async def login_with_google(token_request: GoogleTokenRequest):
+    try:
+        # Verify the Google token
+        user_info = verify_google_token(token_request.token)
+        
+        # Create a JWT token for our service
+        token_data = {
+            "sub": user_info["sub"],
+            "email": user_info["email"],
+            "name": user_info["name"]
+        }
+        
+        access_token = create_access_token(token_data)
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": user_info
+        }
+    except AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Error during Google authentication: {str(e)}")
+        raise HTTPException(status_code=500, detail="Authentication failed")
+
+@app.get("/me")
+async def get_me(current_user: Dict = Depends(get_current_user)):
+    return current_user
+
 @app.websocket("/chat")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    session_id = "ws_" + str(id(websocket))
-    chat_sessions[session_id] = []
-    
-    # Send welcome message
-    await websocket.send_text("Hello! I'm Claude with Asana integration.")
-    
+    # Extract authentication token from query parameters or headers
     try:
-        while True:
+        # Accept the connection first
+        await websocket.accept()
+        
+        # Try to get auth token from query parameters or headers
+        token = None
+        
+        if "authorization" in websocket.headers:
+            auth_header = websocket.headers.get("authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.replace("Bearer ", "")
+        
+        if not token and "token" in websocket.query_params:
+            token = websocket.query_params["token"]
+        
+        # Authenticate if token is present
+        user_id = None
+        if token:
             try:
-                # Receive message from client
-                message = await websocket.receive_text()
+                # Verify token
+                from jwt import decode, InvalidTokenError
+                from auth import SECRET_KEY, ALGORITHM
                 
-                # Process message similar to HTTP endpoint
-                chat_sessions[session_id].append({"role": "user", "content": message})
-                response = client.beta.messages.create(
-                    model="claude-3-7-sonnet-20250219",
-                    max_tokens=1000,
-                    messages=chat_sessions[session_id],
-                    system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
-                    tools=tools,
-                    tool_choice={"type": "auto"},
-                    betas=["token-efficient-tools-2025-02-19"]
-                )
+                payload = decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+                user_id = payload.get("sub")
+                user_email = payload.get("email")
                 
-                # Handle tool calls
-                while response.stop_reason == 'tool_use':
-                    tool_block = next(block for block in response.content if block.type == 'tool_use')
-                    result = execute_tool(tool_block.name, tool_block.input)
+                logger.info(f"Authenticated WebSocket connection for user {user_email}")
+                await websocket.send_text(f"Hello {payload.get('name', 'there')}! I'm Claude with Asana integration.")
+            except InvalidTokenError:
+                logger.warning("Invalid token in WebSocket connection")
+                await websocket.send_text("Authentication failed. Please login again.")
+                await websocket.close(code=1008, reason="Invalid token")
+                return
+        else:
+            # Allow anonymous connections but with warning
+            logger.warning("Anonymous WebSocket connection accepted")
+            await websocket.send_text("Hello! I'm Claude with Asana integration. For a personalized experience, please login.")
+        
+        # Create a session ID
+        session_id = f"ws_{user_id or id(websocket)}"
+        chat_sessions[session_id] = []
+        
+        # Associate session with user if authenticated
+        if user_id:
+            if user_id not in user_sessions:
+                user_sessions[user_id] = []
+            user_sessions[user_id].append(session_id)
+        
+        try:
+            while True:
+                try:
+                    # Receive message from client
+                    message = await websocket.receive_text()
                     
-                    chat_sessions[session_id].extend([
-                        {"role": "assistant", "content": [tool_block]},
-                        {"role": "user", "content": [{
-                            "type": "tool_result",
-                            "tool_use_id": tool_block.id,
-                            "content": json.dumps(result)
-                        }]}
-                    ])
-                    
+                    # Process message similar to HTTP endpoint
+                    chat_sessions[session_id].append({"role": "user", "content": message})
                     response = client.beta.messages.create(
                         model="claude-3-7-sonnet-20250219",
                         max_tokens=1000,
@@ -94,32 +161,80 @@ async def websocket_endpoint(websocket: WebSocket):
                         tool_choice={"type": "auto"},
                         betas=["token-efficient-tools-2025-02-19"]
                     )
-                
-                # Add assistant response to session
-                chat_sessions[session_id].append({"role": "assistant", "content": response.content})
-                
-                # Send response back to client
-                if response.content[0].type == 'text':
-                    await websocket.send_text(response.content[0].text)
-                else:
-                    await websocket.send_text("Error: Unexpected response format")
                     
-            except WebSocketDisconnect:
-                # Clean up the session
-                if session_id in chat_sessions:
-                    del chat_sessions[session_id]
-                break
-            except Exception as e:
-                # Handle other errors
-                await websocket.send_text(f"Error: {str(e)}")
-                await websocket.send_text(f"{traceback.print_exc()}")
-                continue
-                
+                    # Handle tool calls
+                    while response.stop_reason == 'tool_use':
+                        tool_block = next(block for block in response.content if block.type == 'tool_use')
+                        result = execute_tool(tool_block.name, tool_block.input)
+                        
+                        chat_sessions[session_id].extend([
+                            {"role": "assistant", "content": [tool_block]},
+                            {"role": "user", "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": tool_block.id,
+                                "content": json.dumps(result)
+                            }]}
+                        ])
+                        
+                        response = client.beta.messages.create(
+                            model="claude-3-7-sonnet-20250219",
+                            max_tokens=1000,
+                            messages=chat_sessions[session_id],
+                            system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
+                            tools=tools,
+                            tool_choice={"type": "auto"},
+                            betas=["token-efficient-tools-2025-02-19"]
+                        )
+                    
+                    # Add assistant response to session
+                    chat_sessions[session_id].append({"role": "assistant", "content": response.content})
+                    
+                    # Send response back to client
+                    if response.content[0].type == 'text':
+                        await websocket.send_text(response.content[0].text)
+                    else:
+                        await websocket.send_text("Error: Unexpected response format")
+                        
+                except WebSocketDisconnect:
+                    # Clean up the session
+                    cleanup_session(session_id, user_id)
+                    break
+                except Exception as e:
+                    # Handle other errors
+                    logger.error(f"WebSocket error: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    await websocket.send_text(f"Error: {str(e)}")
+                    continue
+                    
+        except Exception as e:
+            # Handle any other errors that might occur
+            cleanup_session(session_id, user_id)
+            logger.error(f"WebSocket error: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
     except Exception as e:
-        # Handle any other errors that might occur
-        if session_id in chat_sessions:
-            del chat_sessions[session_id]
-        raise
+        logger.error(f"Error accepting WebSocket connection: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # Try to send error message if connection was already accepted
+        try:
+            await websocket.send_text(f"Error: {str(e)}")
+            await websocket.close(code=1011)
+        except:
+            pass
+
+def cleanup_session(session_id: str, user_id: Optional[str] = None):
+    """Clean up a session when a WebSocket disconnects"""
+    if session_id in chat_sessions:
+        del chat_sessions[session_id]
+    
+    if user_id and user_id in user_sessions:
+        if session_id in user_sessions[user_id]:
+            user_sessions[user_id].remove(session_id)
+            
+        # Clean up empty user sessions list
+        if not user_sessions[user_id]:
+            del user_sessions[user_id]
 
 def execute_tool(tool_name, tool_args):
     """Execute a tool and return its result"""
