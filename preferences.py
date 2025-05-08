@@ -1,6 +1,11 @@
 from supabase_client import supabase
 import os
 from constants import PGCRYPTO_KEY
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 DEFAULT_PREFERENCES = {
     'asana_workspace_preference': None
@@ -8,24 +13,51 @@ DEFAULT_PREFERENCES = {
 
 
 def ensure_user_and_prefs(user_id, email=None):
-    # Ensure user exists
-    user = supabase.table("users").select("*").eq("user_id", user_id).execute().data
-    if not user:
-        supabase.table("users").insert({"user_id": user_id, "email": email}).execute()
-    # Ensure preferences row exists
-    prefs = supabase.table("user_preferences").select("*").eq("user_id", user_id).execute().data
-    if not prefs:
-        # Insert empty preferences and encrypted_preferences
-        # Use a raw SQL query for pgp_sym_encrypt
-        from supabase import create_client
-        supabase.sql(f"""
-            INSERT INTO user_preferences (user_id, preferences, encrypted_preferences)
-            VALUES (
-                '{user_id}',
-                '{{}}',
-                pgp_sym_encrypt('{{}}', '{PGCRYPTO_KEY}')
-            )
-        """).execute()
+    logger.info(f"Ensuring user and preferences exist for user_id: {user_id}, email: {email}")
+    
+    try:
+        # Ensure user exists
+        logger.debug(f"Checking if user exists in users table for user_id: {user_id}")
+        user = supabase.table("users").select("*").eq("user_id", user_id).execute().data
+        logger.debug(f"User query result: {user}")
+        
+        if not user:
+            logger.info(f"User not found, creating new user with user_id: {user_id}")
+            user_result = supabase.table("users").insert({"user_id": user_id, "email": email}).execute()
+            logger.debug(f"User creation result: {user_result.data}")
+        else:
+            logger.info(f"User already exists: {user}")
+            
+        # Ensure preferences row exists
+        logger.debug(f"Checking if preferences exist for user_id: {user_id}")
+        prefs = supabase.table("user_preferences").select("*").eq("user_id", user_id).execute().data
+        logger.debug(f"Preferences query result: {prefs}")
+        
+        if not prefs:
+            logger.info(f"Preferences not found, creating new preferences for user_id: {user_id}")
+            # Insert empty preferences and encrypted_preferences
+            # Use a raw SQL query for pgp_sym_encrypt
+            from supabase import create_client
+            sql_query = f"""
+                INSERT INTO user_preferences (user_id, preferences, encrypted_preferences)
+                VALUES (
+                    '{user_id}',
+                    '{{}}',
+                    pgp_sym_encrypt('{{}}', '{PGCRYPTO_KEY}')
+                )
+            """
+            logger.debug(f"Executing SQL query: {sql_query}")
+            prefs_result = supabase.sql(sql_query).execute()
+            logger.debug(f"Preferences creation result: {prefs_result.data}")
+        else:
+            logger.info(f"Preferences already exist: {prefs}")
+            
+        logger.info(f"Successfully ensured user and preferences for user_id: {user_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in ensure_user_and_prefs: {str(e)}", exc_info=True)
+        raise
 
 def load_preferences(user_id):
     res = supabase.table("user_preferences").select("preferences").eq("user_id", user_id).execute()
