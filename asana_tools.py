@@ -33,13 +33,13 @@ def get_asana_workspaces():
     except AsanaError as e:
         return f"Error accessing Asana API: {str(e)}"
 
-def get_asana_tasks(workspace_gid=None, start_date=None, end_date=None):
+def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=None):
     configuration = asana.Configuration()
     configuration.access_token = ASANA_ACCESS_TOKEN
     api_client = asana.ApiClient(configuration)
 
     if not workspace_gid:
-        workspace_gid = get_preference('asana_workspace_preference')
+        workspace_gid = get_preference(user_id, 'asana_workspace_preference')
         if not workspace_gid:
             return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
     try:
@@ -77,13 +77,13 @@ def get_asana_tasks(workspace_gid=None, start_date=None, end_date=None):
 def get_current_date():
     return datetime.now().strftime('%Y-%m-%d')
 
-def get_parent_tasks(workspace_gid=None):
+def get_parent_tasks(user_id: str, workspace_gid=None):
     configuration = asana.Configuration()
     configuration.access_token = ASANA_ACCESS_TOKEN
     api_client = asana.ApiClient(configuration)
 
     if not workspace_gid:
-        workspace_gid = get_preference('asana_workspace_preference')
+        workspace_gid = get_preference(user_id, 'asana_workspace_preference')
         if not workspace_gid:
             return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
     try:
@@ -110,13 +110,13 @@ def get_parent_tasks(workspace_gid=None):
     except AsanaError as e:
         return f"Error accessing Asana API: {str(e)}"
 
-def create_asana_task(name, workspace_gid=None, due_date=None, notes=None, parent_task_gid=None):
+def create_asana_task(user_id: str, name, workspace_gid=None, due_date=None, notes=None, parent_task_gid=None):
     configuration = asana.Configuration()
     configuration.access_token = ASANA_ACCESS_TOKEN
     api_client = asana.ApiClient(configuration)
 
     if not workspace_gid:
-        workspace_gid = get_preference('asana_workspace_preference')
+        workspace_gid = get_preference(user_id, 'asana_workspace_preference')
         if not workspace_gid:
             return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
 

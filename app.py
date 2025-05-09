@@ -248,51 +248,43 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
 def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     """Execute a tool and return its result"""
     logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
+    
+    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference"]:
+        return {"error": f"User authentication required for tool: {tool_name}"}
 
-    if tool_name == 'get_asana_workspaces':
+    if tool_name == "get_asana_workspaces":
         return get_asana_workspaces()
-    elif tool_name == 'get_asana_tasks':
+    elif tool_name == "get_asana_tasks":
         workspace_gid = tool_args.get('workspace_gid')
         start_date = tool_args.get('start_date')
         end_date = tool_args.get('end_date')
-        return get_asana_tasks(workspace_gid, start_date, end_date)
-    elif tool_name == 'get_current_date':
+        return get_asana_tasks(user_id, workspace_gid, start_date, end_date)
+    elif tool_name == "get_current_date":
         return get_current_date()
-    elif tool_name == 'set_workspace_preference':
-        if not user_id:
-            logger.error("User ID is required for set_workspace_preference but not provided.")
-            raise ValueError("User context required for set_workspace_preference")
+    elif tool_name == "get_parent_tasks":
         workspace_gid = tool_args.get('workspace_gid')
+        return get_parent_tasks(user_id, workspace_gid)
+    elif tool_name == "create_asana_task":
+        name = tool_args.get('name')
+        workspace_gid = tool_args.get('workspace_gid')
+        due_date = tool_args.get('due_date')
+        notes = tool_args.get('notes')
+        parent_task_gid = tool_args.get('parent_task_gid')
+        if not name:
+            return {"error": "Task name is required."}
+        return create_asana_task(user_id, name, workspace_gid, due_date, notes, parent_task_gid)
+    elif tool_name == "set_workspace_preference":
+        workspace_gid = tool_args.get('workspace_gid')
+        if not workspace_gid:
+            logger.error("Workspace GID is required for set_workspace_preference")
+            raise ValueError("Workspace GID is required for set_workspace_preference")
         return set_preference(user_id, 'asana_workspace_preference', workspace_gid)
-    elif tool_name == 'get_workspace_preference':
+    elif tool_name == "get_workspace_preference":
         if not user_id:
             logger.error("User ID is required for get_workspace_preference but not provided.")
             raise ValueError("User context required for get_workspace_preference")
         return get_preference(user_id, 'asana_workspace_preference')
-    elif tool_name == 'get_parent_tasks':
-        workspace_gid = tool_args.get('workspace_gid')
-        return get_parent_tasks(workspace_gid)
-    elif tool_name == 'create_asana_task':
-        # Assuming create_asana_task does not directly need user_id from whizvoice context
-        # but might need it if preferences were used to get default workspace_gid etc.
-        name = tool_args.get('name')
-        workspace_gid = tool_args.get('workspace_gid')
-        # If workspace_gid is not provided, try to get it from user preferences
-        if not workspace_gid and user_id:
-            logger.debug(f"Workspace GID not provided for create_asana_task, trying user preference for user: {user_id}")
-            preferred_workspace = get_preference(user_id, 'asana_workspace_preference')
-            if preferred_workspace:
-                workspace_gid = preferred_workspace
-                logger.debug(f"Using preferred workspace GID: {workspace_gid} for user: {user_id}")
-            else:
-                logger.warning(f"No workspace GID provided and no preference found for user: {user_id}")
-                # Depending on desired behavior, could raise error or proceed if Asana API handles it
-        
-        due_date = tool_args.get('due_date')
-        notes = tool_args.get('notes')
-        parent_task_gid = tool_args.get('parent_task_gid')
-        return create_asana_task(name, workspace_gid, due_date, notes, parent_task_gid)
-    elif tool_name == 'change_task_parent':
+    elif tool_name == "change_task_parent":
         task_gid = tool_args.get('task_gid')
         new_parent_gid = tool_args.get('new_parent_gid')
         return change_task_parent(task_gid, new_parent_gid)
