@@ -11,7 +11,7 @@ import logging
 from anthropic import Anthropic
 from constants import CLAUDE_API_KEY
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from preferences import set_preference, get_preference, ensure_user_and_prefs
+from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
 
 # Configure logging
@@ -172,7 +172,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Handle tool calls
                     while response.stop_reason == 'tool_use':
                         tool_block = next(block for block in response.content if block.type == 'tool_use')
-                        result = execute_tool(tool_block.name, tool_block.input)
+                        # Pass the authenticated user_id to execute_tool
+                        logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
+                        result = execute_tool(tool_block.name, tool_block.input, user_id)
                         
                         chat_sessions[session_id].extend([
                             {"role": "assistant", "content": [tool_block]},
@@ -243,8 +245,10 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
         if not user_sessions[user_id]:
             del user_sessions[user_id]
 
-def execute_tool(tool_name, tool_args):
+def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     """Execute a tool and return its result"""
+    logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
+
     if tool_name == 'get_asana_workspaces':
         return get_asana_workspaces()
     elif tool_name == 'get_asana_tasks':
@@ -255,16 +259,35 @@ def execute_tool(tool_name, tool_args):
     elif tool_name == 'get_current_date':
         return get_current_date()
     elif tool_name == 'set_workspace_preference':
+        if not user_id:
+            logger.error("User ID is required for set_workspace_preference but not provided.")
+            raise ValueError("User context required for set_workspace_preference")
         workspace_gid = tool_args.get('workspace_gid')
-        return set_preference('asana_workspace_preference', workspace_gid)
+        return set_preference(user_id, 'asana_workspace_preference', workspace_gid)
     elif tool_name == 'get_workspace_preference':
-        return get_preference('asana_workspace_preference')
+        if not user_id:
+            logger.error("User ID is required for get_workspace_preference but not provided.")
+            raise ValueError("User context required for get_workspace_preference")
+        return get_preference(user_id, 'asana_workspace_preference')
     elif tool_name == 'get_parent_tasks':
         workspace_gid = tool_args.get('workspace_gid')
         return get_parent_tasks(workspace_gid)
     elif tool_name == 'create_asana_task':
+        # Assuming create_asana_task does not directly need user_id from whizvoice context
+        # but might need it if preferences were used to get default workspace_gid etc.
         name = tool_args.get('name')
         workspace_gid = tool_args.get('workspace_gid')
+        # If workspace_gid is not provided, try to get it from user preferences
+        if not workspace_gid and user_id:
+            logger.debug(f"Workspace GID not provided for create_asana_task, trying user preference for user: {user_id}")
+            preferred_workspace = get_preference(user_id, 'asana_workspace_preference')
+            if preferred_workspace:
+                workspace_gid = preferred_workspace
+                logger.debug(f"Using preferred workspace GID: {workspace_gid} for user: {user_id}")
+            else:
+                logger.warning(f"No workspace GID provided and no preference found for user: {user_id}")
+                # Depending on desired behavior, could raise error or proceed if Asana API handles it
+        
         due_date = tool_args.get('due_date')
         notes = tool_args.get('notes')
         parent_task_gid = tool_args.get('parent_task_gid')
@@ -273,6 +296,15 @@ def execute_tool(tool_name, tool_args):
         task_gid = tool_args.get('task_gid')
         new_parent_gid = tool_args.get('new_parent_gid')
         return change_task_parent(task_gid, new_parent_gid)
+    # Add cases for get_preference_key and set_preference_key if they are actual tool names
+    # Example if 'get_user_preference_key' is a tool name:
+    # elif tool_name == 'get_user_preference_key':
+    #     if not user_id:
+    #         raise ValueError("User context required")
+    #     key = tool_args.get('key')
+    #     return get_preference_key(user_id, key)
+    
+    logger.error(f"Unknown tool requested: {tool_name}")
     raise ValueError(f"Unknown tool: {tool_name}")
 
 if __name__ == "__main__":
