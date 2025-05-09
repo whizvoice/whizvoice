@@ -5,6 +5,7 @@ from jwt.exceptions import InvalidTokenError
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 import os
+from constants import GOOGLE_WEB_CLIENT_SECRET
 from google.oauth2 import id_token
 from google.auth.transport import requests
 
@@ -12,7 +13,7 @@ from google.auth.transport import requests
 security = HTTPBearer()
 
 # Configuration (ideally stored in environment variables)
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "your-secret-key-for-jwt-should-be-kept-secret")
+SECRET_KEY = GOOGLE_WEB_CLIENT_SECRET
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 GOOGLE_CLIENT_IDS = [

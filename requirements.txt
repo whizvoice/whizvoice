@@ -15,3 +15,4 @@ asana==5.1.0
 coverage>=7.8.0
 pre-commit>=3.6.0
 httpx==0.28.1
+supabase==2.15.1
