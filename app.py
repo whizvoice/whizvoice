@@ -12,11 +12,14 @@ from anthropic import Anthropic
 from constants import CLAUDE_API_KEY
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
 from preferences import set_preference, get_preference, ensure_user_and_prefs
-from auth import verify_google_token, create_access_token, get_current_user, AuthError
+from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Log the SECRET_KEY being used by this module instance for WebSocket auth
+logger.info(f"App module (WebSocket) AUTH_SECRET_KEY: {AUTH_SECRET_KEY[:5]}...{AUTH_SECRET_KEY[-5:] if len(AUTH_SECRET_KEY) > 10 else ''}")
 
 app = FastAPI(
     title="WhizVoice API",
@@ -118,17 +121,18 @@ async def websocket_endpoint(websocket: WebSocket):
         if token:
             try:
                 # Verify token
-                from jwt import decode, InvalidTokenError
-                from auth import SECRET_KEY, ALGORITHM
+                from jose import jwt, JWTError
                 
-                payload = decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+                logger.debug(f"WebSocket attempting to verify token (first 15 chars): {token[:15]}...")
+                payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
                 user_id = payload.get("sub")
                 user_email = payload.get("email")
+                user_name = payload.get("name", "there")
                 
-                logger.info(f"Authenticated WebSocket connection for user {user_email}")
-                await websocket.send_text(f"Hello {payload.get('name', 'there')}! I'm Claude with Asana integration.")
-            except InvalidTokenError:
-                logger.warning("Invalid token in WebSocket connection")
+                logger.info(f"Authenticated WebSocket connection for user {user_email} ({user_id})")
+                await websocket.send_text(f"Hello {user_name}! I'm Claude with Asana integration.")
+            except JWTError as e:
+                logger.warning(f"Invalid JWT in WebSocket connection: {str(e)}. Token (first 15 chars): {token[:15]}...")
                 await websocket.send_text("Authentication failed. Please login again.")
                 await websocket.close(code=1008, reason="Invalid token")
                 return
