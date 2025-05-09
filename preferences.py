@@ -35,20 +35,8 @@ def ensure_user_and_prefs(user_id, email=None):
         
         if not prefs:
             logger.info(f"Preferences not found, creating new preferences for user_id: {user_id}")
-            # Insert empty preferences and encrypted_preferences
-            # Use a raw SQL query for pgp_sym_encrypt
-            from supabase import create_client
-            sql_query = f"""
-                INSERT INTO user_preferences (user_id, preferences, encrypted_preferences)
-                VALUES (
-                    '{user_id}',
-                    '{{}}',
-                    pgp_sym_encrypt('{{}}', '{PGCRYPTO_KEY}')
-                )
-            """
-            logger.debug(f"Executing SQL query: {sql_query}")
-            prefs_result = supabase.sql(sql_query).execute()
-            logger.debug(f"Preferences creation result: {prefs_result.data}")
+            # Insert new preferences
+            prefs_result = supabase.rpc('insert_user_preferences', {'p_user_id': user_id}).execute()
         else:
             logger.info(f"Preferences already exist: {prefs}")
             
