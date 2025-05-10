@@ -2,6 +2,7 @@ from supabase_client import supabase
 import os
 from constants import PGCRYPTO_KEY
 import logging
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -16,6 +17,40 @@ DEFAULT_PREFERENCES = {
     'asana_workspace_preference': None
 }
 
+def get_encrypted_preference(user_id, key):
+    """Get an encrypted preference value from the database."""
+    result = supabase.table("user_preferences") \
+        .select(f"encrypted_preferences->>{key}") \
+        .eq("user_id", user_id) \
+        .execute()
+    if result.data and f"encrypted_preferences->>{key}" in result.data[0]:
+        return result.data[0][f"encrypted_preferences->>{key}"]
+    return None
+
+def set_encrypted_preference(user_id, key, value):
+    """Set an encrypted preference value in the database."""
+    # First get current preferences
+    result = supabase.table("user_preferences") \
+        .select("preferences") \
+        .eq("user_id", user_id) \
+        .execute()
+    
+    if result.data:
+        current_prefs = result.data[0].get("preferences", {})
+    else:
+        current_prefs = {}
+    
+    # Update the specific key
+    current_prefs[key] = value
+    
+    # Call the database function to handle encryption
+    supabase.rpc('insert_user_preferences', {
+        'p_user_id': user_id,
+        'p_preferences': current_prefs,
+        'p_encryption_key': PGCRYPTO_KEY
+    }).execute()
+    
+    return True
 
 def ensure_user_and_prefs(user_id, email=None):
     logger.info(f"Ensuring user and preferences exist for user_id: {user_id}, email: {email}")
@@ -40,8 +75,12 @@ def ensure_user_and_prefs(user_id, email=None):
         
         if not prefs:
             logger.info(f"Preferences not found, creating new preferences for user_id: {user_id}")
-            # Insert new preferences
-            prefs_result = supabase.rpc('insert_user_preferences', {'p_user_id': user_id}).execute()
+            # Insert new preferences with empty preferences object
+            prefs_result = supabase.rpc('insert_user_preferences', {
+                'p_user_id': user_id,
+                'p_preferences': {},
+                'p_encryption_key': PGCRYPTO_KEY
+            }).execute()
         else:
             logger.info(f"Preferences already exist: {prefs}")
             

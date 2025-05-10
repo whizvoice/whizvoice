@@ -11,7 +11,7 @@ import logging
 from anthropic import Anthropic
 from constants import CLAUDE_API_KEY
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key
+from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key, get_encrypted_preference
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
 
 # Configure logging
@@ -36,8 +36,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Anthropic client
-client = Anthropic(api_key=CLAUDE_API_KEY)
+def get_claude_client(user_id: str):
+    """Get a Claude client configured with the user's API key."""
+    api_key = get_encrypted_preference(user_id, 'claude_api_key')
+    if not api_key:
+        raise ValueError("No Claude API key found for user. Please set your Claude API key in settings.")
+    return Anthropic(api_key=api_key)
 
 class ChatMessage(BaseModel):
     content: str
@@ -54,6 +58,10 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str
     user: Dict[str, Any]
+
+class TokenUpdateRequest(BaseModel):
+    claude_api_key: Optional[str] = None
+    asana_access_token: Optional[str] = None
 
 # Store active chat sessions
 chat_sessions = {}
@@ -159,6 +167,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # Process message similar to HTTP endpoint
                     chat_sessions[session_id].append({"role": "user", "content": message})
+                    
+                    # Get user-specific Claude client
+                    if user_id:
+                        client = get_claude_client(user_id)
+                    else:
+                        client = Anthropic(api_key=CLAUDE_API_KEY)  # Fallback to default key for anonymous users
+                    
                     response = client.beta.messages.create(
                         model="claude-3-7-sonnet-20250219",
                         max_tokens=1000,
@@ -298,6 +313,46 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     
     logger.error(f"Unknown tool requested: {tool_name}")
     raise ValueError(f"Unknown tool: {tool_name}")
+
+@app.post("/api/preferences/tokens")
+async def update_api_tokens(
+    request: TokenUpdateRequest,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Update the user's API tokens."""
+    try:
+        user_id = current_user["sub"]
+        
+        # Update Claude API key if provided
+        if request.claude_api_key is not None:
+            set_encrypted_preference(user_id, 'claude_api_key', request.claude_api_key)
+            
+        # Update Asana token if provided
+        if request.asana_access_token is not None:
+            set_encrypted_preference(user_id, 'asana_access_token', request.asana_access_token)
+            
+        return {"status": "success", "message": "Tokens updated successfully"}
+    except Exception as e:
+        logger.error(f"Error updating tokens: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/preferences/tokens")
+async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
+    """Get the user's API token status."""
+    try:
+        user_id = current_user["sub"]
+        
+        # Get both tokens
+        claude_token = get_encrypted_preference(user_id, 'claude_api_key')
+        asana_token = get_encrypted_preference(user_id, 'asana_access_token')
+        
+        return {
+            "has_claude_token": claude_token is not None,
+            "has_asana_token": asana_token is not None
+        }
+    except Exception as e:
+        logger.error(f"Error getting tokens: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

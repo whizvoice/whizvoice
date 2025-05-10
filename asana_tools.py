@@ -3,7 +3,16 @@ import asana
 from asana.rest import ApiException as AsanaError
 from datetime import datetime, timedelta
 import json
-from preferences import get_preference, set_preference
+from preferences import get_preference, set_preference, get_encrypted_preference
+
+def get_asana_client(user_id):
+    """Get an Asana client configured with the user's access token."""
+    configuration = asana.Configuration()
+    token = get_encrypted_preference(user_id, 'asana_access_token')
+    if not token:
+        raise ValueError("No Asana access token found for user. Please set your Asana token in settings.")
+    configuration.access_token = token
+    return asana.ApiClient(configuration)
 
 def get_date_range(range_str=None):
     today = datetime.now().date()
@@ -21,12 +30,9 @@ def get_date_range(range_str=None):
     
     return today, today  # Default to today if range not recognized
 
-def get_asana_workspaces():
-    configuration = asana.Configuration()
-    configuration.access_token = ASANA_ACCESS_TOKEN
-    api_client = asana.ApiClient(configuration)
-
+def get_asana_workspaces(user_id):
     try:
+        api_client = get_asana_client(user_id)
         workspaces_api = asana.WorkspacesApi(api_client)
         workspaces = list(workspaces_api.get_workspaces({}))
         return workspaces
@@ -34,15 +40,12 @@ def get_asana_workspaces():
         return f"Error accessing Asana API: {str(e)}"
 
 def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=None):
-    configuration = asana.Configuration()
-    configuration.access_token = ASANA_ACCESS_TOKEN
-    api_client = asana.ApiClient(configuration)
-
     if not workspace_gid:
         workspace_gid = get_preference(user_id, 'asana_workspace_preference')
         if not workspace_gid:
             return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
     try:
+        api_client = get_asana_client(user_id)
         # Get current user
         users_api = asana.UsersApi(api_client)
         me = users_api.get_user("me", {})
