@@ -22,20 +22,13 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-4. Create a `constants.py` file with your API keys:
-
-```python
-CLAUDE_API_KEY = "your-claude-api-key"
-ASANA_ACCESS_TOKEN = "your-asana-token"
-```
-
-5. Set up pre-commit hooks so unit tests run on git commit:
+4. Set up pre-commit hooks so unit tests run on git commit:
 
 ```bash
 pre-commit install
 ```
 
-6. set up service
+5. set up service
 
 ```bash
 sudo cp whizvoice.service /etc/systemd/system/
@@ -45,6 +38,7 @@ sudo systemctl start whizvoice
 ```
 
 check the status
+
 ```bash
 sudo systemctl status whizvoice
 ```
@@ -57,16 +51,18 @@ sudo systemctl status whizvoice
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-`chat.py` is the old script that doesn't have a web server 
+`chat.py` is the old script that doesn't have a web server
 
 Run on mac to communicate with the server via websocket
 
 installation
+
 ```
 brew install websocat
 ```
 
 connect
+
 ```
 websocat ws://REDACTED_SERVER_IP:8000/chat
 ```

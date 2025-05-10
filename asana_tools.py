@@ -1,4 +1,3 @@
-from constants import ASANA_ACCESS_TOKEN
 import asana
 from asana.rest import ApiException as AsanaError
 from datetime import datetime, timedelta
@@ -31,13 +30,15 @@ def get_date_range(range_str=None):
     return today, today  # Default to today if range not recognized
 
 def get_asana_workspaces(user_id):
+    """Get all Asana workspaces."""
     try:
-        api_client = get_asana_client(user_id)
-        workspaces_api = asana.WorkspacesApi(api_client)
-        workspaces = list(workspaces_api.get_workspaces({}))
-        return workspaces
+        client = get_asana_client(user_id)
+        api_instance = asana.WorkspacesApi(client)
+        workspaces = api_instance.get_workspaces()
+        return [{'gid': w.gid, 'name': w.name} for w in workspaces]
     except AsanaError as e:
-        return f"Error accessing Asana API: {str(e)}"
+        print(f"Exception when calling WorkspacesApi->get_workspaces: {e}")
+        return []
 
 def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=None):
     if not workspace_gid:
