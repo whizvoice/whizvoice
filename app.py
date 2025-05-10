@@ -9,7 +9,6 @@ import traceback
 import logging
 
 from anthropic import Anthropic
-from constants import CLAUDE_API_KEY
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key, get_encrypted_preference
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
@@ -145,19 +144,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.close(code=1008, reason="Invalid token")
                 return
         else:
-            # Allow anonymous connections but with warning
-            logger.warning("Anonymous WebSocket connection accepted")
-            await websocket.send_text("Hello! I'm Claude with Asana integration. For a personalized experience, please login.")
+            # No anonymous connections allowed
+            logger.warning("Unauthenticated WebSocket connection attempt")
+            await websocket.send_text("Authentication required. Please login.")
+            await websocket.close(code=1008, reason="Authentication required")
+            return
         
         # Create a session ID
-        session_id = f"ws_{user_id or id(websocket)}"
+        session_id = f"ws_{user_id}"
         chat_sessions[session_id] = []
         
-        # Associate session with user if authenticated
-        if user_id:
-            if user_id not in user_sessions:
-                user_sessions[user_id] = []
-            user_sessions[user_id].append(session_id)
+        # Associate session with user
+        if user_id not in user_sessions:
+            user_sessions[user_id] = []
+        user_sessions[user_id].append(session_id)
         
         try:
             while True:
@@ -169,10 +169,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     chat_sessions[session_id].append({"role": "user", "content": message})
                     
                     # Get user-specific Claude client
-                    if user_id:
-                        client = get_claude_client(user_id)
-                    else:
-                        client = Anthropic(api_key=CLAUDE_API_KEY)  # Fallback to default key for anonymous users
+                    client = get_claude_client(user_id)
                     
                     response = client.beta.messages.create(
                         model="claude-3-7-sonnet-20250219",
