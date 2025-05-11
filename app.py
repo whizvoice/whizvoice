@@ -39,7 +39,7 @@ def get_claude_client(user_id: str):
     """Get a Claude client configured with the user's API key."""
     api_key = get_encrypted_preference(user_id, 'claude_api_key')
     if not api_key:
-        raise ValueError("No Claude API key found for user. Please set your Claude API key in settings.")
+        raise ValueError("Claude API key not found. Please go to Settings and add your Claude API key to continue chatting.")
     return Anthropic(api_key=api_key)
 
 class ChatMessage(BaseModel):
@@ -168,34 +168,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Process message similar to HTTP endpoint
                     chat_sessions[session_id].append({"role": "user", "content": message})
                     
-                    # Get user-specific Claude client
-                    client = get_claude_client(user_id)
-                    
-                    response = client.beta.messages.create(
-                        model="claude-3-7-sonnet-20250219",
-                        max_tokens=1000,
-                        messages=chat_sessions[session_id],
-                        system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
-                        tools=tools,
-                        tool_choice={"type": "auto"},
-                        betas=["token-efficient-tools-2025-02-19"]
-                    )
-                    
-                    # Handle tool calls
-                    while response.stop_reason == 'tool_use':
-                        tool_block = next(block for block in response.content if block.type == 'tool_use')
-                        # Pass the authenticated user_id to execute_tool
-                        logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
-                        result = execute_tool(tool_block.name, tool_block.input, user_id)
-                        
-                        chat_sessions[session_id].extend([
-                            {"role": "assistant", "content": [tool_block]},
-                            {"role": "user", "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": tool_block.id,
-                                "content": json.dumps(result)
-                            }]}
-                        ])
+                    try:
+                        # Get user-specific Claude client
+                        client = get_claude_client(user_id)
                         
                         response = client.beta.messages.create(
                             model="claude-3-7-sonnet-20250219",
@@ -206,15 +181,47 @@ async def websocket_endpoint(websocket: WebSocket):
                             tool_choice={"type": "auto"},
                             betas=["token-efficient-tools-2025-02-19"]
                         )
-                    
-                    # Add assistant response to session
-                    chat_sessions[session_id].append({"role": "assistant", "content": response.content})
-                    
-                    # Send response back to client
-                    if response.content[0].type == 'text':
-                        await websocket.send_text(response.content[0].text)
-                    else:
-                        await websocket.send_text("Error: Unexpected response format")
+                        
+                        # Handle tool calls
+                        while response.stop_reason == 'tool_use':
+                            tool_block = next(block for block in response.content if block.type == 'tool_use')
+                            # Pass the authenticated user_id to execute_tool
+                            logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
+                            result = execute_tool(tool_block.name, tool_block.input, user_id)
+                            
+                            chat_sessions[session_id].extend([
+                                {"role": "assistant", "content": [tool_block]},
+                                {"role": "user", "content": [{
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_block.id,
+                                    "content": json.dumps(result)
+                                }]}
+                            ])
+                            
+                            response = client.beta.messages.create(
+                                model="claude-3-7-sonnet-20250219",
+                                max_tokens=1000,
+                                messages=chat_sessions[session_id],
+                                system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
+                                tools=tools,
+                                tool_choice={"type": "auto"},
+                                betas=["token-efficient-tools-2025-02-19"]
+                            )
+                        
+                        # Add assistant response to session
+                        chat_sessions[session_id].append({"role": "assistant", "content": response.content})
+                        
+                        # Send response back to client
+                        if response.content[0].type == 'text':
+                            await websocket.send_text(response.content[0].text)
+                        else:
+                            await websocket.send_text("Error: Unexpected response format")
+                    except ValueError as e:
+                        # Handle Claude API key error
+                        error_message = str(e)
+                        await websocket.send_text(error_message)
+                        # Don't close the connection, let the user fix the issue
+                        continue
                         
                 except WebSocketDisconnect:
                     # Clean up the session
