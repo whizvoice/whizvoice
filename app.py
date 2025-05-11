@@ -7,6 +7,7 @@ import json
 import os
 import traceback
 import logging
+import time
 
 from anthropic import Anthropic
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
@@ -131,7 +132,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 from jose import jwt, JWTError
                 
                 logger.debug(f"WebSocket attempting to verify token (first 15 chars): {token[:15]}...")
-                payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
+                
+                # Try to decode with both algorithms
+                try:
+                    # First try with our server's algorithm (HS256)
+                    payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
+                except JWTError:
+                    # If that fails, try with RS256 (Google's algorithm)
+                    payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=["RS256"])
+                
                 user_id = payload.get("sub")
                 user_email = payload.get("email")
                 user_name = payload.get("name", "there")
