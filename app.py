@@ -128,19 +128,11 @@ async def websocket_endpoint(websocket: WebSocket):
         user_id = None
         if token:
             try:
-                # Verify token
+                # Verify token using our server's algorithm (HS256)
                 from jose import jwt, JWTError
                 
                 logger.debug(f"WebSocket attempting to verify token (first 15 chars): {token[:15]}...")
-                
-                # Try to decode with both algorithms
-                try:
-                    # First try with our server's algorithm (HS256)
-                    payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
-                except JWTError:
-                    # If that fails, try with RS256 (Google's algorithm)
-                    payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=["RS256"])
-                
+                payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
                 user_id = payload.get("sub")
                 user_email = payload.get("email")
                 user_name = payload.get("name", "there")
