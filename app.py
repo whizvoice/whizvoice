@@ -318,21 +318,23 @@ async def update_api_tokens(
     request: TokenUpdateRequest,
     current_user: Dict = Depends(get_current_user)
 ):
-    """Update the user's API tokens."""
+    print("[DEBUG] Entered update_api_tokens route")
     try:
+        print(f"[DEBUG] current_user: {current_user}")
         user_id = current_user["sub"]
-        
+        print(f"[DEBUG] user_id: {user_id}")
         # Update Claude API key if provided
         if request.claude_api_key is not None:
+            print(f"[DEBUG] Setting Claude API key for user {user_id}")
             set_encrypted_preference(user_id, 'claude_api_key', request.claude_api_key)
-            
         # Update Asana token if provided
         if request.asana_access_token is not None:
+            print(f"[DEBUG] Setting Asana token for user {user_id}")
             set_encrypted_preference(user_id, 'asana_access_token', request.asana_access_token)
-            
+        print("[DEBUG] Returning success from update_api_tokens")
         return {"status": "success", "message": "Tokens updated successfully"}
     except Exception as e:
-        logger.error(f"Error updating tokens: {str(e)}")
+        print(f"[DEBUG] Exception in update_api_tokens: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/preferences/tokens")
