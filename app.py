@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from anthropic import Anthropic
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key, get_encrypted_preference
+from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key, get_encrypted_preference, set_encrypted_preference
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
 
 # Configure logging
