@@ -18,52 +18,70 @@ DEFAULT_PREFERENCES = {
 }
 
 def get_encrypted_preference(user_id, key):
-    """Get an encrypted preference value from the database."""
-    result = supabase.table("user_preferences") \
-        .select(f"encrypted_preferences->>{key}") \
-        .eq("user_id", user_id) \
-        .execute()
-    if result.data and f"encrypted_preferences->>{key}" in result.data[0]:
-        return result.data[0][f"encrypted_preferences->>{key}"]
-    return None
+    """Get a specific decrypted preference value using the RPC function."""
+    try:
+        rpc_params = {
+            'p_user_id': user_id,
+            'p_encryption_key': PGCRYPTO_KEY,
+            'p_target_key': key
+        }
+        result = supabase.rpc('get_decrypted_preference_key', rpc_params).execute()
+        
+        # The RPC returns the value directly (or null)
+        if result.data:
+            # Check if data is not explicitly None, handle empty strings if needed
+            return result.data
+        else:
+            # Handles cases where user/key not found, or null value stored
+            return None
+    except Exception as e:
+        logger.error(f"Error calling get_decrypted_preference_key RPC for user {user_id}, key {key}: {e}", exc_info=True)
+        return None
 
 def set_encrypted_preference(user_id, key, value):
-    """Set an encrypted preference value in the database."""
-    # First get current preferences
-    result = supabase.table("user_preferences") \
-        .select("encrypted_preferences") \
-        .eq("user_id", user_id) \
-        .execute()
-    
-    current_prefs_raw = None
-    if result.data and result.data[0].get("encrypted_preferences") is not None:
-        current_prefs_raw = result.data[0]["encrypted_preferences"]
-
+    """Set an encrypted preference value using RPC for reading and writing."""
     current_prefs = {}
-    if isinstance(current_prefs_raw, str) and current_prefs_raw.strip():
-        try:
-            current_prefs = json.loads(current_prefs_raw)
-            if not isinstance(current_prefs, dict):
-                logger.warning(f"Parsed encrypted_preferences for user {user_id} is not a dict, but {type(current_prefs)}. Resetting to empty dict.")
-                current_prefs = {}
-        except json.JSONDecodeError:
-            logger.error(f"Could not decode encrypted_preferences JSON for user {user_id}: {current_prefs_raw}. Resetting to empty dict.")
-            current_prefs = {}
-    elif isinstance(current_prefs_raw, dict):
-        current_prefs = current_prefs_raw
-    # If current_prefs_raw is None or an empty string, current_prefs remains {}
-    
-    # Update the specific key
+    try:
+        # Step 1: Read and decrypt current preferences using RPC
+        read_rpc_params = {
+            'p_user_id': user_id,
+            'p_encryption_key': PGCRYPTO_KEY
+        }
+        result = supabase.rpc('get_decrypted_preferences', read_rpc_params).execute()
+
+        if result.data:
+            decrypted_json_string = result.data
+            if decrypted_json_string and isinstance(decrypted_json_string, str):
+                try:
+                    current_prefs = json.loads(decrypted_json_string)
+                    if not isinstance(current_prefs, dict):
+                        logger.warning(f"Decrypted preferences for {user_id} is not a dict ({type(current_prefs)}). Resetting.")
+                        current_prefs = {}
+                except json.JSONDecodeError:
+                    logger.error(f"Could not decode JSON from get_decrypted_preferences for {user_id}. Resetting.")
+                    current_prefs = {}
+            # If result.data is not a non-empty string, current_prefs remains {}
+        # If no data returned by RPC, current_prefs remains {}
+
+    except Exception as e:
+        logger.error(f"Error calling get_decrypted_preferences RPC for {user_id}: {e}. Starting with empty prefs.", exc_info=True)
+        current_prefs = {} # Start fresh if read/decrypt fails
+
+    # Step 2: Update the specific key in the Python dictionary
     current_prefs[key] = value
     
-    # Call the database function to handle encryption
-    supabase.rpc('insert_user_preferences', {
-        'p_user_id': user_id,
-        'p_preferences': current_prefs,
-        'p_encryption_key': PGCRYPTO_KEY
-    }).execute()
-    
-    return True
+    # Step 3: Call the insert/update RPC to encrypt and save the modified dictionary
+    try:
+        write_rpc_params = {
+            'p_user_id': user_id,
+            'p_preferences': current_prefs, # Pass the dictionary directly
+            'p_encryption_key': PGCRYPTO_KEY
+        }
+        supabase.rpc('insert_user_preferences', write_rpc_params).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error calling insert_user_preferences RPC for user {user_id}: {e}", exc_info=True)
+        return False
 
 def ensure_user_and_prefs(user_id, email=None):
     logger.info(f"Ensuring user and preferences exist for user_id: {user_id}, email: {email}")
@@ -124,17 +142,19 @@ def set_preference(user_id, key, value):
     return save_preferences(user_id, prefs)
 
 def get_preference_key(user_id, key):
-    """Get a specific preference value directly from the database."""
+    """Get a specific preference value directly from the unencrypted column."""
     result = supabase.table("user_preferences") \
         .select(f"preferences->>{key}") \
         .eq("user_id", user_id) \
         .execute()
-    if result.data and f"preferences->>{key}" in result.data[0]:
+    if result.data and f"preferences->>{key}" in result.data[0] and result.data[0][f"preferences->>{key}"] is not None:
         return result.data[0][f"preferences->>{key}"]
     return None
 
 def set_preference_key(user_id, key, value):
-    """Set a specific preference key in the database without loading the whole object."""
-    prefs = load_preferences(user_id)
-    prefs[key] = value
-    return save_preferences(user_id, prefs) 
+    """Set a specific preference key in the unencrypted column."""
+    # This implementation was incorrect, needs proper JSONB update
+    # Recommended: Use set_preference for simplicity if performance isn't critical
+    # For direct update: Use Supabase jsonb update operators if needed
+    # Keeping set_preference call for now:
+    return set_preference(user_id, key, value) 
