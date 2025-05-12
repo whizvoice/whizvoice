@@ -96,10 +96,13 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     Get the current user from a JWT token
     """
     try:
+        print(f"[DEBUG] Incoming Authorization header: {credentials.credentials}")
         payload = verify_token(credentials)
         user_id = payload.get("sub")
         if user_id is None:
+            print("[DEBUG] No user_id in token payload")
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
         return payload
     except Exception as e:
+        print(f"[DEBUG] Error in get_current_user: {str(e)}")
         raise HTTPException(status_code=401, detail=str(e)) 
