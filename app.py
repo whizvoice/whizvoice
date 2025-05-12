@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -8,6 +8,7 @@ import os
 import traceback
 import logging
 import time
+from fastapi.responses import JSONResponse
 
 from anthropic import Anthropic
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
@@ -312,7 +313,7 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     logger.error(f"Unknown tool requested: {tool_name}")
     raise ValueError(f"Unknown tool: {tool_name}")
 
-@app.post("/api/preferences/tokens")
+@app.post("/preferences/tokens")
 async def update_api_tokens(
     request: TokenUpdateRequest,
     current_user: Dict = Depends(get_current_user)
@@ -334,7 +335,7 @@ async def update_api_tokens(
         logger.error(f"Error updating tokens: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/preferences/tokens")
+@app.get("/preferences/tokens")
 async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
     """Get the user's API token status."""
     try:
@@ -351,6 +352,11 @@ async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Error getting tokens: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+async def catch_all(path: str, request: Request):
+    print(f"Unmatched request: {request.method} /{path}")
+    return JSONResponse({"error": "Not found"}, status_code=404)
 
 if __name__ == "__main__":
     import uvicorn
