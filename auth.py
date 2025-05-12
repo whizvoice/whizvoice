@@ -43,15 +43,22 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     Verify a JWT token and return the payload
     """
     try:
+        print(f"[DEBUG] Entered verify_token")
         token = credentials.credentials
+        print(f"[DEBUG] Token to verify: {token}")
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        print(f"[DEBUG] Token decoded successfully: {payload}")
         return payload
-    except InvalidTokenError:
+    except InvalidTokenError as e:
+        print(f"[DEBUG] InvalidTokenError in verify_token: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    except Exception as e:
+        print(f"[DEBUG] General exception in verify_token: {str(e)}")
+        raise
 
 def verify_google_token(token: str) -> Dict:
     """
@@ -96,12 +103,14 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     Get the current user from a JWT token
     """
     try:
+        print(f"[DEBUG] Entered get_current_user")
         print(f"[DEBUG] Incoming Authorization header: {credentials.credentials}")
         payload = verify_token(credentials)
         user_id = payload.get("sub")
         if user_id is None:
             print("[DEBUG] No user_id in token payload")
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        print(f"[DEBUG] Authenticated user_id: {user_id}")
         return payload
     except Exception as e:
         print(f"[DEBUG] Error in get_current_user: {str(e)}")
