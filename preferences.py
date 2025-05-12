@@ -31,12 +31,12 @@ def set_encrypted_preference(user_id, key, value):
     """Set an encrypted preference value in the database."""
     # First get current preferences
     result = supabase.table("user_preferences") \
-        .select("preferences") \
+        .select("encrypted_preferences") \
         .eq("user_id", user_id) \
         .execute()
     
     if result.data:
-        current_prefs = result.data[0].get("preferences", {})
+        current_prefs = result.data[0].get("encrypted_preferences", {})
     else:
         current_prefs = {}
     
