@@ -35,10 +35,23 @@ def set_encrypted_preference(user_id, key, value):
         .eq("user_id", user_id) \
         .execute()
     
-    if result.data:
-        current_prefs = result.data[0].get("encrypted_preferences", {})
-    else:
-        current_prefs = {}
+    current_prefs_raw = None
+    if result.data and result.data[0].get("encrypted_preferences") is not None:
+        current_prefs_raw = result.data[0]["encrypted_preferences"]
+
+    current_prefs = {}
+    if isinstance(current_prefs_raw, str) and current_prefs_raw.strip():
+        try:
+            current_prefs = json.loads(current_prefs_raw)
+            if not isinstance(current_prefs, dict):
+                logger.warning(f"Parsed encrypted_preferences for user {user_id} is not a dict, but {type(current_prefs)}. Resetting to empty dict.")
+                current_prefs = {}
+        except json.JSONDecodeError:
+            logger.error(f"Could not decode encrypted_preferences JSON for user {user_id}: {current_prefs_raw}. Resetting to empty dict.")
+            current_prefs = {}
+    elif isinstance(current_prefs_raw, dict):
+        current_prefs = current_prefs_raw
+    # If current_prefs_raw is None or an empty string, current_prefs remains {}
     
     # Update the specific key
     current_prefs[key] = value
