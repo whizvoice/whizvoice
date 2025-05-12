@@ -327,23 +327,42 @@ async def update_api_tokens(
     current_user: Dict = Depends(get_current_user)
 ):
     logger.info("[DEBUG] Entered update_api_tokens route")
+    user_id = current_user["sub"]
+    logger.info(f"[DEBUG] user_id: {user_id}")
+    
+    success = True
+    error_message = ""
+
     try:
-        logger.info(f"[DEBUG] current_user: {current_user}")
-        user_id = current_user["sub"]
-        logger.info(f"[DEBUG] user_id: {user_id}")
         # Update Claude API key if provided
         if request.claude_api_key is not None:
             logger.info(f"[DEBUG] Setting Claude API key for user {user_id}")
-            set_encrypted_preference(user_id, 'claude_api_key', request.claude_api_key)
-        # Update Asana token if provided
-        if request.asana_access_token is not None:
+            if not set_encrypted_preference(user_id, 'claude_api_key', request.claude_api_key):
+                success = False
+                error_message = "Failed to update Claude API key in database."
+        
+        # Update Asana token if provided, only if previous steps succeeded
+        if success and request.asana_access_token is not None:
             logger.info(f"[DEBUG] Setting Asana token for user {user_id}")
-            set_encrypted_preference(user_id, 'asana_access_token', request.asana_access_token)
-        logger.info("[DEBUG] Returning success from update_api_tokens")
-        return {"status": "success", "message": "Tokens updated successfully"}
+            if not set_encrypted_preference(user_id, 'asana_access_token', request.asana_access_token):
+                success = False
+                error_message = "Failed to update Asana access token in database."
+
+        if success:
+            logger.info("[DEBUG] Returning success from update_api_tokens")
+            return {"status": "success", "message": "Tokens updated successfully"}
+        else:
+            # Raise 500 if any set_encrypted_preference call returned False
+            logger.error(f"[API ERROR] {error_message} User: {user_id}")
+            raise HTTPException(status_code=500, detail=error_message)
+
+    except HTTPException as http_exc:
+        # Re-raise HTTPExceptions (like auth errors)
+        raise http_exc
     except Exception as e:
-        logger.error(f"[DEBUG] Exception in update_api_tokens: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Catch unexpected errors during the process
+        logger.error(f"[DEBUG] Unexpected exception in update_api_tokens: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
 @app.get("/preferences/tokens")
 async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
