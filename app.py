@@ -290,11 +290,11 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     """Execute a tool and return its result"""
     logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
     
-    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference"]:
+    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference", "get_asana_workspaces", "change_task_parent"]:
         return {"error": f"User authentication required for tool: {tool_name}"}
 
     if tool_name == "get_asana_workspaces":
-        return get_asana_workspaces()
+        return get_asana_workspaces(user_id)
     elif tool_name == "get_asana_tasks":
         workspace_gid = tool_args.get('workspace_gid')
         start_date = tool_args.get('start_date')
@@ -328,7 +328,7 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     elif tool_name == "change_task_parent":
         task_gid = tool_args.get('task_gid')
         new_parent_gid = tool_args.get('new_parent_gid')
-        return change_task_parent(task_gid, new_parent_gid)
+        return change_task_parent(user_id, task_gid, new_parent_gid)
     # Add cases for get_preference_key and set_preference_key if they are actual tool names
     # Example if 'get_user_preference_key' is a tool name:
     # elif tool_name == 'get_user_preference_key':

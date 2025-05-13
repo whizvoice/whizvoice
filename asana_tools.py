@@ -3,7 +3,7 @@ import asana
 from asana.rest import ApiException as AsanaError
 from datetime import datetime, timedelta
 import json
-from preferences import get_preference, set_preference
+from preferences import get_preference, set_preference, get_preference_key
 
 def get_date_range(range_str=None):
     today = datetime.now().date()
@@ -21,9 +21,12 @@ def get_date_range(range_str=None):
     
     return today, today  # Default to today if range not recognized
 
-def get_asana_workspaces():
+def get_asana_workspaces(user_id: str):
     configuration = asana.Configuration()
-    configuration.access_token = ASANA_ACCESS_TOKEN
+    asana_access_token = get_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
     api_client = asana.ApiClient(configuration)
 
     try:
@@ -35,7 +38,10 @@ def get_asana_workspaces():
 
 def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=None):
     configuration = asana.Configuration()
-    configuration.access_token = ASANA_ACCESS_TOKEN
+    asana_access_token = get_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
     api_client = asana.ApiClient(configuration)
 
     if not workspace_gid:
@@ -79,7 +85,10 @@ def get_current_date():
 
 def get_parent_tasks(user_id: str, workspace_gid=None):
     configuration = asana.Configuration()
-    configuration.access_token = ASANA_ACCESS_TOKEN
+    asana_access_token = get_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
     api_client = asana.ApiClient(configuration)
 
     if not workspace_gid:
@@ -112,7 +121,10 @@ def get_parent_tasks(user_id: str, workspace_gid=None):
 
 def create_asana_task(user_id: str, name, workspace_gid=None, due_date=None, notes=None, parent_task_gid=None):
     configuration = asana.Configuration()
-    configuration.access_token = ASANA_ACCESS_TOKEN
+    asana_access_token = get_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
     api_client = asana.ApiClient(configuration)
 
     if not workspace_gid:
@@ -153,9 +165,12 @@ def create_asana_task(user_id: str, name, workspace_gid=None, due_date=None, not
     except AsanaError as e:
         return f"Error creating Asana task: {str(e)}"
 
-def change_task_parent(task_gid, new_parent_gid=None):
+def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
     configuration = asana.Configuration()
-    configuration.access_token = ASANA_ACCESS_TOKEN
+    asana_access_token = get_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
     api_client = asana.ApiClient(configuration)
 
     try:
