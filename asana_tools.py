@@ -1,4 +1,3 @@
-from constants import ASANA_ACCESS_TOKEN
 import asana
 from asana.rest import ApiException as AsanaError
 from datetime import datetime, timedelta
