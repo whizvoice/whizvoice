@@ -8,6 +8,7 @@ import os
 from constants import GOOGLE_WEB_CLIENT_SECRET
 from google.oauth2 import id_token
 from google.auth.transport import requests
+import logging
 
 # Security scheme for JWT
 security = HTTPBearer()
@@ -20,6 +21,8 @@ GOOGLE_CLIENT_IDS = [
     "2815827813-se3l1u83nqbtda59dtplcbbjsr38oqln.apps.googleusercontent.com",  # Web client ID
     "2815827813-kdkrisushm16fsi95533kmll1usm3uco.apps.googleusercontent.com"   # Android client ID
 ]
+
+logger = logging.getLogger(__name__)
 
 class AuthError(Exception):
     """Custom exception for authentication errors"""
@@ -43,13 +46,24 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     Verify a JWT token and return the payload
     """
     try:
+        logger.info("[DEBUG] Entered verify_token")
         token = credentials.credentials
+        logger.info(f"[DEBUG] Token to verify (first 20 chars): {token[:20]}...")
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        logger.info(f"[DEBUG] Token decoded successfully: {payload}")
         return payload
-    except InvalidTokenError:
+    except InvalidTokenError as e:
+        logger.error(f"[DEBUG] InvalidTokenError in verify_token: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e:
+        logger.error(f"[DEBUG] Unexpected error in verify_token: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -95,11 +109,16 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     """
     Get the current user from a JWT token
     """
+    logger.info("[DEBUG] Entered get_current_user")
     try:
+        logger.info(f"[DEBUG] Incoming Authorization header: {credentials.credentials[:20]}...")
         payload = verify_token(credentials)
         user_id = payload.get("sub")
         if user_id is None:
+            logger.error("[DEBUG] No user_id in token payload")
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        logger.info(f"[DEBUG] Successfully authenticated user_id: {user_id}")
         return payload
     except Exception as e:
+        logger.error(f"[DEBUG] Error in get_current_user: {str(e)}")
         raise HTTPException(status_code=401, detail=str(e)) 

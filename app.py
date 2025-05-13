@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -7,11 +7,12 @@ import json
 import os
 import traceback
 import logging
+import time
+from fastapi.responses import JSONResponse
 
 from anthropic import Anthropic
-from constants import CLAUDE_API_KEY
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key
+from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key, get_encrypted_preference, set_encrypted_preference
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
 
 # Configure logging
@@ -27,6 +28,14 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Add Request Logging Middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Incoming request: {request.method} {request.url.path}")
+    logger.info(f"Headers: {dict(request.headers)}")
+    response = await call_next(request)
+    return response
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -36,8 +45,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Anthropic client
-client = Anthropic(api_key=CLAUDE_API_KEY)
+def get_claude_client(user_id: str):
+    """Get a Claude client configured with the user's API key."""
+    api_key = get_encrypted_preference(user_id, 'claude_api_key')
+    if not api_key:
+        raise ValueError("Claude API key not found. Please go to Settings and add your Claude API key to continue chatting.")
+    return Anthropic(api_key=api_key)
 
 class ChatMessage(BaseModel):
     content: str
@@ -54,6 +67,10 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str
     user: Dict[str, Any]
+
+class TokenUpdateRequest(BaseModel):
+    claude_api_key: Optional[str] = None
+    asana_access_token: Optional[str] = None
 
 # Store active chat sessions
 chat_sessions = {}
@@ -120,7 +137,7 @@ async def websocket_endpoint(websocket: WebSocket):
         user_id = None
         if token:
             try:
-                # Verify token
+                # Verify token using our server's algorithm (HS256)
                 from jose import jwt, JWTError
                 
                 logger.debug(f"WebSocket attempting to verify token (first 15 chars): {token[:15]}...")
@@ -137,19 +154,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.close(code=1008, reason="Invalid token")
                 return
         else:
-            # Allow anonymous connections but with warning
-            logger.warning("Anonymous WebSocket connection accepted")
-            await websocket.send_text("Hello! I'm Claude with Asana integration. For a personalized experience, please login.")
+            # No anonymous connections allowed
+            logger.warning("Unauthenticated WebSocket connection attempt")
+            await websocket.send_text("Authentication required. Please login.")
+            await websocket.close(code=1008, reason="Authentication required")
+            return
         
         # Create a session ID
-        session_id = f"ws_{user_id or id(websocket)}"
+        session_id = f"ws_{user_id}"
         chat_sessions[session_id] = []
         
-        # Associate session with user if authenticated
-        if user_id:
-            if user_id not in user_sessions:
-                user_sessions[user_id] = []
-            user_sessions[user_id].append(session_id)
+        # Associate session with user
+        if user_id not in user_sessions:
+            user_sessions[user_id] = []
+        user_sessions[user_id].append(session_id)
         
         try:
             while True:
@@ -159,31 +177,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # Process message similar to HTTP endpoint
                     chat_sessions[session_id].append({"role": "user", "content": message})
-                    response = client.beta.messages.create(
-                        model="claude-3-7-sonnet-20250219",
-                        max_tokens=1000,
-                        messages=chat_sessions[session_id],
-                        system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
-                        tools=tools,
-                        tool_choice={"type": "auto"},
-                        betas=["token-efficient-tools-2025-02-19"]
-                    )
                     
-                    # Handle tool calls
-                    while response.stop_reason == 'tool_use':
-                        tool_block = next(block for block in response.content if block.type == 'tool_use')
-                        # Pass the authenticated user_id to execute_tool
-                        logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
-                        result = execute_tool(tool_block.name, tool_block.input, user_id)
-                        
-                        chat_sessions[session_id].extend([
-                            {"role": "assistant", "content": [tool_block]},
-                            {"role": "user", "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": tool_block.id,
-                                "content": json.dumps(result)
-                            }]}
-                        ])
+                    try:
+                        # Get user-specific Claude client
+                        client = get_claude_client(user_id)
                         
                         response = client.beta.messages.create(
                             model="claude-3-7-sonnet-20250219",
@@ -194,15 +191,47 @@ async def websocket_endpoint(websocket: WebSocket):
                             tool_choice={"type": "auto"},
                             betas=["token-efficient-tools-2025-02-19"]
                         )
-                    
-                    # Add assistant response to session
-                    chat_sessions[session_id].append({"role": "assistant", "content": response.content})
-                    
-                    # Send response back to client
-                    if response.content[0].type == 'text':
-                        await websocket.send_text(response.content[0].text)
-                    else:
-                        await websocket.send_text("Error: Unexpected response format")
+                        
+                        # Handle tool calls
+                        while response.stop_reason == 'tool_use':
+                            tool_block = next(block for block in response.content if block.type == 'tool_use')
+                            # Pass the authenticated user_id to execute_tool
+                            logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
+                            result = execute_tool(tool_block.name, tool_block.input, user_id)
+                            
+                            chat_sessions[session_id].extend([
+                                {"role": "assistant", "content": [tool_block]},
+                                {"role": "user", "content": [{
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_block.id,
+                                    "content": json.dumps(result)
+                                }]}
+                            ])
+                            
+                            response = client.beta.messages.create(
+                                model="claude-3-7-sonnet-20250219",
+                                max_tokens=1000,
+                                messages=chat_sessions[session_id],
+                                system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
+                                tools=tools,
+                                tool_choice={"type": "auto"},
+                                betas=["token-efficient-tools-2025-02-19"]
+                            )
+                        
+                        # Add assistant response to session
+                        chat_sessions[session_id].append({"role": "assistant", "content": response.content})
+                        
+                        # Send response back to client
+                        if response.content[0].type == 'text':
+                            await websocket.send_text(response.content[0].text)
+                        else:
+                            await websocket.send_text("Error: Unexpected response format")
+                    except ValueError as e:
+                        # Handle Claude API key error
+                        error_message = str(e)
+                        await websocket.send_text(error_message)
+                        # Don't close the connection, let the user fix the issue
+                        continue
                         
                 except WebSocketDisconnect:
                     # Clean up the session
@@ -249,11 +278,11 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     """Execute a tool and return its result"""
     logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
     
-    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference"]:
+    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference", "get_asana_workspaces"]:
         return {"error": f"User authentication required for tool: {tool_name}"}
 
     if tool_name == "get_asana_workspaces":
-        return get_asana_workspaces()
+        return get_asana_workspaces(user_id)
     elif tool_name == "get_asana_tasks":
         workspace_gid = tool_args.get('workspace_gid')
         start_date = tool_args.get('start_date')
@@ -287,17 +316,76 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     elif tool_name == "change_task_parent":
         task_gid = tool_args.get('task_gid')
         new_parent_gid = tool_args.get('new_parent_gid')
-        return change_task_parent(task_gid, new_parent_gid)
-    # Add cases for get_preference_key and set_preference_key if they are actual tool names
-    # Example if 'get_user_preference_key' is a tool name:
-    # elif tool_name == 'get_user_preference_key':
-    #     if not user_id:
-    #         raise ValueError("User context required")
-    #     key = tool_args.get('key')
-    #     return get_preference_key(user_id, key)
+        return change_task_parent(user_id, task_gid, new_parent_gid)
     
     logger.error(f"Unknown tool requested: {tool_name}")
     raise ValueError(f"Unknown tool: {tool_name}")
+
+@app.post("/preferences/tokens")
+async def update_api_tokens(
+    request: TokenUpdateRequest,
+    current_user: Dict = Depends(get_current_user)
+):
+    logger.info("[DEBUG] Entered update_api_tokens route")
+    user_id = current_user["sub"]
+    logger.info(f"[DEBUG] user_id: {user_id}")
+    
+    success = True
+    error_message = ""
+
+    try:
+        # Update Claude API key if provided
+        if request.claude_api_key is not None:
+            logger.info(f"[DEBUG] Setting Claude API key for user {user_id}")
+            if not set_encrypted_preference(user_id, 'claude_api_key', request.claude_api_key):
+                success = False
+                error_message = "Failed to update Claude API key in database."
+        
+        # Update Asana token if provided, only if previous steps succeeded
+        if success and request.asana_access_token is not None:
+            logger.info(f"[DEBUG] Setting Asana token for user {user_id}")
+            if not set_encrypted_preference(user_id, 'asana_access_token', request.asana_access_token):
+                success = False
+                error_message = "Failed to update Asana access token in database."
+
+        if success:
+            logger.info("[DEBUG] Returning success from update_api_tokens")
+            return {"status": "success", "message": "Tokens updated successfully"}
+        else:
+            # Raise 500 if any set_encrypted_preference call returned False
+            logger.error(f"[API ERROR] {error_message} User: {user_id}")
+            raise HTTPException(status_code=500, detail=error_message)
+
+    except HTTPException as http_exc:
+        # Re-raise HTTPExceptions (like auth errors)
+        raise http_exc
+    except Exception as e:
+        # Catch unexpected errors during the process
+        logger.error(f"[DEBUG] Unexpected exception in update_api_tokens: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+@app.get("/preferences/tokens")
+async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
+    """Get the user's API token status."""
+    try:
+        user_id = current_user["sub"]
+        
+        # Get both tokens
+        claude_token = get_encrypted_preference(user_id, 'claude_api_key')
+        asana_token = get_encrypted_preference(user_id, 'asana_access_token')
+        
+        return {
+            "has_claude_token": claude_token is not None,
+            "has_asana_token": asana_token is not None
+        }
+    except Exception as e:
+        logger.error(f"Error getting tokens: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+async def catch_all(path: str, request: Request):
+    print(f"Unmatched request: {request.method} /{path}")
+    return JSONResponse({"error": "Not found"}, status_code=404)
 
 if __name__ == "__main__":
     import uvicorn
