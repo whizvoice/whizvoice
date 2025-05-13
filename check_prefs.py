@@ -25,14 +25,17 @@ def get_and_decrypt_preferences(user_id: str, encryption_key: str):
         }).execute()
 
         print(f"\nRPC Response for user {user_id}:")
-        print(f"  Status: {response.status_code}") # Expected: 200 for success
-        print(f"  Data: {response.data}")
-        # print(f"  Error: {response.error}") # Check if there's an RPC error message
+        # Accessing data directly, as RPC execute() response structure differs
+        # print(f"  Status: {response.status_code}") # Not available directly for RPC like this
+        print(f"  Raw Response Data: {response.data}")
+        # print(f"  Raw Response Error: {response.error}") # Check if there's an RPC error message
 
-        if response.data:
-            decrypted_prefs_json_string = response.data
-            if decrypted_prefs_json_string:
-                print("\nSuccessfully decrypted preferences.")
+        decrypted_prefs_json_string = response.data
+
+        if decrypted_prefs_json_string is not None: # Check if data is not None
+            print("\nSuccessfully received data from RPC.")
+            if isinstance(decrypted_prefs_json_string, str) and decrypted_prefs_json_string.strip(): # Check if it's a non-empty string
+                print("Attempting to parse decrypted preferences string...")
                 try:
                     decrypted_prefs_object = json.loads(decrypted_prefs_json_string)
                     print("Decrypted preferences object:")
@@ -56,15 +59,18 @@ def get_and_decrypt_preferences(user_id: str, encryption_key: str):
                     print("The decrypted data might not be valid JSON.")
                 except Exception as e:
                     print(f"An error occurred while processing decrypted preferences: {e}")
-            else:
-                print("\nDecryption returned no data (NULL). This could mean:")
-                print("  - The user has no encrypted_preferences entry.")
-                print("  - Decryption failed (e.g., wrong key, corrupted data).")
-        else:
-            print("\nRPC call did not return any data.")
-            if response.error:
-                 print(f"RPC Error Details: {response.error}")
-
+            elif isinstance(decrypted_prefs_json_string, str): # It's a string but might be empty
+                print("\nDecryption RPC returned an empty string. This might indicate no preferences or a decryption issue resulting in empty output.")
+            else: # Data is not None, not a string, or an empty string after strip
+                print("\nDecryption RPC returned data, but it's not a non-empty string. Could be NULL from DB or unexpected type.")
+                print(f"  Type of data received: {type(decrypted_prefs_json_string)}")
+        else: # decrypted_prefs_json_string is None
+            print("\nRPC call returned no data (None). This could mean:")
+            print("  - The user has no encrypted_preferences entry that could be decrypted.")
+            print("  - Decryption failed silently within the SQL function (e.g., wrong key, corrupted data)." )
+            # Add error check if your version of supabase-py populates response.error for RPC
+            # if hasattr(response, 'error') and response.error:
+            #    print(f"RPC Error Details from response object: {response.error}")
 
     except Exception as e:
         print(f"An error occurred during the RPC call: {e}")
