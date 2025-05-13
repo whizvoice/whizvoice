@@ -17,6 +17,7 @@ DEFAULT_PREFERENCES = {
     'asana_workspace_preference': None
 }
 
+CLAUDE_API_KEY_PREF_NAME = "claude_api_key" 
 
 def ensure_user_and_prefs(user_id, email=None):
     logger.info(f"Ensuring user and preferences exist for user_id: {user_id}, email: {email}")

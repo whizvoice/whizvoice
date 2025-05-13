@@ -10,7 +10,7 @@ import logging
 
 from anthropic import Anthropic
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key, get_decrypted_preference_key, set_encrypted_preference_key
+from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
 
 # Configure logging
@@ -36,7 +36,6 @@ app.add_middleware(
 )
 
 # Placeholder for the actual preference key name for Claude API key
-CLAUDE_API_KEY_PREF_NAME = "claude_api_key" 
 
 def get_current_claude_api_key(user_id: Optional[str]) -> Optional[str]:
     if not user_id:
@@ -104,6 +103,13 @@ chat_sessions = {}
 # User sessions mapping - maps user IDs to their chat sessions
 user_sessions = {}
 
+# Define the response model for the new GET endpoint
+class ApiTokenStatusResponse(BaseModel):
+    has_claude_token: bool
+    has_asana_token: bool
+
+ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to WhizVoice API"}
@@ -140,6 +146,34 @@ async def login_with_google(token_request: GoogleTokenRequest):
 @app.get("/me")
 async def get_me(current_user: Dict = Depends(get_current_user)):
     return current_user
+
+@app.get("/api/preferences/tokens", response_model=ApiTokenStatusResponse)
+async def get_api_token_status(current_user: Dict = Depends(get_current_user)):
+    user_id = current_user.get("sub")
+    if not user_id:
+        logger.error("get_api_token_status called without an authenticated user_id.")
+        raise HTTPException(status_code=401, detail="User not authenticated")
+
+    try:
+        # CLAUDE_API_KEY_PREF_NAME should be imported from preferences or defined globally
+        claude_key = get_decrypted_preference_key(user_id, CLAUDE_API_KEY_PREF_NAME)
+        asana_key = get_decrypted_preference_key(user_id, ASANA_ACCESS_TOKEN_PREF_NAME)
+
+        has_claude = bool(claude_key) 
+        has_asana = bool(asana_key)   
+        
+        logger.info(f"Checked token status for user {user_id}. Claude: {has_claude}, Asana: {has_asana}")
+        
+        return ApiTokenStatusResponse(
+            has_claude_token=has_claude,
+            has_asana_token=has_asana
+        )
+    except Exception as e:
+        logger.error(f"Error checking token status for user {user_id}: {str(e)}")
+        return ApiTokenStatusResponse(
+            has_claude_token=False,
+            has_asana_token=False
+        )
 
 @app.post("/user/api_key", status_code=200) # Singular, updates one key at a time
 async def set_user_api_key(
