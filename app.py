@@ -10,7 +10,7 @@ import logging
 
 from anthropic import Anthropic
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key
+from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key, get_decrypted_preference_key, set_encrypted_preference_key
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
 
 # Configure logging
@@ -43,12 +43,10 @@ def get_current_claude_api_key(user_id: Optional[str]) -> Optional[str]:
         logger.warning("Attempted to get Claude API key without user_id.")
         return None
     try:
-        # Assuming get_preference_key is a synchronous wrapper 
-        # around your async Supabase call or is otherwise handled.
-        # If get_preference_key itself needs to be async, this structure will need adjustment.
-        key = get_preference_key(user_id, CLAUDE_API_KEY_PREF_NAME)
+        # Now call get_decrypted_preference_key to ensure we get it from the encrypted source
+        key = get_decrypted_preference_key(user_id, CLAUDE_API_KEY_PREF_NAME)
         if key:
-            logger.info(f"Successfully retrieved Claude API key for user {user_id}.")
+            logger.info(f"Successfully retrieved (and decrypted) Claude API key for user {user_id}.")
             return key
         else:
             logger.warning(f"Claude API key not found in preferences for user {user_id} using key_name '{CLAUDE_API_KEY_PREF_NAME}'.")
@@ -88,6 +86,17 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str
     user: Dict[str, Any]
+
+class UserApiKeySetRequest(BaseModel):
+    key_name: str
+    key_value: Optional[str] # Allow None to potentially clear a key
+
+# Allow-list of preference keys that can be set via this endpoint
+ALLOWED_API_KEY_NAMES = {
+    "claude_api_key",
+    "asana_access_token",
+    # Add other future API key names here
+}
 
 # Store active chat sessions
 chat_sessions = {}
@@ -131,6 +140,34 @@ async def login_with_google(token_request: GoogleTokenRequest):
 @app.get("/me")
 async def get_me(current_user: Dict = Depends(get_current_user)):
     return current_user
+
+@app.post("/user/api_key", status_code=200) # Singular, updates one key at a time
+async def set_user_api_key(
+    request: UserApiKeySetRequest,
+    current_user: Dict = Depends(get_current_user) # Ensures endpoint is protected
+):
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+
+    if request.key_name not in ALLOWED_API_KEY_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid key_name: '{request.key_name}'. Allowed keys are: {list(ALLOWED_API_KEY_NAMES)}"
+        )
+    
+    # Allowing request.key_value to be None or an empty string to clear the key.
+    # set_encrypted_preference_key should handle this by storing None or empty string,
+    # which should then be retrievable as such.
+    if set_encrypted_preference_key(user_id, request.key_name, request.key_value):
+        logger.info(f"Successfully set preference key '{request.key_name}' for user {user_id}.")
+        return {"message": f"Successfully set API key: '{request.key_name}'"}
+    else:
+        logger.error(f"Failed to set preference key '{request.key_name}' for user {user_id}.")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to set API key: '{request.key_name}'"
+        )
 
 @app.websocket("/chat")
 async def websocket_endpoint(websocket: WebSocket):
