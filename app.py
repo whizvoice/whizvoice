@@ -9,7 +9,6 @@ import traceback
 import logging
 
 from anthropic import Anthropic
-from constants import CLAUDE_API_KEY
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
@@ -36,8 +35,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Anthropic client
-client = Anthropic(api_key=CLAUDE_API_KEY)
+# Placeholder for the actual preference key name for Claude API key
+CLAUDE_API_KEY_PREF_NAME = "claude_api_key" 
+
+def get_current_claude_api_key(user_id: Optional[str]) -> Optional[str]:
+    if not user_id:
+        logger.warning("Attempted to get Claude API key without user_id.")
+        return None
+    try:
+        # Assuming get_preference_key is a synchronous wrapper 
+        # around your async Supabase call or is otherwise handled.
+        # If get_preference_key itself needs to be async, this structure will need adjustment.
+        key = get_preference_key(user_id, CLAUDE_API_KEY_PREF_NAME)
+        if key:
+            logger.info(f"Successfully retrieved Claude API key for user {user_id}.")
+            return key
+        else:
+            logger.warning(f"Claude API key not found in preferences for user {user_id} using key_name '{CLAUDE_API_KEY_PREF_NAME}'.")
+            return None
+    except Exception as e:
+        logger.error(f"Error retrieving Claude API key for user {user_id}: {str(e)}")
+        return None
+
+# This dictionary will cache Anthropic clients per API key
+_anthropic_clients_cache: Dict[str, Anthropic] = {}
+
+def get_anthropic_client(user_id: Optional[str]) -> Optional[Anthropic]:
+    api_key = get_current_claude_api_key(user_id)
+    if not api_key:
+        return None
+
+    if api_key in _anthropic_clients_cache:
+        return _anthropic_clients_cache[api_key]
+    
+    logger.info(f"Creating new Anthropic client for user {user_id} (key ending with ...{api_key[-4:] if len(api_key) > 4 else ''}).")
+    new_client = Anthropic(api_key=api_key)
+    _anthropic_clients_cache[api_key] = new_client
+    return new_client
 
 class ChatMessage(BaseModel):
     content: str
@@ -159,7 +193,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # Process message similar to HTTP endpoint
                     chat_sessions[session_id].append({"role": "user", "content": message})
-                    response = client.beta.messages.create(
+
+                    current_anthropic_client = get_anthropic_client(user_id)
+                    if not current_anthropic_client:
+                        await websocket.send_text("Error: Claude API key not configured for your account. Please contact support or set your API key via preferences.")
+                        logger.error(f"Claude client could not be initialized for user {user_id}. API key missing or error fetching.")
+                        continue 
+
+                    response = current_anthropic_client.beta.messages.create(
                         model="claude-3-7-sonnet-20250219",
                         max_tokens=1000,
                         messages=chat_sessions[session_id],
@@ -185,7 +226,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             }]}
                         ])
                         
-                        response = client.beta.messages.create(
+                        response = current_anthropic_client.beta.messages.create(
                             model="claude-3-7-sonnet-20250219",
                             max_tokens=1000,
                             messages=chat_sessions[session_id],

@@ -28,7 +28,7 @@ def get_asana_workspaces():
 
     try:
         workspaces_api = asana.WorkspacesApi(api_client)
-        workspaces = list(workspaces_api.get_workspaces({}))
+        workspaces = list(workspaces_api.get_workspaces(opts={}))
         return workspaces
     except AsanaError as e:
         return f"Error accessing Asana API: {str(e)}"
