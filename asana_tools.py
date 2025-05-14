@@ -3,6 +3,9 @@ from asana.rest import ApiException as AsanaError
 from datetime import datetime, timedelta
 import json
 from preferences import get_preference, set_preference, get_preference_key
+from custom_tools import AsanaChangeParentTool, AsanaGetWorkspacesTool, AsanaCreateTaskTool, AsanaAddTaskCommentTool
+from वेबsocket_protocol import MessageType, ExtensionType, ExecutionState, ToolResponseMessage, ExecutionStateMessage
+import asyncio
 
 def get_date_range(range_str=None):
     today = datetime.now().date()
@@ -190,7 +193,7 @@ tools = [
     {
         "type": "custom",
         "name": "set_workspace_preference",
-        "description": "Set your preferred Asana workspace. Pass the workspace GID to make it the default.",
+        "description": "Set your preferred Asana workspace. Pass the workspace GID to make it the default. If you do not know the GID please use the get_asana_workspaces tool to get a list of workspaces and their GIDs. If there is more than one, ask the user which is their preferred workspace.",
         "input_schema": {
             "type": "object",
             "properties": {
