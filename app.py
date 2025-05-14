@@ -249,9 +249,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(f"Authenticated WebSocket connection for user {user_email} ({user_id})")
                 await websocket.send_text(f"Hello {user_name}! I'm Claude with Asana integration.")
             except JWTError as e:
-                logger.warning(f"Invalid JWT in WebSocket connection: {str(e)}. Token (first 15 chars): {token[:15]}...")
-                await websocket.send_text("Authentication failed. Please login again.")
-                await websocket.close(code=1008, reason="Invalid token")
+                logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
+                error_payload = {
+                    "type": "error",
+                    "code": "AUTH_JWT_INVALID",
+                    "message": "Authentication failed. Please login again."
+                }
+                await websocket.send_text(json.dumps(error_payload))
+                await websocket.close(code=1008, reason="Invalid token") # 1008: Policy Violation
+                return 
+            except Exception as e:
+                logger.error(f"Error during WebSocket authentication: {str(e)}")
+                logger.error(traceback.format_exc())
+                error_payload = {
+                    "type": "error",
+                    "code": "AUTH_GENERAL_ERROR",
+                    "message": "Authentication failed. Please contact support."
+                }
+                await websocket.send_text(json.dumps(error_payload))
+                await websocket.close(code=1011)
                 return
         else:
             # Allow anonymous connections but with warning
