@@ -34,7 +34,11 @@ def get_asana_workspaces(user_id: str):
         workspaces = list(workspaces_api.get_workspaces(opts={}))
         return workspaces
     except AsanaError as e:
-        return f"Error accessing Asana API: {str(e)}"
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=None):
     configuration = asana.Configuration()
@@ -78,7 +82,11 @@ def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=
         
         return tasks
     except AsanaError as e:
-        return f"Error accessing Asana API: {str(e)}"
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def get_current_date():
     return datetime.now().strftime('%Y-%m-%d')
@@ -117,7 +125,11 @@ def get_parent_tasks(user_id: str, workspace_gid=None):
         
         return parent_tasks
     except AsanaError as e:
-        return f"Error accessing Asana API: {str(e)}"
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def create_asana_task(user_id: str, name, workspace_gid=None, due_date=None, notes=None, parent_task_gid=None):
     configuration = asana.Configuration()
@@ -163,7 +175,11 @@ def create_asana_task(user_id: str, name, workspace_gid=None, due_date=None, not
 
         return new_task
     except AsanaError as e:
-        return f"Error creating Asana task: {str(e)}"
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
     configuration = asana.Configuration()
@@ -184,7 +200,11 @@ def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
         print(f"DEBUG: Updated task: {updated_task}")
         return updated_task
     except AsanaError as e:
-        return f"Error changing task parent: {str(e)}"
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 # Define available tools
 tools = [
