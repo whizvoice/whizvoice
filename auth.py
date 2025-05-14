@@ -8,6 +8,7 @@ import os
 from constants import GOOGLE_WEB_CLIENT_SECRET
 from google.oauth2 import id_token
 from google.auth.transport import requests
+import logging
 
 # Security scheme for JWT
 security = HTTPBearer()
@@ -46,10 +47,22 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         token = credentials.credentials
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-    except InvalidTokenError:
+    except InvalidTokenError as e:
+        # Log the specific InvalidTokenError before raising HTTPException
+        logger = logging.getLogger(__name__)
+        logger.error(f"JWT InvalidTokenError: {str(e)}. Token (first 15 chars): {token[:15]}...")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e:
+        # Catch any other potential errors during decoding and log them
+        logger = logging.getLogger(__name__)
+        logger.error(f"JWT General Decoding Error: {str(e)}. Token (first 15 chars): {token[:15]}...")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token decoding error", # More generic detail for unexpected errors
             headers={"WWW-Authenticate": "Bearer"},
         )
 
