@@ -11,7 +11,7 @@ import logging
 from anthropic import Anthropic
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_preference_key, set_preference_key, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME
-from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM
+from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -95,6 +95,7 @@ class GoogleTokenRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
     user: Dict[str, Any]
 
@@ -135,17 +136,25 @@ async def login_with_google(token_request: GoogleTokenRequest):
         # Ensure user and preferences exist
         ensure_user_and_prefs(user_info["sub"], email=user_info["email"])
         
-        # Create a JWT token for our service
-        token_data = {
+        # Create token data for our service tokens
+        # For access token, include more details
+        access_token_data = {
             "sub": user_info["sub"],
             "email": user_info["email"],
             "name": user_info["name"]
         }
+        # For refresh token, only sub is strictly needed for stateless, but can include email for logging/context
+        refresh_token_data = {
+            "sub": user_info["sub"]
+            # "email": user_info["email"] # Optional: email can be in refresh token for context if desired
+        }
         
-        access_token = create_access_token(token_data)
+        access_token = create_access_token(access_token_data)
+        refresh_token = create_refresh_token(refresh_token_data)
         
         return {
             "access_token": access_token,
+            "refresh_token": refresh_token,
             "token_type": "bearer",
             "user": user_info
         }
@@ -214,6 +223,68 @@ async def set_user_api_key(
             status_code=500,
             detail=f"Failed to set API key: '{request.key_name}'"
         )
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+class NewAccessTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+@app.post("/auth/refresh", response_model=NewAccessTokenResponse)
+async def refresh_access_token(request_data: RefreshTokenRequest):
+    try:
+        from jose import jwt, JWTError # Ensure JWTError is available
+
+        logger.info(f"Refresh token attempt. Token (first 15): {request_data.refresh_token[:15]}...")
+        
+        payload = jwt.decode(
+            request_data.refresh_token,
+            AUTH_SECRET_KEY, 
+            algorithms=[AUTH_ALGORITHM],
+            options={"verify_aud": False} # Assuming refresh tokens don't have specific audience
+        )
+        
+        token_type = payload.get("type")
+        if token_type != "refresh":
+            logger.warning(f"Invalid token type for refresh: '{token_type}'")
+            raise HTTPException(status_code=401, detail="Invalid token type for refresh")
+
+        user_id = payload.get("sub")
+        if not user_id:
+            logger.warning("Refresh token payload missing 'sub' (user_id).")
+            raise HTTPException(status_code=401, detail="Invalid refresh token: user_id missing")
+
+        # For stateless refresh, we assume if it decodes and is type 'refresh', it's valid.
+        # If we had a revocation list or stored refresh tokens, we'd check that here.
+
+        # Create a new access token - payload might need more than just sub for access tokens
+        # Re-fetch user details or ensure access token payload is consistent
+        # For simplicity, if access_token_data in /auth/google was just {"sub": user_id, "email": ..., "name": ...}
+        # we need to ensure that info is still available or decide what goes into a refreshed access token.
+        # Let's assume for now the access token only strictly needs 'sub' for get_current_user, 
+        # but it's better if it matches the original structure.
+        # Since we don't have email/name from refresh token, we keep new access token minimal.
+        new_access_token_data = {
+            "sub": user_id,
+            # If you need email/name in access tokens and they aren't in refresh token,
+            # you might need to fetch them from DB or adjust what `get_current_user` relies on.
+            # For now, this will make the access token a bit simpler than the login one.
+        }
+        new_access_token = create_access_token(new_access_token_data)
+        
+        logger.info(f"Successfully refreshed access token for user {user_id}.")
+        return NewAccessTokenResponse(access_token=new_access_token)
+
+    except JWTError as e:
+        logger.warning(f"JWTError during refresh token validation: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Invalid or expired refresh token: {str(e)}")
+    except HTTPException as e: # Re-raise HTTPExceptions to ensure they propagate correctly
+        raise e
+    except Exception as e:
+        logger.error(f"Unexpected error during token refresh: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Could not refresh token due to server error")
 
 @app.websocket("/chat")
 async def websocket_endpoint(websocket: WebSocket):
