@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -34,6 +34,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Middleware to log request headers
+@app.middleware("http")
+async def log_request_headers(request: Request, call_next):
+    # Log all headers
+    header_log_str = f"Incoming request to {request.url.path} with headers:\n"
+    for name, value in request.headers.items():
+        header_log_str += f"  {name}: {value}\n"
+    logger.info(header_log_str)
+    
+    response = await call_next(request)
+    return response
 
 # Placeholder for the actual preference key name for Claude API key
 
