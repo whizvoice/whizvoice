@@ -147,7 +147,7 @@ async def login_with_google(token_request: GoogleTokenRequest):
 async def get_me(current_user: Dict = Depends(get_current_user)):
     return current_user
 
-@app.get("/api/preferences/tokens", response_model=ApiTokenStatusResponse)
+@app.get("/preferences/tokens", response_model=ApiTokenStatusResponse)
 async def get_api_token_status(current_user: Dict = Depends(get_current_user)):
     user_id = current_user.get("sub")
     if not user_id:
