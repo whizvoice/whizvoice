@@ -361,7 +361,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Receive message from client
                     message = await websocket.receive_text()
                     
-                    # Process message similar to HTTP endpoint
                     chat_sessions[session_id].append({"role": "user", "content": message})
 
                     current_anthropic_client = get_anthropic_client(user_id)
@@ -431,13 +430,24 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Send Claude's final response back to client
                     if response.content and response.content[0].type == 'text':
                         await websocket.send_text(response.content[0].text)
-                    elif response.content: # Response has content, but first block isn't text (e.g. just stop_reason)
+                    elif response.content: 
                         logger.info("Claude's response did not end with a text block but was not a tool use. Sending a status or nothing.")
-                        # Example: send a generic completion message or just log and send nothing to avoid confusing client.
-                        # await websocket.send_text(json.dumps({"type": "status", "message": "Processing complete, no text response."}))
-                    else: # No content blocks from Claude at all (should be rare)
+                    else: 
                         await websocket.send_text(json.dumps({"error": "EmptyResponse", "detail": "Assistant provided no content."}))
                         
+                except anthropic.AuthenticationError as claude_auth_exc: # Specific catch for Anthropic auth errors
+                    logger.warning(f"Anthropic AuthenticationError for session {session_id}: {str(claude_auth_exc)}")
+                    error_payload = {
+                        "type": "error",
+                        "code": "CLAUDE_AUTHENTICATION_ERROR",
+                        "message": "Claude API authentication failed. Please check your Claude API Key in Settings.",
+                        "detail": str(claude_auth_exc) # Include details from the exception
+                    }
+                    try:
+                        await websocket.send_text(json.dumps(error_payload))
+                    except Exception as send_exc:
+                        logger.error(f"Failed to send Claude AuthenticationError to client for session {session_id}: {str(send_exc)}")
+                    continue # Continue to next message loop iteration
                 except StopIteration as si:
                     if str(si) == "AsanaAuthErrorHandled" or str(si) == "ToolBlockMissingError":
                         logger.info(f"Stopped iteration due to: {str(si)}. Awaiting next message.")
