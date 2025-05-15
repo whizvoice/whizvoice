@@ -211,7 +211,7 @@ tools = [
     {
         "type": "custom",
         "name": "set_workspace_preference",
-        "description": "Set your preferred Asana workspace. Pass the workspace GID to make it the default. If you do not know the GID please use the get_asana_workspaces tool to get a list of workspaces and their GIDs. If there is more than one, ask the user which is their preferred workspace.",
+        "description": "Set your preferred Asana workspace. Before setting the workspace preference, please check if a preference is already set using the get_workspace_preference tool. Pass the workspace GID to make it the default. If you do not know the GID please use the get_asana_workspaces tool to get a list of workspaces and their GIDs. If there is more than one, ask the user which is their preferred workspace.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -285,7 +285,7 @@ tools = [
             "properties": {
                 "workspace_gid": {
                     "type": "string",
-                    "description": "Workspace to get tasks from. Please use the user's preferred workspace if they haven't specified one, and give them the opportunity to set a preferred workspace if they haven't already."
+                    "description": "Workspace to get tasks from. Please use the user's preferred workspace from the get_workspace_preference tool and give them the opportunity to set a preferred workspace if they don't have one set."
                 }
             },
             "required": []
