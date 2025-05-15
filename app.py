@@ -366,7 +366,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     current_anthropic_client = get_anthropic_client(user_id)
                     if not current_anthropic_client:
-                        await websocket.send_text("Error: Claude API key not configured for your account. Please contact support or set your API key via preferences.")
+                        error_payload_key = {
+                            "type": "error", 
+                            "code": "CLAUDE_API_KEY_MISSING", 
+                            "message": "Error: Claude API key not configured for your account. Please set it in Settings."
+                        }
+                        await websocket.send_text(json.dumps(error_payload_key))
                         logger.error(f"Claude client could not be initialized for user {user_id}. API key missing or error fetching.")
                         continue 
 
@@ -382,17 +387,31 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # Handle tool calls
                     while response.stop_reason == 'tool_use':
-                        tool_block = next(block for block in response.content if block.type == 'tool_use')
-                        # Pass the authenticated user_id to execute_tool
+                        tool_block = next((block for block in response.content if block.type == 'tool_use'), None)
+                        if not tool_block:
+                            logger.error("Stop reason is tool_use but no tool_use block found.")
+                            # Send some error or break, as this is an unexpected state
+                            await websocket.send_text(json.dumps({"error": "ServerError", "detail": "Tool use indicated but no tool found."}))
+                            raise StopIteration("ToolBlockMissingError")
+
                         logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
-                        result = execute_tool(tool_block.name, tool_block.input, user_id)
+                        tool_execution_result = execute_tool(tool_block.name, tool_block.input, user_id)
                         
+                        # Check if the tool_execution_result is our specific Asana auth error
+                        if isinstance(tool_execution_result, dict) and \
+                           tool_execution_result.get("status_code") == 401 and \
+                           "Asana authentication failed" in tool_execution_result.get("error", ""):
+                            logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
+                            await websocket.send_text(json.dumps(tool_execution_result))
+                            raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
+
+                        # If not the specific Asana auth error, proceed as before with Claude:
                         chat_sessions[session_id].extend([
                             {"role": "assistant", "content": [tool_block]},
                             {"role": "user", "content": [{
                                 "type": "tool_result",
                                 "tool_use_id": tool_block.id,
-                                "content": json.dumps(result)
+                                "content": json.dumps(tool_execution_result) 
                             }]}
                         ])
                         
@@ -406,25 +425,44 @@ async def websocket_endpoint(websocket: WebSocket):
                             betas=["token-efficient-tools-2025-02-19"]
                         )
                     
-                    # Add assistant response to session
+                    # Add assistant final response to session history (if not an intercepted error)
                     chat_sessions[session_id].append({"role": "assistant", "content": response.content})
                     
-                    # Send response back to client
-                    if response.content[0].type == 'text':
+                    # Send Claude's final response back to client
+                    if response.content and response.content[0].type == 'text':
                         await websocket.send_text(response.content[0].text)
-                    else:
-                        await websocket.send_text("Error: Unexpected response format")
+                    elif response.content: # Response has content, but first block isn't text (e.g. just stop_reason)
+                        logger.info("Claude's response did not end with a text block but was not a tool use. Sending a status or nothing.")
+                        # Example: send a generic completion message or just log and send nothing to avoid confusing client.
+                        # await websocket.send_text(json.dumps({"type": "status", "message": "Processing complete, no text response."}))
+                    else: # No content blocks from Claude at all (should be rare)
+                        await websocket.send_text(json.dumps({"error": "EmptyResponse", "detail": "Assistant provided no content."}))
                         
+                except StopIteration as si:
+                    if str(si) == "AsanaAuthErrorHandled" or str(si) == "ToolBlockMissingError":
+                        logger.info(f"Stopped iteration due to: {str(si)}. Awaiting next message.")
+                        continue # Go to the top of the `while True` to await next user message
+                    else:
+                        logger.warning(f"Unhandled StopIteration: {str(si)}. Re-raising.")
+                        raise # Re-raise other StopIterations if any
                 except WebSocketDisconnect:
-                    # Clean up the session
                     cleanup_session(session_id, user_id)
+                    logger.info(f"WebSocket disconnected for session {session_id}")
                     break
                 except Exception as e:
-                    # Handle other errors
-                    logger.error(f"WebSocket error: {str(e)}")
+                    logger.error(f"Error during WebSocket message processing for session {session_id}: {str(e)}")
                     logger.error(traceback.format_exc())
-                    await websocket.send_text(f"Error: {str(e)}")
-                    continue
+                    try:
+                        # Send a structured JSON error to the client
+                        error_payload = {
+                            "type": "error", 
+                            "code": "SERVER_PROCESSING_ERROR", 
+                            "message": f"An error occurred: {str(e)}"
+                        }
+                        await websocket.send_text(json.dumps(error_payload))
+                    except Exception as send_exc:
+                        logger.error(f"Failed to send error to client for session {session_id}: {str(send_exc)}")
+                    continue # Attempt to recover and wait for next message if possible
                     
         except Exception as e:
             # Handle any other errors that might occur
