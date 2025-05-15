@@ -294,7 +294,7 @@ tools = [
     {
         "type": "custom",
         "name": "create_asana_task",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. If no workspace is specified, the user's preferred workspace is used automatically. Before using this tool, please guess what the parent task should be based on the name of the task and existing parent tasks, and confirm with the user.",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. If no workspace is specified, the user's preferred workspace is used automatically (use the get_workspace_preference tool to check if a preferred workspace GID is set). Before using this tool, please guess what the parent task should be based on the name of the task and existing parent tasks, and confirm with the user.",
         "input_schema": {
             "type": "object",
             "properties": {
