@@ -8,7 +8,7 @@ import os
 import traceback
 import logging
 
-from anthropic import Anthropic
+from anthropic import Anthropic, AuthenticationError
 from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -367,12 +367,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not current_anthropic_client:
                         error_payload_key = {
                             "type": "error", 
-                            "code": "CLAUDE_API_KEY_MISSING", 
-                            "message": "Error: Claude API key not configured for your account. Please set it in Settings."
+                            "code": "CLAUDE_API_KEY_MISSING",
+                            "message": "Claude API key is not set. Please configure it in settings."
                         }
                         await websocket.send_text(json.dumps(error_payload_key))
-                        logger.error(f"Claude client could not be initialized for user {user_id}. API key missing or error fetching.")
-                        continue 
+                        logger.warning(f"User {user_id} attempted to send message without Claude API key.")
+                        continue # Allow user to set key and try again without breaking connection.
 
                     response = current_anthropic_client.beta.messages.create(
                         model="claude-3-7-sonnet-20250219",
@@ -435,19 +435,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     else: 
                         await websocket.send_text(json.dumps({"error": "EmptyResponse", "detail": "Assistant provided no content."}))
                         
-                except anthropic.AuthenticationError as claude_auth_exc: # Specific catch for Anthropic auth errors
-                    logger.warning(f"Anthropic AuthenticationError for session {session_id}: {str(claude_auth_exc)}")
+                except AuthenticationError as claude_auth_exc: # MODIFIED: Use AuthenticationError directly
+                    logger.warning(f"Anthropic authentication error for user {user_id} in session {session_id}: {claude_auth_exc}")
                     error_payload = {
                         "type": "error",
                         "code": "CLAUDE_AUTHENTICATION_ERROR",
-                        "message": "Claude API authentication failed. Please check your Claude API Key in Settings.",
-                        "detail": str(claude_auth_exc) # Include details from the exception
+                        "message": f"Claude API authentication failed: {str(claude_auth_exc)}. Please check your Claude API Key in settings."
                     }
-                    try:
-                        await websocket.send_text(json.dumps(error_payload))
-                    except Exception as send_exc:
-                        logger.error(f"Failed to send Claude AuthenticationError to client for session {session_id}: {str(send_exc)}")
-                    continue # Continue to next message loop iteration
+                    await websocket.send_text(json.dumps(error_payload))
+                    # Don't set _is_responding to False here, as the loop will continue or break
+                    # Let the client handle this message and decide if it should resend or wait.
+                    # Consider if the connection should be kept open or closed based on auth failure.
+                    # For now, keeping it open to allow the user to fix the key.
+                    continue # Continue to the next iteration of the loop to receive next message
                 except StopIteration as si:
                     if str(si) == "AsanaAuthErrorHandled" or str(si) == "ToolBlockMissingError":
                         logger.info(f"Stopped iteration due to: {str(si)}. Awaiting next message.")
@@ -460,7 +460,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.info(f"WebSocket disconnected for session {session_id}")
                     break
                 except Exception as e:
-                    logger.error(f"Error during WebSocket message processing for session {session_id}: {str(e)}")
+                    logger.error(f"Error during WebSocket message processing for session {session_id}: {str(e)}", exc_info=True)
                     logger.error(traceback.format_exc())
                     try:
                         # Send a structured JSON error to the client
