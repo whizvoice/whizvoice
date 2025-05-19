@@ -8,7 +8,7 @@ import asyncio
 def get_asana_client(user_id):
     """Get an Asana client configured with the user's access token."""
     configuration = asana.Configuration()
-    token = get_encrypted_preference(user_id, 'asana_access_token')
+    token = get_decrypted_preference_key(user_id, 'asana_access_token')
     if not token:
         raise ValueError("Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
     configuration.access_token = token
