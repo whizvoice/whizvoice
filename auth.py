@@ -23,6 +23,8 @@ GOOGLE_CLIENT_IDS = [
     "2815827813-kdkrisushm16fsi95533kmll1usm3uco.apps.googleusercontent.com"   # Android client ID
 ]
 
+logger = logging.getLogger(__name__)
+
 class AuthError(Exception):
     """Custom exception for authentication errors"""
     def __init__(self, message: str, status_code: int = 401):
@@ -55,8 +57,11 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     Verify a JWT token and return the payload
     """
     try:
+        logger.info("[DEBUG] Entered verify_token")
         token = credentials.credentials
+        logger.info(f"[DEBUG] Token to verify (first 20 chars): {token[:20]}...")
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        logger.info(f"[DEBUG] Token decoded successfully: {payload}")
         return payload
     except InvalidTokenError as e:
         # Log the specific InvalidTokenError before raising HTTPException
@@ -119,11 +124,16 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     """
     Get the current user from a JWT token
     """
+    logger.info("[DEBUG] Entered get_current_user")
     try:
+        logger.info(f"[DEBUG] Incoming Authorization header: {credentials.credentials[:20]}...")
         payload = verify_token(credentials)
         user_id = payload.get("sub")
         if user_id is None:
+            logger.error("[DEBUG] No user_id in token payload")
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        logger.info(f"[DEBUG] Successfully authenticated user_id: {user_id}")
         return payload
     except Exception as e:
+        logger.error(f"[DEBUG] Error in get_current_user: {str(e)}")
         raise HTTPException(status_code=401, detail=str(e)) 

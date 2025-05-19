@@ -5,6 +5,15 @@ import json
 from preferences import get_preference, set_preference, get_decrypted_preference_key
 import asyncio
 
+def get_asana_client(user_id):
+    """Get an Asana client configured with the user's access token."""
+    configuration = asana.Configuration()
+    token = get_encrypted_preference(user_id, 'asana_access_token')
+    if not token:
+        raise ValueError("Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
+    configuration.access_token = token
+    return asana.ApiClient(configuration)
+
 def get_date_range(range_str=None):
     today = datetime.now().date()
     
@@ -47,12 +56,12 @@ def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=
         return "Error: Asana access token not found in user preferences."
     configuration.access_token = asana_access_token
     api_client = asana.ApiClient(configuration)
-
     if not workspace_gid:
         workspace_gid = get_preference(user_id, 'asana_workspace_preference')
         if not workspace_gid:
             return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
     try:
+        api_client = get_asana_client(user_id)
         # Get current user
         users_api = asana.UsersApi(api_client)
         me = users_api.get_user("me", {})
@@ -81,6 +90,9 @@ def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=
         tasks = [task for task in tasks if start_date <= task['due_on'] <= end_date]
         
         return tasks
+    except ValueError as e:
+        # Re-raise the token error to be handled by the WebSocket endpoint
+        raise
     except AsanaError as e:
         status_code = e.status if hasattr(e, 'status') else 500
         if status_code == 401:
@@ -104,6 +116,7 @@ def get_parent_tasks(user_id: str, workspace_gid=None):
         if not workspace_gid:
             return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
     try:
+        api_client = get_asana_client(user_id)
         # Get current user
         users_api = asana.UsersApi(api_client)
         me = users_api.get_user("me", {})
@@ -124,6 +137,9 @@ def get_parent_tasks(user_id: str, workspace_gid=None):
                        not task.get('completed', False)]
         
         return parent_tasks
+    except ValueError as e:
+        # Re-raise the token error to be handled by the WebSocket endpoint
+        raise
     except AsanaError as e:
         status_code = e.status if hasattr(e, 'status') else 500
         if status_code == 401:
@@ -145,6 +161,7 @@ def create_asana_task(user_id: str, name, workspace_gid=None, due_date=None, not
             return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
 
     try:
+        api_client = get_asana_client(user_id)
         # Get current user
         users_api = asana.UsersApi(api_client)
         me = users_api.get_user("me", {})
@@ -174,6 +191,9 @@ def create_asana_task(user_id: str, name, workspace_gid=None, due_date=None, not
             new_task = tasks_api.create_subtask_for_task(body={'data': task_data}, task_gid=parent_task_gid, opts={'opt_fields': 'name,due_on,completed,projects.name'})
 
         return new_task
+    except ValueError as e:
+        # Re-raise the token error to be handled by the WebSocket endpoint
+        raise
     except AsanaError as e:
         status_code = e.status if hasattr(e, 'status') else 500
         if status_code == 401:
@@ -188,8 +208,8 @@ def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
         return "Error: Asana access token not found in user preferences."
     configuration.access_token = asana_access_token
     api_client = asana.ApiClient(configuration)
-
     try:
+        api_client = get_asana_client(user_id)
         tasks_api = asana.TasksApi(api_client)
         # Update the task's parent
         updated_task = tasks_api.set_parent_for_task(
@@ -199,6 +219,9 @@ def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
         )
         print(f"DEBUG: Updated task: {updated_task}")
         return updated_task
+    except ValueError as e:
+        # Re-raise the token error to be handled by the WebSocket endpoint
+        raise
     except AsanaError as e:
         status_code = e.status if hasattr(e, 'status') else 500
         if status_code == 401:

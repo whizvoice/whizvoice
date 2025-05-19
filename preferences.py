@@ -129,7 +129,6 @@ def get_decrypted_preference_key(user_id, key):
         return None
 
 
-
 def set_encrypted_preference_key(user_id, key, value):
     """Sets a specific key-value pair in the ENCRYPTED preferences store using RPC.
        This function ONLY updates the encrypted_preferences column.

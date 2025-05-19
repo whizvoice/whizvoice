@@ -2,17 +2,18 @@ from unittest.mock import patch, MagicMock
 from datetime import datetime
 import unittest
 from anthropic import Anthropic
-from constants import CLAUDE_API_KEY
 from chat import ChatSession
+from preferences import get_encrypted_preference
 
 class TestChatIntegration(unittest.TestCase):
-    def test_haiku_request(self):
+    @patch('preferences.get_encrypted_preference')
+    def test_haiku_request(self, mock_get_pref):
         """Test that asking for a haiku gets a real response from Claude without Asana mentions"""
-        # Create a real client (will use actual API key)
-        client = Anthropic(api_key=CLAUDE_API_KEY)
+        # Mock the API key
+        mock_get_pref.return_value = "test-api-key"
         
-        # Create chat session
-        session = ChatSession(client)
+        # Create chat session with test user ID
+        session = ChatSession("test-user-id")
         
         # Ask for a haiku
         response = session.handle_message("Write me a haiku about nature")
@@ -30,7 +31,8 @@ class TestChatIntegration(unittest.TestCase):
     @patch('chat.get_asana_tasks')
     @patch('preferences.load_preferences')
     @patch('preferences.save_preferences')
-    def test_haiku_then_asana_workflow(self, mock_save_prefs, mock_load_prefs, mock_get_tasks, mock_get_workspaces):
+    @patch('preferences.get_encrypted_preference')
+    def test_haiku_then_asana_workflow(self, mock_get_pref, mock_save_prefs, mock_load_prefs, mock_get_tasks, mock_get_workspaces):
         """Test that Claude can switch between non-tool and tool responses appropriately"""
         # Setup mock returns
         mock_workspaces = [
@@ -50,9 +52,11 @@ class TestChatIntegration(unittest.TestCase):
         mock_load_prefs.return_value = mock_prefs
         mock_save_prefs.return_value = True
         
-        # Create real Claude client (only mock Asana)
-        client = Anthropic(api_key=CLAUDE_API_KEY)
-        session = ChatSession(client)
+        # Mock API key
+        mock_get_pref.return_value = "test-api-key"
+        
+        # Create chat session
+        session = ChatSession("test-user-id")
         
         # First ask for a haiku
         haiku_response = session.handle_message("Write me a haiku about nature")
