@@ -2,12 +2,13 @@ import asana
 from asana.rest import ApiException as AsanaError
 from datetime import datetime, timedelta
 import json
-from preferences import get_preference, set_preference, get_encrypted_preference
+from preferences import get_preference, set_preference, get_decrypted_preference_key
+import asyncio
 
 def get_asana_client(user_id):
     """Get an Asana client configured with the user's access token."""
     configuration = asana.Configuration()
-    token = get_encrypted_preference(user_id, 'asana_access_token')
+    token = get_decrypted_preference_key(user_id, 'asana_access_token')
     if not token:
         raise ValueError("Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
     configuration.access_token = token
@@ -29,21 +30,32 @@ def get_date_range(range_str=None):
     
     return today, today  # Default to today if range not recognized
 
-def get_asana_workspaces(user_id):
-    """Get all Asana workspaces."""
+def get_asana_workspaces(user_id: str):
+    configuration = asana.Configuration()
+    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
+    api_client = asana.ApiClient(configuration)
+
     try:
-        client = get_asana_client(user_id)
-        api_instance = asana.WorkspacesApi(client)
-        workspaces = api_instance.get_workspaces()
-        return [{'gid': w.gid, 'name': w.name} for w in workspaces]
-    except ValueError as e:
-        # Re-raise the token error to be handled by the WebSocket endpoint
-        raise
+        workspaces_api = asana.WorkspacesApi(api_client)
+        workspaces = list(workspaces_api.get_workspaces(opts={}))
+        return workspaces
     except AsanaError as e:
-        print(f"Exception when calling WorkspacesApi->get_workspaces: {e}")
-        return []
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=None):
+    configuration = asana.Configuration()
+    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
+    api_client = asana.ApiClient(configuration)
     if not workspace_gid:
         workspace_gid = get_preference(user_id, 'asana_workspace_preference')
         if not workspace_gid:
@@ -82,12 +94,23 @@ def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
     except AsanaError as e:
-        return f"Error accessing Asana API: {str(e)}"
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def get_current_date():
     return datetime.now().strftime('%Y-%m-%d')
 
 def get_parent_tasks(user_id: str, workspace_gid=None):
+    configuration = asana.Configuration()
+    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
+    api_client = asana.ApiClient(configuration)
+
     if not workspace_gid:
         workspace_gid = get_preference(user_id, 'asana_workspace_preference')
         if not workspace_gid:
@@ -118,9 +141,20 @@ def get_parent_tasks(user_id: str, workspace_gid=None):
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
     except AsanaError as e:
-        return f"Error accessing Asana API: {str(e)}"
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def create_asana_task(user_id: str, name, workspace_gid=None, due_date=None, notes=None, parent_task_gid=None):
+    configuration = asana.Configuration()
+    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
+    api_client = asana.ApiClient(configuration)
+
     if not workspace_gid:
         workspace_gid = get_preference(user_id, 'asana_workspace_preference')
         if not workspace_gid:
@@ -161,9 +195,19 @@ def create_asana_task(user_id: str, name, workspace_gid=None, due_date=None, not
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
     except AsanaError as e:
-        return f"Error creating Asana task: {str(e)}"
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
+    configuration = asana.Configuration()
+    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
+    api_client = asana.ApiClient(configuration)
     try:
         api_client = get_asana_client(user_id)
         tasks_api = asana.TasksApi(api_client)
@@ -179,14 +223,18 @@ def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
     except AsanaError as e:
-        return f"Error changing task parent: {str(e)}"
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 # Define available tools
 tools = [
     {
         "type": "custom",
         "name": "set_workspace_preference",
-        "description": "Set your preferred Asana workspace. Pass the workspace GID to make it the default.",
+        "description": "Set your preferred Asana workspace. Before setting the workspace preference, please check if a preference is already set using the get_workspace_preference tool. Pass the workspace GID to make it the default. If you do not know the GID please use the get_asana_workspaces tool to get a list of workspaces and their GIDs. If there is more than one, ask the user which is their preferred workspace.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -260,7 +308,7 @@ tools = [
             "properties": {
                 "workspace_gid": {
                     "type": "string",
-                    "description": "Workspace to get tasks from. Please use the user's preferred workspace if they haven't specified one, and give them the opportunity to set a preferred workspace if they haven't already."
+                    "description": "Workspace to get tasks from. Please use the user's preferred workspace from the get_workspace_preference tool and give them the opportunity to set a preferred workspace if they don't have one set."
                 }
             },
             "required": []
@@ -269,7 +317,7 @@ tools = [
     {
         "type": "custom",
         "name": "create_asana_task",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. If no workspace is specified, the user's preferred workspace is used automatically. Before using this tool, please guess what the parent task should be based on the name of the task and existing parent tasks, and confirm with the user.",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. If no workspace is specified, the user's preferred workspace is used automatically (use the get_workspace_preference tool to check if a preferred workspace GID is set). Before using this tool, please guess what the parent task should be based on the name of the task and existing parent tasks, and confirm with the user.",
         "input_schema": {
             "type": "object",
             "properties": {
