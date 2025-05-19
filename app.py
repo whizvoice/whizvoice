@@ -537,8 +537,7 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     elif tool_name == "get_current_date":
         return get_current_date()
     elif tool_name == "get_parent_tasks":
-        workspace_gid = tool_args.get('workspace_gid')
-        return get_parent_tasks(user_id, workspace_gid)
+        return get_parent_tasks(user_id)
     elif tool_name == "create_asana_task":
         name = tool_args.get('name')
         due_date = tool_args.get('due_date')

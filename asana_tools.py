@@ -49,7 +49,7 @@ def get_asana_workspaces(user_id):
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
-def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=None):
+def get_asana_tasks(user_id: str, start_date=None, end_date=None):
     configuration = asana.Configuration()
     asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
     if not asana_access_token:
@@ -102,7 +102,7 @@ def get_asana_tasks(user_id: str, workspace_gid=None, start_date=None, end_date=
 def get_current_date():
     return datetime.now().strftime('%Y-%m-%d')
 
-def get_parent_tasks(user_id: str, workspace_gid=None):
+def get_parent_tasks(user_id: str):
     configuration = asana.Configuration()
     asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
     if not asana_access_token:
@@ -110,10 +110,9 @@ def get_parent_tasks(user_id: str, workspace_gid=None):
     configuration.access_token = asana_access_token
     api_client = asana.ApiClient(configuration)
 
+    workspace_gid = get_preference(user_id, 'asana_workspace_preference')
     if not workspace_gid:
-        workspace_gid = get_preference(user_id, 'asana_workspace_preference')
-        if not workspace_gid:
-            return "Error identifying user's preferred workspace. Please set a preferred workspace using the set_workspace_preference tool."
+        return "Error identifying user's preferred workspace to get parent tasks from. Please set a preferred workspace using the set_workspace_preference tool."
     try:
         api_client = get_asana_client(user_id)
         # Get current user
@@ -296,14 +295,10 @@ tools = [
     {
         "type": "custom",
         "name": "get_parent_tasks",
-        "description": "Get all parent tasks (tasks with subtasks) in a workspace.",
+        "description": "Get all parent tasks (tasks with subtasks).",
         "input_schema": {
             "type": "object",
             "properties": {
-                "workspace_gid": {
-                    "type": "string",
-                    "description": "Workspace to get tasks from. Please use the user's preferred workspace from the get_workspace_preference tool and give them the opportunity to set a preferred workspace if they don't have one set."
-                }
             },
             "required": []
         }
