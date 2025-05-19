@@ -2,7 +2,7 @@ from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depe
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 import json
 import os
 import traceback
@@ -113,6 +113,14 @@ class UserApiKeySetRequest(BaseModel):
     key_name: str
     key_value: Optional[str] # Allow None to potentially clear a key
 
+class TokenUpdateRequest(BaseModel):
+    claude_api_key: Optional[str] = None
+    asana_access_token: Optional[str] = None
+
+class ApiTokenStatusResponse(BaseModel):
+    has_claude_token: bool
+    has_asana_token: bool
+
 # Allow-list of preference keys that can be set via this endpoint
 ALLOWED_API_KEY_NAMES = {
     "claude_api_key",
@@ -127,10 +135,6 @@ chat_sessions = {}
 user_sessions = {}
 
 # Define the response model for the new GET endpoint
-class ApiTokenStatusResponse(BaseModel):
-    has_claude_token: bool
-    has_asana_token: bool
-
 ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
 
 @app.get("/")
