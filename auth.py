@@ -56,31 +56,69 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
     Verify a JWT token and return the payload
     """
+    actual_token_from_credentials = None
+    token_display_for_logging = "Token not extracted or credentials object issue"
+    current_logger = logging.getLogger(__name__) # Get logger instance once
+
     try:
-        logger.info("[DEBUG] Entered verify_token")
-        token = credentials.credentials
-        logger.info(f"[DEBUG] Token to verify (first 20 chars): {token[:20]}...")
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        logger.info(f"[DEBUG] Token decoded successfully: {payload}")
+        current_logger.info("[DEBUG] Entered verify_token")
+        
+        if credentials and credentials.credentials:
+            actual_token_from_credentials = credentials.credentials
+            if isinstance(actual_token_from_credentials, str):
+                token_display_for_logging = (actual_token_from_credentials[:20] + "..." 
+                                             if len(actual_token_from_credentials) > 20 
+                                             else actual_token_from_credentials)
+                if not actual_token_from_credentials:
+                    token_display_for_logging = "Token was an empty string"
+            else:
+                token_display_for_logging = "Token in credentials was not a string (type: %s)" % type(actual_token_from_credentials).__name__
+        else:
+            current_logger.warning("[DEBUG] Credentials object or .credentials attribute was missing/empty in verify_token.")
+
+        current_logger.info(f"[DEBUG] Attempting to verify token. Token (info for logging): {token_display_for_logging}")
+        
+        payload = None
+        try:
+            # Core operation: decode the token
+            payload = jwt.decode(actual_token_from_credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        except UnboundLocalError as ule:
+            # Specifically catch UnboundLocalError if it's about a variable named 'token'
+            if 'local variable \'token\' referenced before assignment' in str(ule).lower():
+                current_logger.error(
+                    f"jwt.decode raised UnboundLocalError for 'token': {str(ule)}. "
+                    f"This may indicate an issue within the JWT library or an unexpected token state. "
+                    f"Input token info: {token_display_for_logging}"
+                )
+                # Convert to InvalidTokenError to be handled by the next except block
+                raise InvalidTokenError("Internal error during token decoding (UnboundLocalError for 'token').") from ule
+            else:
+                raise # Re-raise other UnboundLocalErrors not matching the specific message
+        # Other specific jwt exceptions like ExpiredSignatureError, etc., inherit from InvalidTokenError
+        # and will be caught by the InvalidTokenError block if not caught before UnboundLocalError.
+
+        current_logger.info(f"[DEBUG] Token decoded successfully: {payload}")
         return payload
-    except InvalidTokenError as e:
-        # Log the specific InvalidTokenError before raising HTTPException
-        logger = logging.getLogger(__name__)
-        logger.error(f"JWT InvalidTokenError: {str(e)}. Token (first 15 chars): {token[:15]}...")
+        
+    except InvalidTokenError as e: # Catches errors from jwt.decode, including our re-raised one
+        current_logger.error(f"JWT InvalidTokenError: {str(e)}. Token (info from attempt): {token_display_for_logging}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
+            detail=f"Invalid or expired token: {str(e)}",
             headers={"WWW-Authenticate": "Bearer"},
-        )
-    except Exception as e:
-        # Catch any other potential errors during decoding and log them
-        logger = logging.getLogger(__name__)
-        logger.error(f"JWT General Decoding Error: {str(e)}. Token (first 15 chars): {token[:15]}...")
+        ) from e
+    except Exception as e: # Catches other errors (e.g., TypeError if token was None and not caught by ULE for 'token')
+        current_logger.error(f"JWT General Decoding Error: {str(e)}. Token (info from attempt): {token_display_for_logging}")
+        
+        detail_message = f"Token decoding error: {str(e)}"
+        if actual_token_from_credentials is None and isinstance(e, TypeError):
+             detail_message = "Token decoding error: No token provided or token extraction failed."
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token decoding error", # More generic detail for unexpected errors
+            detail=detail_message,
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from e
 
 def verify_google_token(token: str) -> Dict:
     """
