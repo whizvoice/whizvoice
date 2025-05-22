@@ -124,6 +124,56 @@ class ApiTokenStatusResponse(BaseModel):
 class SetTimezoneRequest(BaseModel):
     timezone: str
 
+# Conversation and Message API models
+class ConversationCreate(BaseModel):
+    title: str
+    source: str = "app"
+    google_session_id: Optional[str] = None
+
+class ConversationUpdate(BaseModel):
+    title: Optional[str] = None
+
+class ConversationResponse(BaseModel):
+    id: int
+    user_id: str
+    title: str
+    created_at: str
+    last_message_time: str
+    source: str
+    google_session_id: Optional[str] = None
+
+class MessageCreate(BaseModel):
+    conversation_id: int
+    content: str
+    message_type: str  # 'USER' or 'ASSISTANT'
+
+class MessageResponse(BaseModel):
+    id: int
+    conversation_id: int
+    content: str
+    message_type: str
+    timestamp: str
+
+# Dialogflow webhook models
+class DialogflowWebhookRequest(BaseModel):
+    detectIntentResponseId: Optional[str] = None
+    pageInfo: Optional[Dict[str, Any]] = None
+    sessionInfo: Optional[Dict[str, Any]] = None
+    fulfillmentInfo: Optional[Dict[str, Any]] = None
+    messages: Optional[List[Dict[str, Any]]] = None
+    payload: Optional[Dict[str, Any]] = None
+    sentimentAnalysisResult: Optional[Dict[str, Any]] = None
+    text: Optional[str] = None
+    triggerIntent: Optional[str] = None
+    triggerEvent: Optional[str] = None
+    languageCode: Optional[str] = None
+
+class DialogflowWebhookResponse(BaseModel):
+    fulfillmentResponse: Optional[Dict[str, Any]] = None
+    pageInfo: Optional[Dict[str, Any]] = None
+    sessionInfo: Optional[Dict[str, Any]] = None
+    payload: Optional[Dict[str, Any]] = None
+
 # Allow-list of preference keys that can be set via this endpoint
 ALLOWED_API_KEY_NAMES = {
     "claude_api_key",
@@ -648,6 +698,313 @@ async def set_user_timezone_api(
         # We return a 400 if the timezone string was invalid or if saving failed
         logger.warning(f"Failed to set timezone for user {user_id} via API: {message}")
         raise HTTPException(status_code=400, detail=message)
+
+# ================== CONVERSATION ENDPOINTS ==================
+
+@app.get("/conversations", response_model=List[ConversationResponse])
+async def get_conversations(current_user: Dict = Depends(get_current_user)):
+    """Get all conversations for the authenticated user, ordered by last_message_time DESC"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        from supabase_client import supabase
+        
+        result = supabase.table("conversations").select("*").eq("user_id", user_id).order("last_message_time", desc=True).execute()
+        
+        conversations = []
+        for row in result.data:
+            conversations.append(ConversationResponse(
+                id=row["id"],
+                user_id=row["user_id"],
+                title=row["title"],
+                created_at=row["created_at"],
+                last_message_time=row["last_message_time"],
+                source=row["source"],
+                google_session_id=row.get("google_session_id")
+            ))
+        
+        return conversations
+    except Exception as e:
+        logger.error(f"Error getting conversations for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get conversations")
+
+@app.post("/conversations", response_model=ConversationResponse)
+async def create_conversation(
+    conversation: ConversationCreate,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Create a new conversation for the authenticated user"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        from supabase_client import supabase
+        
+        # Insert new conversation
+        result = supabase.table("conversations").insert({
+            "user_id": user_id,
+            "title": conversation.title,
+            "source": conversation.source,
+            "google_session_id": conversation.google_session_id
+        }).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create conversation")
+        
+        row = result.data[0]
+        return ConversationResponse(
+            id=row["id"],
+            user_id=row["user_id"],
+            title=row["title"],
+            created_at=row["created_at"],
+            last_message_time=row["last_message_time"],
+            source=row["source"],
+            google_session_id=row.get("google_session_id")
+        )
+    except Exception as e:
+        logger.error(f"Error creating conversation for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create conversation")
+
+@app.get("/conversations/{conversation_id}", response_model=ConversationResponse)
+async def get_conversation(
+    conversation_id: int,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get a specific conversation by ID (user must own it)"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        from supabase_client import supabase
+        
+        result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        row = result.data[0]
+        return ConversationResponse(
+            id=row["id"],
+            user_id=row["user_id"],
+            title=row["title"],
+            created_at=row["created_at"],
+            last_message_time=row["last_message_time"],
+            source=row["source"],
+            google_session_id=row.get("google_session_id")
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting conversation {conversation_id} for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get conversation")
+
+@app.put("/conversations/{conversation_id}", response_model=ConversationResponse)
+async def update_conversation(
+    conversation_id: int,
+    update_data: ConversationUpdate,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Update conversation title (user must own it)"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        from supabase_client import supabase
+        
+        # Build update dict
+        updates = {}
+        if update_data.title is not None:
+            updates["title"] = update_data.title
+        
+        if not updates:
+            # No updates provided, just return current conversation
+            return await get_conversation(conversation_id, current_user)
+        
+        result = supabase.table("conversations").update(updates).eq("id", conversation_id).eq("user_id", user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        row = result.data[0]
+        return ConversationResponse(
+            id=row["id"],
+            user_id=row["user_id"],
+            title=row["title"],
+            created_at=row["created_at"],
+            last_message_time=row["last_message_time"],
+            source=row["source"],
+            google_session_id=row.get("google_session_id")
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating conversation {conversation_id} for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update conversation")
+
+@app.delete("/conversations")
+async def delete_all_conversations(current_user: Dict = Depends(get_current_user)):
+    """Delete all conversations for the authenticated user"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        from supabase_client import supabase
+        
+        # Delete all conversations for user (messages will cascade delete)
+        result = supabase.table("conversations").delete().eq("user_id", user_id).execute()
+        
+        return {"message": "All conversations deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting all conversations for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete conversations")
+
+@app.put("/conversations/{conversation_id}/last_message_time")
+async def update_conversation_last_message_time(
+    conversation_id: int,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Update the last_message_time for a conversation to now()"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        from supabase_client import supabase
+        
+        result = supabase.table("conversations").update({
+            "last_message_time": "now()"
+        }).eq("id", conversation_id).eq("user_id", user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        return {"message": "Last message time updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating last message time for conversation {conversation_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update last message time")
+
+# ================== MESSAGE ENDPOINTS ==================
+
+@app.get("/conversations/{conversation_id}/messages", response_model=List[MessageResponse])
+async def get_messages(
+    conversation_id: int,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get all messages for a conversation (user must own the conversation)"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        from supabase_client import supabase
+        
+        # First verify user owns the conversation
+        conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
+        if not conv_result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Get messages for the conversation
+        result = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("timestamp", desc=False).execute()
+        
+        messages = []
+        for row in result.data:
+            messages.append(MessageResponse(
+                id=row["id"],
+                conversation_id=row["conversation_id"],
+                content=row["content"],
+                message_type=row["message_type"],
+                timestamp=row["timestamp"]
+            ))
+        
+        return messages
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting messages for conversation {conversation_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get messages")
+
+@app.post("/messages", response_model=MessageResponse)
+async def create_message(
+    message: MessageCreate,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Create a new message in a conversation (user must own the conversation)"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        from supabase_client import supabase
+        
+        # First verify user owns the conversation
+        conv_result = supabase.table("conversations").select("id").eq("id", message.conversation_id).eq("user_id", user_id).execute()
+        if not conv_result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Create the message
+        result = supabase.table("messages").insert({
+            "conversation_id": message.conversation_id,
+            "content": message.content,
+            "message_type": message.message_type
+        }).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create message")
+        
+        # Update conversation last_message_time
+        supabase.table("conversations").update({
+            "last_message_time": "now()"
+        }).eq("id", message.conversation_id).execute()
+        
+        row = result.data[0]
+        return MessageResponse(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            content=row["content"],
+            message_type=row["message_type"],
+            timestamp=row["timestamp"]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating message: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create message")
+
+@app.get("/conversations/{conversation_id}/messages/count")
+async def get_message_count(
+    conversation_id: int,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get the count of messages in a conversation"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        from supabase_client import supabase
+        
+        # First verify user owns the conversation
+        conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
+        if not conv_result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Get message count
+        result = supabase.table("messages").select("id", count="exact").eq("conversation_id", conversation_id).execute()
+        
+        return {"count": result.count}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting message count for conversation {conversation_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get message count")
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
