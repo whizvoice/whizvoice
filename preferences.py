@@ -179,3 +179,11 @@ def set_user_timezone(user_id: str, timezone_str: str) -> tuple[bool, str]:
     except Exception as e:
         logger.error(f"Error setting user timezone for user {user_id}: {str(e)}", exc_info=True)
         return False, f"Error setting user timezone: {str(e)}"
+    
+preferences_tools = [
+    {
+        "type": "custom",
+        "name": "set_user_timezone",
+        "description": "Set the user's timezone in preferences.",
+    }
+]
