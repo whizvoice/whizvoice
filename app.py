@@ -537,17 +537,15 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     elif tool_name == "get_current_date":
         return get_current_date()
     elif tool_name == "get_parent_tasks":
-        workspace_gid = tool_args.get('workspace_gid')
-        return get_parent_tasks(user_id, workspace_gid)
+        return get_parent_tasks(user_id)
     elif tool_name == "create_asana_task":
         name = tool_args.get('name')
-        workspace_gid = tool_args.get('workspace_gid')
         due_date = tool_args.get('due_date')
         notes = tool_args.get('notes')
         parent_task_gid = tool_args.get('parent_task_gid')
         if not name:
             return {"error": "Task name is required."}
-        return create_asana_task(user_id, name, workspace_gid, due_date, notes, parent_task_gid)
+        return create_asana_task(user_id, name, due_date, notes, parent_task_gid)
     elif tool_name == "set_workspace_preference":
         workspace_gid = tool_args.get('workspace_gid')
         if not workspace_gid:
