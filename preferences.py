@@ -163,12 +163,17 @@ def get_user_timezone(user_id: str) -> tuple[bool, pytz.timezone]:
 
 def set_user_timezone(user_id: str, timezone_str: str) -> tuple[bool, str]:
     """Set the user's timezone in preferences. Returns a tuple of (success, message).
-    Validates the timezone string before setting it."""
+    Validates the timezone string before setting it. If the value is already set, does nothing."""
     try:
         # Validate the timezone string
         pytz.timezone(timezone_str)  # This will raise UnknownTimeZoneError if invalid
-        
-        # If we get here, the timezone is valid
+
+        # Check if the value is already set
+        current = get_preference(user_id, 'user_timezone')
+        if current == timezone_str:
+            return True, "Timezone already set to this value. No update needed."
+
+        # If we get here, the timezone is valid and needs updating
         if set_preference(user_id, 'user_timezone', timezone_str):
             return True, "Successfully set user timezone."
         else:
