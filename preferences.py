@@ -188,12 +188,12 @@ preferences_tools = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "timezone_str": {
+                "timezone": {
                     "type": "string",
                     "description": "The IANA timezone name to set for the user."
                 }
             },
-            "required": ["timezone_str"]
+            "required": ["timezone"]
         }
     },
     {
