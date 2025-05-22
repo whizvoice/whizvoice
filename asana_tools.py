@@ -238,7 +238,7 @@ def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 # Define available tools
-tools = [
+asana_tools = [
     {
         "type": "custom",
         "name": "set_workspace_preference",
