@@ -3,6 +3,7 @@ import os
 from constants import PGCRYPTO_KEY
 import logging
 import json
+import pytz
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -146,3 +147,68 @@ def set_encrypted_preference_key(user_id, key, value):
     except Exception as e:
         logger.error(f"Exception in set_encrypted_preference_key for user {user_id}, key '{key}': {str(e)}", exc_info=True)
         return False
+
+def get_user_timezone(user_id: str) -> tuple[bool, pytz.timezone]:
+    """Get the user's timezone from preferences. Returns a tuple of (success, timezone).
+    If no timezone is set or invalid, returns (False, Pacific Time)."""
+    timezone_str = get_preference(user_id, 'user_timezone')
+    if not timezone_str:
+        return False, "ERROR: no timezone set. Please ask user for their preferred timezone and set it using the set_user_timezone tool."
+    else:
+        try:
+            return True, pytz.timezone(timezone_str)
+        except pytz.exceptions.UnknownTimeZoneError:
+            logger.warning(f"Unknown timezone '{timezone_str}' for user {user_id}, falling back to Pacific Time")
+            return False, "ERROR: unknown timezone. Please ask user for their preferred timezone and set it using the set_user_timezone tool."
+
+def set_user_timezone(user_id: str, timezone_str: str) -> tuple[bool, str]:
+    """Set the user's timezone in preferences. Returns a tuple of (success, message).
+    Validates the timezone string before setting it. If the value is already set, does nothing."""
+    try:
+        # Validate the timezone string
+        pytz.timezone(timezone_str)  # This will raise UnknownTimeZoneError if invalid
+
+        # Check if the value is already set
+        current = get_preference(user_id, 'user_timezone')
+        if current == timezone_str:
+            return True, "Timezone already set to this value. No update needed."
+
+        # If we get here, the timezone is valid and needs updating
+        if set_preference(user_id, 'user_timezone', timezone_str):
+            return True, "Successfully set user timezone."
+        else:
+            return False, "Failed to save timezone preference."
+    except pytz.exceptions.UnknownTimeZoneError:
+        logger.warning(f"Invalid timezone string '{timezone_str}' provided for user {user_id}")
+        return False, f"Invalid timezone: '{timezone_str}'. Please provide a valid IANA timezone name (e.g., 'America/Los_Angeles', 'Europe/London')."
+    except Exception as e:
+        logger.error(f"Error setting user timezone for user {user_id}: {str(e)}", exc_info=True)
+        return False, f"Error setting user timezone: {str(e)}"
+    
+preferences_tools = [
+    {
+        "type": "custom",
+        "name": "set_user_timezone",
+        "description": "Set the user's timezone in preferences.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timezone": {
+                    "type": "string",
+                    "description": "The IANA timezone name to set for the user."
+                }
+            },
+            "required": ["timezone"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "get_user_timezone",
+        "description": "Get the user's timezone from preferences.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+]

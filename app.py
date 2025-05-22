@@ -11,16 +11,16 @@ import time
 from fastapi.responses import JSONResponse
 
 from anthropic import Anthropic, AuthenticationError
-from asana_tools import tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
+from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Log the SECRET_KEY being used by this module instance for WebSocket auth
-logger.info(f"App module (WebSocket) AUTH_SECRET_KEY: {AUTH_SECRET_KEY[:5]}...{AUTH_SECRET_KEY[-5:] if len(AUTH_SECRET_KEY) > 10 else ''}")
+# can concatenate additional tools here if needed
+tools = asana_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -120,6 +120,9 @@ class TokenUpdateRequest(BaseModel):
 class ApiTokenStatusResponse(BaseModel):
     has_claude_token: bool
     has_asana_token: bool
+
+class SetTimezoneRequest(BaseModel):
+    timezone: str
 
 # Allow-list of preference keys that can be set via this endpoint
 ALLOWED_API_KEY_NAMES = {
@@ -520,6 +523,7 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
         if not user_sessions[user_id]:
             del user_sessions[user_id]
 
+# TODO: tool names and call code should be programmatically linked in a dictionary or something
 def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     """Execute a tool and return its result"""
     logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
@@ -534,7 +538,7 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
         end_date = tool_args.get('end_date')
         return get_asana_tasks(user_id, start_date, end_date)
     elif tool_name == "get_current_date":
-        return get_current_date()
+        return get_current_date(user_id)
     elif tool_name == "get_parent_tasks":
         return get_parent_tasks(user_id)
     elif tool_name == "create_asana_task":
@@ -624,6 +628,26 @@ async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Error getting tokens: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/user/timezone")
+async def set_user_timezone_api(
+    request: SetTimezoneRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    user_id = current_user.get("sub")
+    if not user_id:
+        # This should ideally not be reached if Depends(get_current_user) works as expected
+        raise HTTPException(status_code=401, detail="User not authenticated")
+
+    success, message = set_user_timezone(user_id, request.timezone)
+    if success:
+        logger.info(f"Successfully set timezone for user {user_id} via API: {request.timezone}")
+        return {"status": "success", "message": message}
+    else:
+        # set_user_timezone already logs detailed errors
+        # We return a 400 if the timezone string was invalid or if saving failed
+        logger.warning(f"Failed to set timezone for user {user_id} via API: {message}")
+        raise HTTPException(status_code=400, detail=message)
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
