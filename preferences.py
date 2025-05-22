@@ -185,5 +185,25 @@ preferences_tools = [
         "type": "custom",
         "name": "set_user_timezone",
         "description": "Set the user's timezone in preferences.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timezone_str": {
+                    "type": "string",
+                    "description": "The IANA timezone name to set for the user."
+                }
+            },
+            "required": ["timezone_str"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "get_user_timezone",
+        "description": "Get the user's timezone from preferences.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
     }
 ]
