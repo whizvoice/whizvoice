@@ -120,6 +120,9 @@ class ApiTokenStatusResponse(BaseModel):
     has_claude_token: bool
     has_asana_token: bool
 
+class SetTimezoneRequest(BaseModel):
+    timezone: str
+
 # Allow-list of preference keys that can be set via this endpoint
 ALLOWED_API_KEY_NAMES = {
     "claude_api_key",
@@ -631,6 +634,26 @@ async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Error getting tokens: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/user/timezone")
+async def set_user_timezone_api(
+    request: SetTimezoneRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    user_id = current_user.get("sub")
+    if not user_id:
+        # This should ideally not be reached if Depends(get_current_user) works as expected
+        raise HTTPException(status_code=401, detail="User not authenticated")
+
+    success, message = set_user_timezone(user_id, request.timezone)
+    if success:
+        logger.info(f"Successfully set timezone for user {user_id} via API: {request.timezone}")
+        return {"status": "success", "message": message}
+    else:
+        # set_user_timezone already logs detailed errors
+        # We return a 400 if the timezone string was invalid or if saving failed
+        logger.warning(f"Failed to set timezone for user {user_id} via API: {message}")
+        raise HTTPException(status_code=400, detail=message)
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
