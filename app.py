@@ -12,14 +12,15 @@ from fastapi.responses import JSONResponse
 
 from anthropic import Anthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
-from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone, get_user_timezone, preferences_tools
+from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone, get_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-tools = asana_tools + preferences_tools
+# can concatenate additional tools here if needed
+tools = asana_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -522,11 +523,12 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
         if not user_sessions[user_id]:
             del user_sessions[user_id]
 
+# TODO: tool names and call code should be programmatically linked in a dictionary or something
 def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     """Execute a tool and return its result"""
     logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
     
-    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference", "get_asana_workspaces", "change_task_parent", "set_user_timezone", "get_user_timezone"]:
+    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference", "get_asana_workspaces", "change_task_parent"]:
         return {"error": f"User authentication required for tool: {tool_name}"}
 
     if tool_name == "get_asana_workspaces":
@@ -562,14 +564,6 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
         task_gid = tool_args.get('task_gid')
         new_parent_gid = tool_args.get('new_parent_gid')
         return change_task_parent(user_id, task_gid, new_parent_gid)
-    elif tool_name == "set_user_timezone":
-        timezone = tool_args.get('timezone')
-        if not timezone:
-            logger.error("Timezone is required for set_user_timezone")
-            raise ValueError("Timezone is required for set_user_timezone")
-        return set_user_timezone(user_id, timezone)
-    elif tool_name == "get_user_timezone":
-        return get_user_timezone(user_id)
     
     logger.error(f"Unknown tool requested: {tool_name}")
     raise ValueError(f"Unknown tool: {tool_name}")
