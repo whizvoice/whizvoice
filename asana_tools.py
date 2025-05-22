@@ -2,8 +2,9 @@ import asana
 from asana.rest import ApiException as AsanaError
 from datetime import datetime, timedelta
 import json
-from preferences import get_preference, set_preference, get_decrypted_preference_key
+from preferences import get_preference, set_preference, get_decrypted_preference_key, get_user_timezone
 import asyncio
+import pytz
 
 def get_asana_client(user_id):
     """Get an Asana client configured with the user's access token."""
@@ -100,8 +101,17 @@ def get_asana_tasks(user_id: str, start_date=None, end_date=None):
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
-def get_current_date():
-    return datetime.now().strftime('%Y-%m-%d')
+def get_current_date(user_id: str = None) -> str:
+    """Get today's date in YYYY-MM-DD format, using the user's timezone if available."""
+    if user_id:
+        try:
+            user_tz = get_user_timezone(user_id)
+            return datetime.now(user_tz).strftime('%Y-%m-%d')
+        except Exception as e:
+            return f"Error using timezone for user {user_id}, falling back to PST: {str(e)}"
+    
+    # Fallback to PST if no user_id or timezone error
+    return datetime.now(pytz.timezone('America/Los_Angeles')).strftime('%Y-%m-%d')
 
 def get_parent_tasks(user_id: str):
     configuration = asana.Configuration()
