@@ -56,6 +56,7 @@ def get_asana_tasks(user_id: str, start_date=None, end_date=None):
         return "Error: Asana access token not found in user preferences."
     configuration.access_token = asana_access_token
     api_client = asana.ApiClient(configuration)
+    
     workspace_gid = get_preference(user_id, 'asana_workspace_preference')
     if not workspace_gid:
         return "Error identifying user's preferred workspace to get tasks from. Please set a preferred workspace using the set_workspace_preference tool."

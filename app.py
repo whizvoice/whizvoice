@@ -530,10 +530,9 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     if tool_name == "get_asana_workspaces":
         return get_asana_workspaces(user_id)
     elif tool_name == "get_asana_tasks":
-        workspace_gid = tool_args.get('workspace_gid')
         start_date = tool_args.get('start_date')
         end_date = tool_args.get('end_date')
-        return get_asana_tasks(user_id, workspace_gid, start_date, end_date)
+        return get_asana_tasks(user_id, start_date, end_date)
     elif tool_name == "get_current_date":
         return get_current_date()
     elif tool_name == "get_parent_tasks":
