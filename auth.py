@@ -1,7 +1,7 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
-from jwt.exceptions import InvalidTokenError
+from jwt.exceptions import InvalidTokenError, ExpiredSignatureError
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 import os
@@ -59,12 +59,30 @@ def verify_token(token: str, logger=None):
         raise HTTPException(status_code=401, detail="No token provided")
 
     try:
-        # Use the verify_google_token function that's already defined
-        user_info = verify_google_token(token)
-        return user_info
+        # This should verify SERVER JWT tokens, not Google ID tokens
+        # Decode and verify the JWT token using our secret key
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         
-    except AuthError as e:
-        current_logger.warning(f"Token verification failed (AuthError): {str(e)}")
+        # Check if it's an access token (not refresh token)
+        token_type = payload.get("type")
+        if token_type != "access":
+            current_logger.warning(f"Invalid token type: {token_type}")
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        
+        # Check if token has required fields
+        user_id = payload.get("sub")
+        if not user_id:
+            current_logger.warning("Token missing 'sub' field")
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Return the payload for downstream use
+        return payload
+        
+    except jwt.ExpiredSignatureError:
+        current_logger.warning("Token has expired")
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError as e:
+        current_logger.warning(f"Token verification failed (InvalidTokenError): {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid token")
     except Exception as e:
         current_logger.error(f"Unexpected error during token verification: {str(e)}")
