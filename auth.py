@@ -53,40 +53,18 @@ def create_refresh_token(data: Dict, expires_delta: Optional[timedelta] = None) 
     return encoded_jwt
 
 def verify_token(token: str, logger=None):
-    current_logger = logger if logger else default_logger
+    current_logger = logger if logger else logging.getLogger(__name__)
     
     if not token:
         raise HTTPException(status_code=401, detail="No token provided")
 
     try:
-        credentials = get_google_oauth_credentials()
+        # Use the verify_google_token function that's already defined
+        user_info = verify_google_token(token)
+        return user_info
         
-        if not credentials or not hasattr(credentials, 'id_token') or not credentials.id_token:
-            current_logger.warning("Credentials object or .credentials attribute was missing/empty in verify_token.")
-            raise HTTPException(status_code=401, detail="Invalid token")
-        
-        # Verify the token
-        idinfo = id_token.verify_oauth2_token(
-            token, 
-            requests.Request(),
-            GOOGLE_CLIENT_ID,
-            clock_skew_in_seconds=10
-        )
-        
-        # Check if token is valid (has required fields)
-        if 'aud' not in idinfo:
-            current_logger.warning("Token missing 'aud' field")
-            raise HTTPException(status_code=401, detail="Invalid token")
-        
-        if idinfo['aud'] != GOOGLE_CLIENT_ID:
-            current_logger.warning(f"Token audience mismatch. Expected: {GOOGLE_CLIENT_ID}, Got: {idinfo['aud']}")
-            raise HTTPException(status_code=401, detail="Invalid token")
-        
-        # Return token payload for downstream use
-        return idinfo
-        
-    except ValueError as e:
-        current_logger.warning(f"Token verification failed (ValueError): {str(e)}")
+    except AuthError as e:
+        current_logger.warning(f"Token verification failed (AuthError): {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid token")
     except Exception as e:
         current_logger.error(f"Unexpected error during token verification: {str(e)}")
