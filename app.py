@@ -15,6 +15,7 @@ from anthropic import Anthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
+from supabase_client import supabase
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -413,7 +414,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 if conversation_id is None and conversation_history:
                     # We loaded the most recent conversation, but we need to know its ID
                     # Let's get it from the database again
-                    from supabase_client import supabase
                     conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
                     if conv_result.data:
                         session_conversation_id = conv_result.data[0]["id"]
@@ -678,8 +678,6 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
 def load_conversation_history(user_id: str, conversation_id: Optional[int] = None) -> List[Dict]:
     """Load conversation history from database and convert to Claude message format"""
     try:
-        from supabase_client import supabase
-        
         # If no conversation_id specified, get the most recent conversation for the user
         if conversation_id is None:
             conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
@@ -718,8 +716,6 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
 def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str) -> Optional[int]:
     """Save a message to the database and return the conversation_id"""
     try:
-        from supabase_client import supabase
-        
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, content='{content[:50]}...'")
         
         # If no conversation_id provided, create a new conversation
@@ -1032,8 +1028,6 @@ async def create_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # Insert new conversation
         result = supabase.table("conversations").insert({
             "user_id": user_id,
@@ -1070,8 +1064,6 @@ async def get_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", user_id).execute()
         
         if not result.data:
@@ -1105,8 +1097,6 @@ async def update_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # Build update dict
         updates = {}
         if update_data.title is not None:
@@ -1145,8 +1135,6 @@ async def delete_all_conversations(current_user: Dict = Depends(get_current_user
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # Delete all conversations for user (messages will cascade delete)
         result = supabase.table("conversations").delete().eq("user_id", user_id).execute()
         
@@ -1166,8 +1154,6 @@ async def update_conversation_last_message_time(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         result = supabase.table("conversations").update({
             "last_message_time": "now()"
         }).eq("id", conversation_id).eq("user_id", user_id).execute()
@@ -1255,8 +1241,6 @@ async def create_message(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # First verify user owns the conversation
         conv_result = supabase.table("conversations").select("id").eq("id", message.conversation_id).eq("user_id", user_id).execute()
         if not conv_result.data:
@@ -1302,8 +1286,6 @@ async def get_message_count(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # First verify user owns the conversation
         conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
         if not conv_result.data:
