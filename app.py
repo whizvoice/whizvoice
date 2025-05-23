@@ -486,7 +486,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(chat_sessions[session_id])}")
                     
                     # Save user message to database and update session_conversation_id
+                    logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
                     session_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER")
+                    logger.info(f"After saving user message. Updated session_conversation_id: {session_conversation_id}")
                     if session_conversation_id is None:
                         logger.error("Failed to save user message to database")
                         error_payload = {
@@ -578,6 +580,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         assistant_response_text = response.content[0].text
                         
                         # Save assistant message to database
+                        logger.info(f"About to save assistant message to conversation {session_conversation_id}")
                         save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT")
                         
                         # Send structured response with request_id
@@ -716,8 +719,11 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
     try:
         from supabase_client import supabase
         
+        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, content='{content[:50]}...'")
+        
         # If no conversation_id provided, create a new conversation
         if conversation_id is None:
+            logger.warning(f"Creating NEW conversation for user {user_id} because conversation_id is None")
             # Create a new conversation
             conv_result = supabase.table("conversations").insert({
                 "user_id": user_id,
@@ -730,7 +736,9 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 return None
                 
             conversation_id = conv_result.data[0]["id"]
-            logger.info(f"Created new conversation {conversation_id} for user {user_id}")
+            logger.warning(f"Created NEW conversation {conversation_id} for user {user_id}")
+        else:
+            logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
         # Save the message
         result = supabase.table("messages").insert({
@@ -748,7 +756,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             "last_message_time": "now()"
         }).eq("id", conversation_id).execute()
         
-        logger.debug(f"Saved {message_type} message to conversation {conversation_id}")
+        logger.info(f"Successfully saved {message_type} message to conversation {conversation_id}")
         return conversation_id
         
     except Exception as e:
