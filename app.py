@@ -371,6 +371,14 @@ async def websocket_endpoint(websocket: WebSocket):
         if not token and "token" in websocket.query_params:
             token = websocket.query_params["token"]
         
+        # Get conversation_id from query parameters if provided
+        conversation_id = None
+        if "conversation_id" in websocket.query_params:
+            try:
+                conversation_id = int(websocket.query_params["conversation_id"])
+            except ValueError:
+                logger.warning(f"Invalid conversation_id parameter: {websocket.query_params['conversation_id']}")
+        
         # Authenticate if token is present
         user_id = None
         if token:
@@ -385,7 +393,30 @@ async def websocket_endpoint(websocket: WebSocket):
                 user_name = payload.get("name", "there")
                 
                 logger.info(f"Authenticated WebSocket connection for user {user_email} ({user_id})")
-                await websocket.send_text(f"Hello {user_name}! I'm Claude with Asana integration.")
+                
+                # Load conversation history and initialize session
+                session_id = f"ws_{user_id}"
+                conversation_history = load_conversation_history(user_id, conversation_id)
+                chat_sessions[session_id] = conversation_history
+                
+                # Track the current conversation_id for this session
+                # If loading conversation history found a conversation, use that ID
+                # Otherwise, we'll create a new conversation when the first message is sent
+                session_conversation_id = conversation_id
+                if conversation_id is None and conversation_history:
+                    # We loaded the most recent conversation, but we need to know its ID
+                    # Let's get it from the database again
+                    from supabase_client import supabase
+                    conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
+                    if conv_result.data:
+                        session_conversation_id = conv_result.data[0]["id"]
+                
+                # Only send welcome message if no conversation history exists
+                if not conversation_history:
+                    await websocket.send_text(f"Hello {user_name}! I'm Claude with Asana integration.")
+                else:
+                    logger.info(f"Loaded {len(conversation_history)} messages from conversation history for user {user_id}")
+                    
             except JWTError as e:
                 logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
                 error_payload = {
@@ -414,9 +445,9 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close(code=1008, reason="Authentication required")
             return
         
-        # Create a session ID
-        session_id = f"ws_{user_id}"
-        chat_sessions[session_id] = []
+        # Create a session ID (moved this up since we need it earlier)
+        # session_id = f"ws_{user_id}"  # Already created above
+        # chat_sessions[session_id] = []  # Already initialized above with conversation history
         
         # Associate session with user
         if user_id not in user_sessions:
@@ -441,6 +472,19 @@ async def websocket_endpoint(websocket: WebSocket):
                         message = message_text
                         logger.info("Received legacy plain text message")
                     
+                    # Save user message to database and update session_conversation_id
+                    session_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER")
+                    if session_conversation_id is None:
+                        logger.error("Failed to save user message to database")
+                        error_payload = {
+                            "type": "error",
+                            "code": "DATABASE_ERROR",
+                            "message": "Failed to save message to database",
+                            "request_id": request_id
+                        }
+                        await websocket.send_text(json.dumps(error_payload))
+                        continue
+
                     chat_sessions[session_id].append({"role": "user", "content": message})
 
                     current_anthropic_client = get_anthropic_client(user_id)
@@ -515,11 +559,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Add assistant final response to session history (if not an intercepted error)
                     chat_sessions[session_id].append({"role": "assistant", "content": response.content})
                     
-                    # Send Claude's final response back to client
+                    # Extract and save assistant response to database
+                    assistant_response_text = ""
                     if response.content and response.content[0].type == 'text':
+                        assistant_response_text = response.content[0].text
+                        
+                        # Save assistant message to database
+                        save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT")
+                        
                         # Send structured response with request_id
                         response_payload = {
-                            "response": response.content[0].text,
+                            "response": assistant_response_text,
                             "request_id": request_id
                         }
                         await websocket.send_text(json.dumps(response_payload))
@@ -605,6 +655,90 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
         if not user_sessions[user_id]:
             del user_sessions[user_id]
 
+def load_conversation_history(user_id: str, conversation_id: Optional[int] = None) -> List[Dict]:
+    """Load conversation history from database and convert to Claude message format"""
+    try:
+        from supabase_client import supabase
+        
+        # If no conversation_id specified, get the most recent conversation for the user
+        if conversation_id is None:
+            conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
+            if not conv_result.data:
+                logger.info(f"No existing conversations found for user {user_id}")
+                return []
+            conversation_id = conv_result.data[0]["id"]
+            logger.info(f"Loading most recent conversation {conversation_id} for user {user_id}")
+        else:
+            # Verify user owns the specified conversation
+            conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
+            if not conv_result.data:
+                logger.warning(f"Conversation {conversation_id} not found or not owned by user {user_id}")
+                return []
+            logger.info(f"Loading specified conversation {conversation_id} for user {user_id}")
+        
+        # Get messages for the conversation
+        result = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("timestamp", desc=False).execute()
+        
+        # Convert database messages to Claude format
+        claude_messages = []
+        for row in result.data:
+            message_role = "user" if row["message_type"] == "USER" else "assistant"
+            claude_messages.append({
+                "role": message_role,
+                "content": row["content"]
+            })
+        
+        logger.info(f"Loaded {len(claude_messages)} messages from conversation {conversation_id} for user {user_id}")
+        return claude_messages
+        
+    except Exception as e:
+        logger.error(f"Error loading conversation history for user {user_id}, conversation {conversation_id}: {str(e)}")
+        return []
+
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str) -> Optional[int]:
+    """Save a message to the database and return the conversation_id"""
+    try:
+        from supabase_client import supabase
+        
+        # If no conversation_id provided, create a new conversation
+        if conversation_id is None:
+            # Create a new conversation
+            conv_result = supabase.table("conversations").insert({
+                "user_id": user_id,
+                "title": content[:50] + "..." if len(content) > 50 else content,  # Use first part of message as title
+                "source": "app"
+            }).execute()
+            
+            if not conv_result.data:
+                logger.error(f"Failed to create new conversation for user {user_id}")
+                return None
+                
+            conversation_id = conv_result.data[0]["id"]
+            logger.info(f"Created new conversation {conversation_id} for user {user_id}")
+        
+        # Save the message
+        result = supabase.table("messages").insert({
+            "conversation_id": conversation_id,
+            "content": content,
+            "message_type": message_type
+        }).execute()
+        
+        if not result.data:
+            logger.error(f"Failed to save message to conversation {conversation_id}")
+            return None
+        
+        # Update conversation last_message_time
+        supabase.table("conversations").update({
+            "last_message_time": "now()"
+        }).eq("id", conversation_id).execute()
+        
+        logger.debug(f"Saved {message_type} message to conversation {conversation_id}")
+        return conversation_id
+        
+    except Exception as e:
+        logger.error(f"Error saving message to database: {str(e)}")
+        return None
+
 # TODO: tool names and call code should be programmatically linked in a dictionary or something
 def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     """Execute a tool and return its result"""
@@ -666,14 +800,14 @@ async def update_api_tokens(
         # Update Claude API key if provided
         if request.claude_api_key is not None:
             logger.info(f"[DEBUG] Setting Claude API key for user {user_id}")
-            if not set_encrypted_preference(user_id, 'claude_api_key', request.claude_api_key):
+            if not set_encrypted_preference_key(user_id, 'claude_api_key', request.claude_api_key):
                 success = False
                 error_message = "Failed to update Claude API key in database."
         
         # Update Asana token if provided, only if previous steps succeeded
         if success and request.asana_access_token is not None:
             logger.info(f"[DEBUG] Setting Asana token for user {user_id}")
-            if not set_encrypted_preference(user_id, 'asana_access_token', request.asana_access_token):
+            if not set_encrypted_preference_key(user_id, 'asana_access_token', request.asana_access_token):
                 success = False
                 error_message = "Failed to update Asana access token in database."
 
@@ -681,7 +815,7 @@ async def update_api_tokens(
             logger.info("[DEBUG] Returning success from update_api_tokens")
             return {"status": "success", "message": "Tokens updated successfully"}
         else:
-            # Raise 500 if any set_encrypted_preference call returned False
+            # Raise 500 if any set_encrypted_preference_key call returned False
             logger.error(f"[API ERROR] {error_message} User: {user_id}")
             raise HTTPException(status_code=500, detail=error_message)
 
@@ -700,8 +834,8 @@ async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
         user_id = current_user["sub"]
         
         # Get both tokens
-        claude_token = get_encrypted_preference(user_id, 'claude_api_key')
-        asana_token = get_encrypted_preference(user_id, 'asana_access_token')
+        claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
+        asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
         
         return {
             "has_claude_token": claude_token is not None,
