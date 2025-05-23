@@ -9,6 +9,7 @@ import traceback
 import logging
 import time
 from fastapi.responses import JSONResponse
+from datetime import datetime
 
 from anthropic import Anthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
@@ -887,35 +888,137 @@ async def set_user_timezone_api(
         logger.warning(f"Failed to set timezone for user {user_id} via API: {message}")
         raise HTTPException(status_code=400, detail=message)
 
+# ================== SYNC HELPER FUNCTIONS ==================
+
+def get_last_sync_timestamp(user_id: str, entity_type: str, entity_id: Optional[int] = None) -> Optional[str]:
+    """Get the last sync timestamp for a user and entity type"""
+    try:
+        query = supabase.table("sync_metadata")\
+            .select("last_sync_timestamp")\
+            .eq("user_id", user_id)\
+            .eq("entity_type", entity_type)
+        
+        if entity_id is not None:
+            query = query.eq("entity_id", entity_id)
+        else:
+            query = query.is_("entity_id", "null")
+        
+        result = query.execute()
+        if result.data:
+            return result.data[0]["last_sync_timestamp"]
+        return None
+    except Exception as e:
+        logger.error(f"Error getting last sync timestamp for user {user_id}, entity {entity_type}: {e}")
+        return None
+
+def update_last_sync_timestamp(user_id: str, entity_type: str, timestamp: str, entity_id: Optional[int] = None):
+    """Update the last sync timestamp for a user and entity type"""
+    try:
+        data = {
+            "user_id": user_id,
+            "entity_type": entity_type,
+            "last_sync_timestamp": timestamp,
+            "entity_id": entity_id
+        }
+        
+        # Use upsert to insert or update
+        result = supabase.table("sync_metadata").upsert(data).execute()
+        logger.info(f"Updated sync timestamp for user {user_id}, entity {entity_type}: {timestamp}")
+        return True
+    except Exception as e:
+        logger.error(f"Error updating sync timestamp for user {user_id}, entity {entity_type}: {e}")
+        return False
+
+@app.get("/sync/metadata")
+async def get_sync_metadata(current_user: Dict = Depends(get_current_user)):
+    """Get sync metadata for the current user"""
+    try:
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
+        
+        result = supabase.table("sync_metadata")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .execute()
+        
+        return {"sync_metadata": result.data if result.data else []}
+    except Exception as e:
+        logger.error(f"Error getting sync metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get sync metadata")
+
+@app.post("/sync/metadata")
+async def update_sync_metadata(
+    entity_type: str,
+    timestamp: str,
+    entity_id: Optional[int] = None,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Update sync metadata for the current user"""
+    try:
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
+        
+        success = update_last_sync_timestamp(user_id, entity_type, timestamp, entity_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update sync metadata")
+        
+        return {"success": True, "message": "Sync metadata updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating sync metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update sync metadata")
+
 # ================== CONVERSATION ENDPOINTS ==================
 
-@app.get("/conversations", response_model=List[ConversationResponse])
-async def get_conversations(current_user: Dict = Depends(get_current_user)):
-    """Get all conversations for the authenticated user, ordered by last_message_time DESC"""
-    user_id = current_user.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User not authenticated")
-    
+@app.get("/conversations")
+async def get_conversations(
+    since: Optional[str] = None,  # ISO timestamp string for incremental sync
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get conversations for the current user with optional incremental sync"""
     try:
-        from supabase_client import supabase
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
         
-        result = supabase.table("conversations").select("*").eq("user_id", user_id).order("last_message_time", desc=True).execute()
+        logger.info(f"Getting conversations for user {user_id}, since: {since}")
         
-        conversations = []
-        for row in result.data:
-            conversations.append(ConversationResponse(
-                id=row["id"],
-                user_id=row["user_id"],
-                title=row["title"],
-                created_at=row["created_at"],
-                last_message_time=row["last_message_time"],
-                source=row["source"],
-                google_session_id=row.get("google_session_id")
-            ))
+        # Build the query
+        query = supabase.table('conversations')\
+            .select('*')\
+            .eq('user_id', user_id)\
+            .order('updated_at', desc=True)
         
-        return conversations
+        # Add incremental sync filter if provided
+        if since:
+            try:
+                # Parse the timestamp and filter for records updated after it
+                since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
+                query = query.gte('updated_at', since_timestamp.isoformat())
+                logger.info(f"Incremental sync: fetching conversations updated since {since_timestamp}")
+            except ValueError as e:
+                logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
+                # Fall back to full sync if timestamp is invalid
+        
+        response = query.execute()
+        conversations = response.data if response.data else []
+        
+        # Return with server timestamp for next incremental sync
+        result = {
+            'conversations': conversations,
+            'server_timestamp': datetime.utcnow().isoformat() + 'Z',
+            'is_incremental': since is not None,
+            'count': len(conversations)
+        }
+        
+        logger.info(f"Returning {len(conversations)} conversations (incremental: {since is not None})")
+        return result
+        
     except Exception as e:
-        logger.error(f"Error getting conversations for user {user_id}: {str(e)}")
+        logger.error(f"Error getting conversations: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get conversations")
 
 @app.post("/conversations", response_model=ConversationResponse)
@@ -1081,38 +1184,60 @@ async def update_conversation_last_message_time(
 
 # ================== MESSAGE ENDPOINTS ==================
 
-@app.get("/conversations/{conversation_id}/messages", response_model=List[MessageResponse])
+@app.get("/conversations/{conversation_id}/messages")
 async def get_messages(
     conversation_id: int,
+    since: Optional[str] = None,  # ISO timestamp string for incremental sync
+    limit: Optional[int] = 100,   # Pagination support
     current_user: Dict = Depends(get_current_user)
 ):
-    """Get all messages for a conversation (user must own the conversation)"""
-    user_id = current_user.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User not authenticated")
-    
+    """Get messages for a conversation with optional incremental sync"""
     try:
-        from supabase_client import supabase
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
         
-        # First verify user owns the conversation
-        conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
-        if not conv_result.data:
+        logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since: {since}")
+        
+        # First verify the conversation belongs to the user
+        conv_result = supabase.table("conversations").select("user_id").eq("id", conversation_id).execute()
+        if not conv_result.data or conv_result.data[0]["user_id"] != user_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        # Get messages for the conversation
-        result = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("timestamp", desc=False).execute()
+        # Build the messages query
+        query = supabase.table("messages")\
+            .select("*")\
+            .eq("conversation_id", conversation_id)\
+            .order("updated_at", desc=False)\
+            .limit(limit)
         
-        messages = []
-        for row in result.data:
-            messages.append(MessageResponse(
-                id=row["id"],
-                conversation_id=row["conversation_id"],
-                content=row["content"],
-                message_type=row["message_type"],
-                timestamp=row["timestamp"]
-            ))
+        # Add incremental sync filter if provided
+        if since:
+            try:
+                # Parse the timestamp and filter for records updated after it
+                since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
+                query = query.gte('updated_at', since_timestamp.isoformat())
+                logger.info(f"Incremental sync: fetching messages updated since {since_timestamp}")
+            except ValueError as e:
+                logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
+                # Fall back to full sync if timestamp is invalid
         
-        return messages
+        response = query.execute()
+        messages = response.data if response.data else []
+        
+        # Return with server timestamp for next incremental sync
+        result = {
+            'messages': messages,
+            'conversation_id': conversation_id,
+            'server_timestamp': datetime.utcnow().isoformat() + 'Z',
+            'is_incremental': since is not None,
+            'count': len(messages),
+            'has_more': len(messages) == limit  # Indicates if there might be more messages
+        }
+        
+        logger.info(f"Returning {len(messages)} messages for conversation {conversation_id} (incremental: {since is not None})")
+        return result
+        
     except HTTPException:
         raise
     except Exception as e:
