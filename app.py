@@ -395,13 +395,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(f"Authenticated WebSocket connection for user {user_email} ({user_id})")
                 
                 # Load conversation history and initialize session
-                session_id = f"ws_{user_id}"
+                # Create a unique session ID per conversation, not just per user
+                if conversation_id is not None:
+                    session_id = f"ws_{user_id}_conv_{conversation_id}"
+                else:
+                    # If no specific conversation, create a session for a new conversation
+                    session_id = f"ws_{user_id}_new_{int(time.time())}"
+                
                 conversation_history = load_conversation_history(user_id, conversation_id)
                 chat_sessions[session_id] = conversation_history
                 
+                logger.info(f"Created session {session_id} with {len(conversation_history)} messages")
+                
                 # Track the current conversation_id for this session
-                # If loading conversation history found a conversation, use that ID
-                # Otherwise, we'll create a new conversation when the first message is sent
                 session_conversation_id = conversation_id
                 if conversation_id is None and conversation_history:
                     # We loaded the most recent conversation, but we need to know its ID
@@ -410,6 +416,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
                     if conv_result.data:
                         session_conversation_id = conv_result.data[0]["id"]
+                        # Update session_id to include the found conversation_id
+                        new_session_id = f"ws_{user_id}_conv_{session_conversation_id}"
+                        chat_sessions[new_session_id] = chat_sessions[session_id]
+                        del chat_sessions[session_id]
+                        session_id = new_session_id
                 
                 # Only send welcome message if no conversation history exists
                 if not conversation_history:
@@ -471,6 +482,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         # Fallback for legacy plain text messages
                         message = message_text
                         logger.info("Received legacy plain text message")
+                    
+                    logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(chat_sessions[session_id])}")
                     
                     # Save user message to database and update session_conversation_id
                     session_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER")
@@ -646,14 +659,17 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
     """Clean up a session when a WebSocket disconnects"""
     if session_id in chat_sessions:
         del chat_sessions[session_id]
+        logger.info(f"Cleaned up chat session: {session_id}")
     
     if user_id and user_id in user_sessions:
         if session_id in user_sessions[user_id]:
             user_sessions[user_id].remove(session_id)
+            logger.info(f"Removed session {session_id} from user {user_id} sessions")
             
         # Clean up empty user sessions list
         if not user_sessions[user_id]:
             del user_sessions[user_id]
+            logger.info(f"Cleaned up empty user sessions for user {user_id}")
 
 def load_conversation_history(user_id: str, conversation_id: Optional[int] = None) -> List[Dict]:
     """Load conversation history from database and convert to Claude message format"""
