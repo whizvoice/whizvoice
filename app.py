@@ -427,7 +427,19 @@ async def websocket_endpoint(websocket: WebSocket):
             while True:
                 try:
                     # Receive message from client
-                    message = await websocket.receive_text()
+                    message_text = await websocket.receive_text()
+                    
+                    # Parse incoming message - support both structured JSON and legacy plain text
+                    request_id = None
+                    try:
+                        message_data = json.loads(message_text)
+                        message = message_data.get("message", "")
+                        request_id = message_data.get("request_id")
+                        logger.info(f"Received structured message with request_id: {request_id}")
+                    except json.JSONDecodeError:
+                        # Fallback for legacy plain text messages
+                        message = message_text
+                        logger.info("Received legacy plain text message")
                     
                     chat_sessions[session_id].append({"role": "user", "content": message})
 
@@ -436,7 +448,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         error_payload_key = {
                             "type": "error", 
                             "code": "CLAUDE_API_KEY_MISSING",
-                            "message": "Claude API key is not set. Please configure it in settings."
+                            "message": "Claude API key is not set. Please configure it in settings.",
+                            "request_id": request_id
                         }
                         await websocket.send_text(json.dumps(error_payload_key))
                         logger.warning(f"User {user_id} attempted to send message without Claude API key.")
@@ -458,7 +471,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         if not tool_block:
                             logger.error("Stop reason is tool_use but no tool_use block found.")
                             # Send some error or break, as this is an unexpected state
-                            await websocket.send_text(json.dumps({"error": "ServerError", "detail": "Tool use indicated but no tool found."}))
+                            error_payload = {
+                                "error": "ServerError", 
+                                "detail": "Tool use indicated but no tool found.",
+                                "request_id": request_id
+                            }
+                            await websocket.send_text(json.dumps(error_payload))
                             raise StopIteration("ToolBlockMissingError")
 
                         logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
@@ -469,6 +487,8 @@ async def websocket_endpoint(websocket: WebSocket):
                            tool_execution_result.get("status_code") == 401 and \
                            "Asana authentication failed" in tool_execution_result.get("error", ""):
                             logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
+                            # Add request_id to Asana error response
+                            tool_execution_result["request_id"] = request_id
                             await websocket.send_text(json.dumps(tool_execution_result))
                             raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
 
@@ -497,11 +517,21 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # Send Claude's final response back to client
                     if response.content and response.content[0].type == 'text':
-                        await websocket.send_text(response.content[0].text)
+                        # Send structured response with request_id
+                        response_payload = {
+                            "response": response.content[0].text,
+                            "request_id": request_id
+                        }
+                        await websocket.send_text(json.dumps(response_payload))
                     elif response.content: 
                         logger.info("Claude's response did not end with a text block but was not a tool use. Sending a status or nothing.")
                     else: 
-                        await websocket.send_text(json.dumps({"error": "EmptyResponse", "detail": "Assistant provided no content."}))
+                        error_payload = {
+                            "error": "EmptyResponse", 
+                            "detail": "Assistant provided no content.",
+                            "request_id": request_id
+                        }
+                        await websocket.send_text(json.dumps(error_payload))
 
                         
                 except AuthenticationError as claude_auth_exc: # MODIFIED: Use AuthenticationError directly
@@ -509,7 +539,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     error_payload = {
                         "type": "error",
                         "code": "CLAUDE_AUTHENTICATION_ERROR",
-                        "message": f"Claude API authentication failed: {str(claude_auth_exc)}. Please check your Claude API Key in settings."
+                        "message": f"Claude API authentication failed: {str(claude_auth_exc)}. Please check your Claude API Key in settings.",
+                        "request_id": request_id
                     }
                     await websocket.send_text(json.dumps(error_payload))
                     # Don't set _is_responding to False here, as the loop will continue or break
@@ -536,7 +567,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         error_payload = {
                             "type": "error", 
                             "code": "SERVER_PROCESSING_ERROR", 
-                            "message": f"An error occurred: {str(e)}"
+                            "message": f"An error occurred: {str(e)}",
+                            "request_id": request_id
                         }
                         await websocket.send_text(json.dumps(error_payload))
                     except Exception as send_exc:
