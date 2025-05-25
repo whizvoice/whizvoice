@@ -9,11 +9,13 @@ import traceback
 import logging
 import time
 from fastapi.responses import JSONResponse
+from datetime import datetime
 
 from anthropic import Anthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
+from supabase_client import supabase
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -371,6 +373,14 @@ async def websocket_endpoint(websocket: WebSocket):
         if not token and "token" in websocket.query_params:
             token = websocket.query_params["token"]
         
+        # Get conversation_id from query parameters if provided
+        conversation_id = None
+        if "conversation_id" in websocket.query_params:
+            try:
+                conversation_id = int(websocket.query_params["conversation_id"])
+            except ValueError:
+                logger.warning(f"Invalid conversation_id parameter: {websocket.query_params['conversation_id']}")
+        
         # Authenticate if token is present
         user_id = None
         if token:
@@ -385,7 +395,40 @@ async def websocket_endpoint(websocket: WebSocket):
                 user_name = payload.get("name", "there")
                 
                 logger.info(f"Authenticated WebSocket connection for user {user_email} ({user_id})")
-                await websocket.send_text(f"Hello {user_name}! I'm Claude with Asana integration.")
+                
+                # Load conversation history and initialize session
+                # Create a unique session ID per conversation, not just per user
+                if conversation_id is not None:
+                    session_id = f"ws_{user_id}_conv_{conversation_id}"
+                else:
+                    # If no specific conversation, create a session for a new conversation
+                    session_id = f"ws_{user_id}_new_{int(time.time())}"
+                
+                conversation_history = load_conversation_history(user_id, conversation_id)
+                chat_sessions[session_id] = conversation_history
+                
+                logger.info(f"Created session {session_id} with {len(conversation_history)} messages")
+                
+                # Track the current conversation_id for this session
+                session_conversation_id = conversation_id
+                if conversation_id is None and conversation_history:
+                    # We loaded the most recent conversation, but we need to know its ID
+                    # Let's get it from the database again
+                    conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
+                    if conv_result.data:
+                        session_conversation_id = conv_result.data[0]["id"]
+                        # Update session_id to include the found conversation_id
+                        new_session_id = f"ws_{user_id}_conv_{session_conversation_id}"
+                        chat_sessions[new_session_id] = chat_sessions[session_id]
+                        del chat_sessions[session_id]
+                        session_id = new_session_id
+                
+                # Only send welcome message if no conversation history exists
+                if not conversation_history:
+                    await websocket.send_text(f"Hello {user_name}! I'm Claude with Asana integration.")
+                else:
+                    logger.info(f"Loaded {len(conversation_history)} messages from conversation history for user {user_id}")
+                    
             except JWTError as e:
                 logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
                 error_payload = {
@@ -414,9 +457,9 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close(code=1008, reason="Authentication required")
             return
         
-        # Create a session ID
-        session_id = f"ws_{user_id}"
-        chat_sessions[session_id] = []
+        # Create a session ID (moved this up since we need it earlier)
+        # session_id = f"ws_{user_id}"  # Already created above
+        # chat_sessions[session_id] = []  # Already initialized above with conversation history
         
         # Associate session with user
         if user_id not in user_sessions:
@@ -441,6 +484,23 @@ async def websocket_endpoint(websocket: WebSocket):
                         message = message_text
                         logger.info("Received legacy plain text message")
                     
+                    logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(chat_sessions[session_id])}")
+                    
+                    # Save user message to database and update session_conversation_id
+                    logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
+                    session_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER")
+                    logger.info(f"After saving user message. Updated session_conversation_id: {session_conversation_id}")
+                    if session_conversation_id is None:
+                        logger.error("Failed to save user message to database")
+                        error_payload = {
+                            "type": "error",
+                            "code": "DATABASE_ERROR",
+                            "message": "Failed to save message to database",
+                            "request_id": request_id
+                        }
+                        await websocket.send_text(json.dumps(error_payload))
+                        continue
+
                     chat_sessions[session_id].append({"role": "user", "content": message})
 
                     current_anthropic_client = get_anthropic_client(user_id)
@@ -515,11 +575,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Add assistant final response to session history (if not an intercepted error)
                     chat_sessions[session_id].append({"role": "assistant", "content": response.content})
                     
-                    # Send Claude's final response back to client
+                    # Extract and save assistant response to database
+                    assistant_response_text = ""
                     if response.content and response.content[0].type == 'text':
+                        assistant_response_text = response.content[0].text
+                        
+                        # Save assistant message to database
+                        logger.info(f"About to save assistant message to conversation {session_conversation_id}")
+                        save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT")
+                        
                         # Send structured response with request_id
                         response_payload = {
-                            "response": response.content[0].text,
+                            "response": assistant_response_text,
                             "request_id": request_id
                         }
                         await websocket.send_text(json.dumps(response_payload))
@@ -596,14 +663,102 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
     """Clean up a session when a WebSocket disconnects"""
     if session_id in chat_sessions:
         del chat_sessions[session_id]
+        logger.info(f"Cleaned up chat session: {session_id}")
     
     if user_id and user_id in user_sessions:
         if session_id in user_sessions[user_id]:
             user_sessions[user_id].remove(session_id)
+            logger.info(f"Removed session {session_id} from user {user_id} sessions")
             
         # Clean up empty user sessions list
         if not user_sessions[user_id]:
             del user_sessions[user_id]
+            logger.info(f"Cleaned up empty user sessions for user {user_id}")
+
+def load_conversation_history(user_id: str, conversation_id: Optional[int] = None) -> List[Dict]:
+    """Load conversation history from database and convert to Claude message format"""
+    try:
+        # If no conversation_id specified, get the most recent conversation for the user
+        if conversation_id is None:
+            conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
+            if not conv_result.data:
+                logger.info(f"No existing conversations found for user {user_id}")
+                return []
+            conversation_id = conv_result.data[0]["id"]
+            logger.info(f"Loading most recent conversation {conversation_id} for user {user_id}")
+        else:
+            # Verify user owns the specified conversation
+            conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
+            if not conv_result.data:
+                logger.warning(f"Conversation {conversation_id} not found or not owned by user {user_id}")
+                return []
+            logger.info(f"Loading specified conversation {conversation_id} for user {user_id}")
+        
+        # Get messages for the conversation
+        result = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("timestamp", desc=False).execute()
+        
+        # Convert database messages to Claude format
+        claude_messages = []
+        for row in result.data:
+            message_role = "user" if row["message_type"] == "USER" else "assistant"
+            claude_messages.append({
+                "role": message_role,
+                "content": row["content"]
+            })
+        
+        logger.info(f"Loaded {len(claude_messages)} messages from conversation {conversation_id} for user {user_id}")
+        return claude_messages
+        
+    except Exception as e:
+        logger.error(f"Error loading conversation history for user {user_id}, conversation {conversation_id}: {str(e)}")
+        return []
+
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str) -> Optional[int]:
+    """Save a message to the database and return the conversation_id"""
+    try:
+        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, content='{content[:50]}...'")
+        
+        # If no conversation_id provided, create a new conversation
+        if conversation_id is None:
+            logger.warning(f"Creating NEW conversation for user {user_id} because conversation_id is None")
+            # Create a new conversation
+            conv_result = supabase.table("conversations").insert({
+                "user_id": user_id,
+                "title": content[:50] + "..." if len(content) > 50 else content,  # Use first part of message as title
+                "source": "app"
+            }).execute()
+            
+            if not conv_result.data:
+                logger.error(f"Failed to create new conversation for user {user_id}")
+                return None
+                
+            conversation_id = conv_result.data[0]["id"]
+            logger.warning(f"Created NEW conversation {conversation_id} for user {user_id}")
+        else:
+            logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
+        
+        # Save the message
+        result = supabase.table("messages").insert({
+            "conversation_id": conversation_id,
+            "content": content,
+            "message_type": message_type
+        }).execute()
+        
+        if not result.data:
+            logger.error(f"Failed to save message to conversation {conversation_id}")
+            return None
+        
+        # Update conversation last_message_time
+        supabase.table("conversations").update({
+            "last_message_time": "now()"
+        }).eq("id", conversation_id).execute()
+        
+        logger.info(f"Successfully saved {message_type} message to conversation {conversation_id}")
+        return conversation_id
+        
+    except Exception as e:
+        logger.error(f"Error saving message to database: {str(e)}")
+        return None
 
 # TODO: tool names and call code should be programmatically linked in a dictionary or something
 def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
@@ -650,48 +805,46 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     logger.error(f"Unknown tool requested: {tool_name}")
     raise ValueError(f"Unknown tool: {tool_name}")
 
-@app.post("/preferences/tokens")
+@app.post("/update_api_tokens")
 async def update_api_tokens(
     request: TokenUpdateRequest,
     current_user: Dict = Depends(get_current_user)
 ):
-    logger.info("[DEBUG] Entered update_api_tokens route")
-    user_id = current_user["sub"]
-    logger.info(f"[DEBUG] user_id: {user_id}")
-    
-    success = True
-    error_message = ""
-
+    """Update the user's API tokens (Claude API key and/or Asana token)"""
     try:
-        # Update Claude API key if provided
-        if request.claude_api_key is not None:
-            logger.info(f"[DEBUG] Setting Claude API key for user {user_id}")
-            if not set_encrypted_preference(user_id, 'claude_api_key', request.claude_api_key):
-                success = False
-                error_message = "Failed to update Claude API key in database."
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
         
-        # Update Asana token if provided, only if previous steps succeeded
-        if success and request.asana_access_token is not None:
-            logger.info(f"[DEBUG] Setting Asana token for user {user_id}")
-            if not set_encrypted_preference(user_id, 'asana_access_token', request.asana_access_token):
-                success = False
-                error_message = "Failed to update Asana access token in database."
-
-        if success:
-            logger.info("[DEBUG] Returning success from update_api_tokens")
-            return {"status": "success", "message": "Tokens updated successfully"}
-        else:
-            # Raise 500 if any set_encrypted_preference call returned False
-            logger.error(f"[API ERROR] {error_message} User: {user_id}")
-            raise HTTPException(status_code=500, detail=error_message)
-
-    except HTTPException as http_exc:
-        # Re-raise HTTPExceptions (like auth errors)
-        raise http_exc
+        # Handle Claude API key if provided
+        if request.claude_api_key is not None:
+            if request.claude_api_key.strip():  # Non-empty key
+                success = set_encrypted_preference_key(user_id, "claude_api_key", request.claude_api_key.strip())
+                if not success:
+                    raise HTTPException(status_code=500, detail="Failed to save Claude API key")
+            else:  # Empty key - remove it
+                success = set_encrypted_preference_key(user_id, "claude_api_key", None)
+                if not success:
+                    logger.warning(f"Failed to remove Claude API key for user {user_id}")
+        
+        # Handle Asana token if provided
+        if request.asana_access_token is not None:
+            if request.asana_access_token.strip():  # Non-empty token
+                success = set_encrypted_preference_key(user_id, "asana_access_token", request.asana_access_token.strip())
+                if not success:
+                    raise HTTPException(status_code=500, detail="Failed to save Asana token")
+            else:  # Empty token - remove it
+                success = set_encrypted_preference_key(user_id, "asana_access_token", None)
+                if not success:
+                    logger.warning(f"Failed to remove Asana token for user {user_id}")
+        
+        return {"message": "API tokens updated successfully"}
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        # Catch unexpected errors during the process
-        logger.error(f"[DEBUG] Unexpected exception in update_api_tokens: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+        logger.error(f"Unexpected exception in update_api_tokens: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update API tokens")
 
 @app.get("/preferences/tokens")
 async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
@@ -700,8 +853,8 @@ async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
         user_id = current_user["sub"]
         
         # Get both tokens
-        claude_token = get_encrypted_preference(user_id, 'claude_api_key')
-        asana_token = get_encrypted_preference(user_id, 'asana_access_token')
+        claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
+        asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
         
         return {
             "has_claude_token": claude_token is not None,
@@ -731,35 +884,137 @@ async def set_user_timezone_api(
         logger.warning(f"Failed to set timezone for user {user_id} via API: {message}")
         raise HTTPException(status_code=400, detail=message)
 
+# ================== SYNC HELPER FUNCTIONS ==================
+
+def get_last_sync_timestamp(user_id: str, entity_type: str, entity_id: Optional[int] = None) -> Optional[str]:
+    """Get the last sync timestamp for a user and entity type"""
+    try:
+        query = supabase.table("sync_metadata")\
+            .select("last_sync_timestamp")\
+            .eq("user_id", user_id)\
+            .eq("entity_type", entity_type)
+        
+        if entity_id is not None:
+            query = query.eq("entity_id", entity_id)
+        else:
+            query = query.is_("entity_id", "null")
+        
+        result = query.execute()
+        if result.data:
+            return result.data[0]["last_sync_timestamp"]
+        return None
+    except Exception as e:
+        logger.error(f"Error getting last sync timestamp for user {user_id}, entity {entity_type}: {e}")
+        return None
+
+def update_last_sync_timestamp(user_id: str, entity_type: str, timestamp: str, entity_id: Optional[int] = None):
+    """Update the last sync timestamp for a user and entity type"""
+    try:
+        data = {
+            "user_id": user_id,
+            "entity_type": entity_type,
+            "last_sync_timestamp": timestamp,
+            "entity_id": entity_id
+        }
+        
+        # Use upsert to insert or update
+        result = supabase.table("sync_metadata").upsert(data).execute()
+        logger.info(f"Updated sync timestamp for user {user_id}, entity {entity_type}: {timestamp}")
+        return True
+    except Exception as e:
+        logger.error(f"Error updating sync timestamp for user {user_id}, entity {entity_type}: {e}")
+        return False
+
+@app.get("/sync/metadata")
+async def get_sync_metadata(current_user: Dict = Depends(get_current_user)):
+    """Get sync metadata for the current user"""
+    try:
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
+        
+        result = supabase.table("sync_metadata")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .execute()
+        
+        return {"sync_metadata": result.data if result.data else []}
+    except Exception as e:
+        logger.error(f"Error getting sync metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get sync metadata")
+
+@app.post("/sync/metadata")
+async def update_sync_metadata(
+    entity_type: str,
+    timestamp: str,
+    entity_id: Optional[int] = None,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Update sync metadata for the current user"""
+    try:
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
+        
+        success = update_last_sync_timestamp(user_id, entity_type, timestamp, entity_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update sync metadata")
+        
+        return {"success": True, "message": "Sync metadata updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating sync metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update sync metadata")
+
 # ================== CONVERSATION ENDPOINTS ==================
 
-@app.get("/conversations", response_model=List[ConversationResponse])
-async def get_conversations(current_user: Dict = Depends(get_current_user)):
-    """Get all conversations for the authenticated user, ordered by last_message_time DESC"""
-    user_id = current_user.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User not authenticated")
-    
+@app.get("/conversations")
+async def get_conversations(
+    since: Optional[str] = None,  # ISO timestamp string for incremental sync
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get conversations for the current user with optional incremental sync"""
     try:
-        from supabase_client import supabase
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
         
-        result = supabase.table("conversations").select("*").eq("user_id", user_id).order("last_message_time", desc=True).execute()
+        logger.info(f"Getting conversations for user {user_id}, since: {since}")
         
-        conversations = []
-        for row in result.data:
-            conversations.append(ConversationResponse(
-                id=row["id"],
-                user_id=row["user_id"],
-                title=row["title"],
-                created_at=row["created_at"],
-                last_message_time=row["last_message_time"],
-                source=row["source"],
-                google_session_id=row.get("google_session_id")
-            ))
+        # Build the query
+        query = supabase.table('conversations')\
+            .select('*')\
+            .eq('user_id', user_id)\
+            .order('updated_at', desc=True)
         
-        return conversations
+        # Add incremental sync filter if provided
+        if since:
+            try:
+                # Parse the timestamp and filter for records updated after it
+                since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
+                query = query.gte('updated_at', since_timestamp.isoformat())
+                logger.info(f"Incremental sync: fetching conversations updated since {since_timestamp}")
+            except ValueError as e:
+                logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
+                # Fall back to full sync if timestamp is invalid
+        
+        response = query.execute()
+        conversations = response.data if response.data else []
+        
+        # Return with server timestamp for next incremental sync
+        result = {
+            'conversations': conversations,
+            'server_timestamp': datetime.utcnow().isoformat() + 'Z',
+            'is_incremental': since is not None,
+            'count': len(conversations)
+        }
+        
+        logger.info(f"Returning {len(conversations)} conversations (incremental: {since is not None})")
+        return result
+        
     except Exception as e:
-        logger.error(f"Error getting conversations for user {user_id}: {str(e)}")
+        logger.error(f"Error getting conversations: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get conversations")
 
 @app.post("/conversations", response_model=ConversationResponse)
@@ -773,8 +1028,6 @@ async def create_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # Insert new conversation
         result = supabase.table("conversations").insert({
             "user_id": user_id,
@@ -811,8 +1064,6 @@ async def get_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", user_id).execute()
         
         if not result.data:
@@ -846,8 +1097,6 @@ async def update_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # Build update dict
         updates = {}
         if update_data.title is not None:
@@ -886,8 +1135,6 @@ async def delete_all_conversations(current_user: Dict = Depends(get_current_user
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # Delete all conversations for user (messages will cascade delete)
         result = supabase.table("conversations").delete().eq("user_id", user_id).execute()
         
@@ -907,8 +1154,6 @@ async def update_conversation_last_message_time(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         result = supabase.table("conversations").update({
             "last_message_time": "now()"
         }).eq("id", conversation_id).eq("user_id", user_id).execute()
@@ -925,38 +1170,60 @@ async def update_conversation_last_message_time(
 
 # ================== MESSAGE ENDPOINTS ==================
 
-@app.get("/conversations/{conversation_id}/messages", response_model=List[MessageResponse])
+@app.get("/conversations/{conversation_id}/messages")
 async def get_messages(
     conversation_id: int,
+    since: Optional[str] = None,  # ISO timestamp string for incremental sync
+    limit: Optional[int] = 100,   # Pagination support
     current_user: Dict = Depends(get_current_user)
 ):
-    """Get all messages for a conversation (user must own the conversation)"""
-    user_id = current_user.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User not authenticated")
-    
+    """Get messages for a conversation with optional incremental sync"""
     try:
-        from supabase_client import supabase
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
         
-        # First verify user owns the conversation
-        conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
-        if not conv_result.data:
+        logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since: {since}")
+        
+        # First verify the conversation belongs to the user
+        conv_result = supabase.table("conversations").select("user_id").eq("id", conversation_id).execute()
+        if not conv_result.data or conv_result.data[0]["user_id"] != user_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        # Get messages for the conversation
-        result = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("timestamp", desc=False).execute()
+        # Build the messages query
+        query = supabase.table("messages")\
+            .select("*")\
+            .eq("conversation_id", conversation_id)\
+            .order("updated_at", desc=False)\
+            .limit(limit)
         
-        messages = []
-        for row in result.data:
-            messages.append(MessageResponse(
-                id=row["id"],
-                conversation_id=row["conversation_id"],
-                content=row["content"],
-                message_type=row["message_type"],
-                timestamp=row["timestamp"]
-            ))
+        # Add incremental sync filter if provided
+        if since:
+            try:
+                # Parse the timestamp and filter for records updated after it
+                since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
+                query = query.gte('updated_at', since_timestamp.isoformat())
+                logger.info(f"Incremental sync: fetching messages updated since {since_timestamp}")
+            except ValueError as e:
+                logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
+                # Fall back to full sync if timestamp is invalid
         
-        return messages
+        response = query.execute()
+        messages = response.data if response.data else []
+        
+        # Return with server timestamp for next incremental sync
+        result = {
+            'messages': messages,
+            'conversation_id': conversation_id,
+            'server_timestamp': datetime.utcnow().isoformat() + 'Z',
+            'is_incremental': since is not None,
+            'count': len(messages),
+            'has_more': len(messages) == limit  # Indicates if there might be more messages
+        }
+        
+        logger.info(f"Returning {len(messages)} messages for conversation {conversation_id} (incremental: {since is not None})")
+        return result
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -974,8 +1241,6 @@ async def create_message(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # First verify user owns the conversation
         conv_result = supabase.table("conversations").select("id").eq("id", message.conversation_id).eq("user_id", user_id).execute()
         if not conv_result.data:
@@ -1021,8 +1286,6 @@ async def get_message_count(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        from supabase_client import supabase
-        
         # First verify user owns the conversation
         conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
         if not conv_result.data:
