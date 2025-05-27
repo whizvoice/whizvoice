@@ -927,7 +927,7 @@ async def get_user_preference(
 @app.post("/user/preference")
 async def set_user_preference(
     key: str,
-    value: str,  # The request body will be the preference value as a string
+    request: Request,  # Get the raw request to read the body
     current_user: Dict = Depends(get_current_user)
 ):
     """Set a specific user preference value"""
@@ -942,6 +942,10 @@ async def set_user_preference(
         
         # Ensure user and preferences exist
         ensure_user_and_prefs(user_id)
+        
+        # Read the value from the request body
+        body = await request.body()
+        value = body.decode('utf-8')
         
         # Set the preference value (in unencrypted preferences)
         success = set_preference(user_id, key, value)
