@@ -183,6 +183,14 @@ ALLOWED_API_KEY_NAMES = {
     # Add other future API key names here
 }
 
+# Allow-list of general preference keys that can be set via the user preference endpoint
+ALLOWED_PREFERENCE_KEYS = {
+    "voice_settings",
+    "user_timezone",
+    "asana_workspace_preference",
+    # Add other preference keys here as needed
+}
+
 # Store active chat sessions
 chat_sessions = {}
 
@@ -883,6 +891,72 @@ async def set_user_timezone_api(
         # We return a 400 if the timezone string was invalid or if saving failed
         logger.warning(f"Failed to set timezone for user {user_id} via API: {message}")
         raise HTTPException(status_code=400, detail=message)
+
+# ================== USER PREFERENCE ENDPOINTS ==================
+
+@app.get("/api/user/preference")
+async def get_user_preference(
+    key: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Get a specific user preference value"""
+    try:
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
+        
+        # Validate the preference key
+        if key not in ALLOWED_PREFERENCE_KEYS:
+            raise HTTPException(status_code=400, detail=f"Preference key '{key}' is not allowed")
+        
+        # Ensure user and preferences exist
+        ensure_user_and_prefs(user_id)
+        
+        # Get the preference value (from unencrypted preferences)
+        value = get_preference(user_id, key)
+        
+        logger.info(f"Retrieved preference '{key}' for user {user_id}")
+        return value  # Return the value directly (can be None)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting user preference '{key}' for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get user preference")
+
+@app.post("/api/user/preference")
+async def set_user_preference(
+    key: str,
+    value: str,  # The request body will be the preference value as a string
+    current_user: Dict = Depends(get_current_user)
+):
+    """Set a specific user preference value"""
+    try:
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User not authenticated")
+        
+        # Validate the preference key
+        if key not in ALLOWED_PREFERENCE_KEYS:
+            raise HTTPException(status_code=400, detail=f"Preference key '{key}' is not allowed")
+        
+        # Ensure user and preferences exist
+        ensure_user_and_prefs(user_id)
+        
+        # Set the preference value (in unencrypted preferences)
+        success = set_preference(user_id, key, value)
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to save user preference")
+        
+        logger.info(f"Set preference '{key}' for user {user_id}")
+        return {"status": "success", "message": f"Preference '{key}' updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error setting user preference '{key}' for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to set user preference")
 
 # ================== SYNC HELPER FUNCTIONS ==================
 
