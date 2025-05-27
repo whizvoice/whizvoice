@@ -894,7 +894,7 @@ async def set_user_timezone_api(
 
 # ================== USER PREFERENCE ENDPOINTS ==================
 
-@app.get("/api/user/preference")
+@app.get("/user/preference")
 async def get_user_preference(
     key: str,
     current_user: Dict = Depends(get_current_user)
@@ -924,7 +924,7 @@ async def get_user_preference(
         logger.error(f"Error getting user preference '{key}' for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get user preference")
 
-@app.post("/api/user/preference")
+@app.post("/user/preference")
 async def set_user_preference(
     key: str,
     value: str,  # The request body will be the preference value as a string
