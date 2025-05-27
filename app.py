@@ -13,6 +13,7 @@ from datetime import datetime
 
 from anthropic import Anthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
+from about_me_tool import about_me_tools, get_app_info
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 from supabase_client import supabase
@@ -21,8 +22,11 @@ from supabase_client import supabase
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# System prompt for Claude
+CLAUDE_SYSTEM_PROMPT = "You are Whiz Voice, a friendly AI assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary. Also, you have a get_app_info tool that can be used to get information about the Whiz Voice app, including its features, functionality, and how to use it."
+
 # can concatenate additional tools here if needed
-tools = asana_tools
+tools = asana_tools + about_me_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -527,7 +531,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         model="claude-3-7-sonnet-20250219",
                         max_tokens=1000,
                         messages=chat_sessions[session_id],
-                        system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
+                        system=CLAUDE_SYSTEM_PROMPT,
                         tools=tools,
                         tool_choice={"type": "auto"},
                         betas=["token-efficient-tools-2025-02-19"]
@@ -574,7 +578,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             model="claude-3-7-sonnet-20250219",
                             max_tokens=1000,
                             messages=chat_sessions[session_id],
-                            system="You are a friendly assistant that can help with anything. Specifically for conversations related to Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary.",
+                            system=CLAUDE_SYSTEM_PROMPT,
                             tools=tools,
                             tool_choice={"type": "auto"},
                             betas=["token-efficient-tools-2025-02-19"]
@@ -809,6 +813,8 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
         task_gid = tool_args.get('task_gid')
         new_parent_gid = tool_args.get('new_parent_gid')
         return change_task_parent(user_id, task_gid, new_parent_gid)
+    elif tool_name == "get_app_info":
+        return get_app_info(user_id)
     
     logger.error(f"Unknown tool requested: {tool_name}")
     raise ValueError(f"Unknown tool: {tool_name}")
