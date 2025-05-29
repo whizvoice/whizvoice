@@ -317,7 +317,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "create_asana_task",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, please guess what the parent task should be based on the name of the task and existing parent tasks, and confirm with the user.",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, please guess what the parent task should be based on the name of the task and existing parent tasks. If you are pretty confident that you know the correct parent task, go ahead and create the task. If you're not sure, please confirm the parent task with the user before creating the task.",
         "input_schema": {
             "type": "object",
             "properties": {
