@@ -2,7 +2,7 @@ from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depe
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, Set
 import json
 import os
 import traceback
@@ -10,6 +10,8 @@ import logging
 import time
 from fastapi.responses import JSONResponse
 from datetime import datetime
+import asyncio
+from contextlib import asynccontextmanager
 
 from anthropic import Anthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
@@ -203,6 +205,10 @@ user_sessions = {}
 
 # Define the response model for the new GET endpoint
 ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
+
+# Add global tracking for active requests (session_id -> set of request_ids)
+active_requests: Dict[str, Set[str]] = {}
+active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 
 @app.get("/")
 async def root():
@@ -486,133 +492,100 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # Parse incoming message - support both structured JSON and legacy plain text
                     request_id = None
+                    message_type = "message"  # default type
                     try:
                         message_data = json.loads(message_text)
                         message = message_data.get("message", "")
                         request_id = message_data.get("request_id")
-                        logger.info(f"Received structured message with request_id: {request_id}")
+                        message_type = message_data.get("type", "message")  # Support message types
+                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}")
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
                         logger.info("Received legacy plain text message")
                     
-                    logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(chat_sessions[session_id])}")
-                    
-                    # Save user message to database and update session_conversation_id
-                    logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-                    session_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER")
-                    logger.info(f"After saving user message. Updated session_conversation_id: {session_conversation_id}")
-                    if session_conversation_id is None:
-                        logger.error("Failed to save user message to database")
-                        error_payload = {
-                            "type": "error",
-                            "code": "DATABASE_ERROR",
-                            "message": "Failed to save message to database",
-                            "request_id": request_id
-                        }
-                        await websocket.send_text(json.dumps(error_payload))
-                        continue
-
-                    chat_sessions[session_id].append({"role": "user", "content": message})
-
-                    current_anthropic_client = get_anthropic_client(user_id)
-                    if not current_anthropic_client:
-                        error_payload_key = {
-                            "type": "error", 
-                            "code": "CLAUDE_API_KEY_MISSING",
-                            "message": "Claude API key is not set. Please configure it in settings.",
-                            "request_id": request_id
-                        }
-                        await websocket.send_text(json.dumps(error_payload_key))
-                        logger.warning(f"User {user_id} attempted to send message without Claude API key.")
-                        continue # Allow user to set key and try again without breaking connection.
-
-                    response = current_anthropic_client.beta.messages.create(
-                        model="claude-3-7-sonnet-20250219",
-                        max_tokens=1000,
-                        messages=chat_sessions[session_id],
-                        system=CLAUDE_SYSTEM_PROMPT,
-                        tools=tools,
-                        tool_choice={"type": "auto"},
-                        betas=["token-efficient-tools-2025-02-19"]
-                    )
-                    
-                    # Handle tool calls
-                    while response.stop_reason == 'tool_use':
-                        tool_block = next((block for block in response.content if block.type == 'tool_use'), None)
-                        if not tool_block:
-                            logger.error("Stop reason is tool_use but no tool_use block found.")
-                            # Send some error or break, as this is an unexpected state
-                            error_payload = {
-                                "error": "ServerError", 
-                                "detail": "Tool use indicated but no tool found.",
+                    # Handle cancellation requests
+                    if message_type == "cancel":
+                        cancel_request_id = message_data.get("cancel_request_id")
+                        if cancel_request_id and cancel_request_id in active_tasks:
+                            logger.info(f"Cancelling request {cancel_request_id}")
+                            active_tasks[cancel_request_id].cancel()
+                            del active_tasks[cancel_request_id]
+                            
+                            # Remove from active requests tracking
+                            if session_id in active_requests:
+                                active_requests[session_id].discard(cancel_request_id)
+                            
+                            # Send cancellation confirmation
+                            cancel_response = {
+                                "type": "cancelled",
+                                "cancelled_request_id": cancel_request_id,
                                 "request_id": request_id
                             }
-                            await websocket.send_text(json.dumps(error_payload))
-                            raise StopIteration("ToolBlockMissingError")
-
-                        logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
-                        tool_execution_result = execute_tool(tool_block.name, tool_block.input, user_id)
+                            await websocket.send_text(json.dumps(cancel_response))
+                        continue
+                    
+                    # Handle regular messages
+                    if message_type == "message" and message:
+                        # Check for active requests and handle interrupts
+                        if session_id in active_requests and active_requests[session_id]:
+                            logger.info(f"Interrupt detected. Cancelling {len(active_requests[session_id])} active requests")
+                            # Cancel all active requests for this session
+                            for active_request_id in list(active_requests[session_id]):
+                                if active_request_id in active_tasks:
+                                    active_tasks[active_request_id].cancel()
+                                    del active_tasks[active_request_id]
+                            active_requests[session_id].clear()
+                            
+                            # Send interrupt notification
+                            interrupt_response = {
+                                "type": "interrupted", 
+                                "message": "Previous request cancelled due to new message",
+                                "request_id": request_id
+                            }
+                            await websocket.send_text(json.dumps(interrupt_response))
                         
-                        # Check if the tool_execution_result is our specific Asana auth error
-                        if isinstance(tool_execution_result, dict) and \
-                           tool_execution_result.get("status_code") == 401 and \
-                           "Asana authentication failed" in tool_execution_result.get("error", ""):
-                            logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
-                            # Add request_id to Asana error response
-                            tool_execution_result["request_id"] = request_id
-                            await websocket.send_text(json.dumps(tool_execution_result))
-                            raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
-
-                        # If not the specific Asana auth error, proceed as before with Claude:
-                        chat_sessions[session_id].extend([
-                            {"role": "assistant", "content": [tool_block]},
-                            {"role": "user", "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": tool_block.id,
-                                "content": json.dumps(tool_execution_result) 
-                            }]}
-                        ])
-                        
-                        response = current_anthropic_client.beta.messages.create(
-                            model="claude-3-7-sonnet-20250219",
-                            max_tokens=1000,
-                            messages=chat_sessions[session_id],
-                            system=CLAUDE_SYSTEM_PROMPT,
-                            tools=tools,
-                            tool_choice={"type": "auto"},
-                            betas=["token-efficient-tools-2025-02-19"]
+                        # Create task for processing this message
+                        task = asyncio.create_task(
+                            process_message_task(
+                                websocket=websocket,
+                                session_id=session_id,
+                                session_conversation_id=session_conversation_id,
+                                user_id=user_id,
+                                message=message,
+                                request_id=request_id,
+                                chat_sessions=chat_sessions
+                            )
                         )
-                    
-                    # Add assistant final response to session history (if not an intercepted error)
-                    chat_sessions[session_id].append({"role": "assistant", "content": response.content})
-                    
-                    # Extract and save assistant response to database
-                    assistant_response_text = ""
-                    if response.content and response.content[0].type == 'text':
-                        assistant_response_text = response.content[0].text
                         
-                        # Save assistant message to database
-                        logger.info(f"About to save assistant message to conversation {session_conversation_id}")
-                        save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT")
+                        # Track the task
+                        if request_id:
+                            active_tasks[request_id] = task
+                            if session_id not in active_requests:
+                                active_requests[session_id] = set()
+                            active_requests[session_id].add(request_id)
                         
-                        # Send structured response with request_id
-                        response_payload = {
-                            "response": assistant_response_text,
-                            "request_id": request_id
-                        }
-                        await websocket.send_text(json.dumps(response_payload))
-                    elif response.content: 
-                        logger.info("Claude's response did not end with a text block but was not a tool use. Sending a status or nothing.")
-                    else: 
-                        error_payload = {
-                            "error": "EmptyResponse", 
-                            "detail": "Assistant provided no content.",
-                            "request_id": request_id
-                        }
-                        await websocket.send_text(json.dumps(error_payload))
+                        # Wait for task completion and update session_conversation_id
+                        try:
+                            updated_session_conversation_id = await task
+                            if updated_session_conversation_id is not None:
+                                session_conversation_id = updated_session_conversation_id
+                        except asyncio.CancelledError:
+                            logger.info(f"Request {request_id} was cancelled")
+                            # Clean up tracking
+                            if request_id:
+                                active_tasks.pop(request_id, None)
+                                if session_id in active_requests:
+                                    active_requests[session_id].discard(request_id)
+                        except Exception as e:
+                            logger.error(f"Error processing message: {e}")
+                            # Clean up tracking
+                            if request_id:
+                                active_tasks.pop(request_id, None)
+                                if session_id in active_requests:
+                                    active_requests[session_id].discard(request_id)
+                            raise
 
-                        
                 except AuthenticationError as claude_auth_exc: # MODIFIED: Use AuthenticationError directly
                     logger.warning(f"Anthropic authentication error for user {user_id} in session {session_id}: {claude_auth_exc}")
                     error_payload = {
@@ -1389,6 +1362,143 @@ async def get_message_count(
 async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
+
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, chat_sessions):
+    """Process a single message in a cancellable task"""
+    try:
+        logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(chat_sessions[session_id])}")
+        
+        # Save user message to database and update session_conversation_id
+        logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
+        session_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER")
+        logger.info(f"After saving user message. Updated session_conversation_id: {session_conversation_id}")
+        if session_conversation_id is None:
+            logger.error("Failed to save user message to database")
+            error_payload = {
+                "type": "error",
+                "code": "DATABASE_ERROR",
+                "message": "Failed to save message to database",
+                "request_id": request_id
+            }
+            await websocket.send_text(json.dumps(error_payload))
+            return session_conversation_id
+
+        chat_sessions[session_id].append({"role": "user", "content": message})
+
+        current_anthropic_client = get_anthropic_client(user_id)
+        if not current_anthropic_client:
+            error_payload_key = {
+                "type": "error", 
+                "code": "CLAUDE_API_KEY_MISSING",
+                "message": "Claude API key is not set. Please configure it in settings.",
+                "request_id": request_id
+            }
+            await websocket.send_text(json.dumps(error_payload_key))
+            logger.warning(f"User {user_id} attempted to send message without Claude API key.")
+            return session_conversation_id
+
+        # Check for cancellation before making API call
+        if asyncio.current_task().cancelled():
+            return session_conversation_id
+
+        response = current_anthropic_client.beta.messages.create(
+            model="claude-3-7-sonnet-20250219",
+            max_tokens=1000,
+            messages=chat_sessions[session_id],
+            system=CLAUDE_SYSTEM_PROMPT,
+            tools=tools,
+            tool_choice={"type": "auto"},
+            betas=["token-efficient-tools-2025-02-19"]
+        )
+
+        # Check for cancellation after API call
+        if asyncio.current_task().cancelled():
+            return session_conversation_id
+
+        # Handle tool calls
+        while response.stop_reason == 'tool_use':
+            tool_block = next((block for block in response.content if block.type == 'tool_use'), None)
+            if not tool_block:
+                logger.error("Stop reason is tool_use but no tool_use block found.")
+                # Send some error or break, as this is an unexpected state
+                error_payload = {
+                    "error": "ServerError", 
+                    "detail": "Tool use indicated but no tool found.",
+                    "request_id": request_id
+                }
+                await websocket.send_text(json.dumps(error_payload))
+                raise StopIteration("ToolBlockMissingError")
+
+            logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
+            tool_execution_result = execute_tool(tool_block.name, tool_block.input, user_id)
+            
+            # Check if the tool_execution_result is our specific Asana auth error
+            if isinstance(tool_execution_result, dict) and \
+               tool_execution_result.get("status_code") == 401 and \
+               "Asana authentication failed" in tool_execution_result.get("error", ""):
+                logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
+                # Add request_id to Asana error response
+                tool_execution_result["request_id"] = request_id
+                await websocket.send_text(json.dumps(tool_execution_result))
+                raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
+
+            # If not the specific Asana auth error, proceed as before with Claude:
+            chat_sessions[session_id].extend([
+                {"role": "assistant", "content": [tool_block]},
+                {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_block.id,
+                    "content": json.dumps(tool_execution_result) 
+                }]}
+            ])
+            
+            response = current_anthropic_client.beta.messages.create(
+                model="claude-3-7-sonnet-20250219",
+                max_tokens=1000,
+                messages=chat_sessions[session_id],
+                system=CLAUDE_SYSTEM_PROMPT,
+                tools=tools,
+                tool_choice={"type": "auto"},
+                betas=["token-efficient-tools-2025-02-19"]
+            )
+        
+        # Add assistant final response to session history (if not an intercepted error)
+        chat_sessions[session_id].append({"role": "assistant", "content": response.content})
+        
+        # Extract and save assistant response to database
+        assistant_response_text = ""
+        if response.content and response.content[0].type == 'text':
+            assistant_response_text = response.content[0].text
+            
+            # Save assistant message to database
+            logger.info(f"About to save assistant message to conversation {session_conversation_id}")
+            save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT")
+            
+            # Send structured response with request_id
+            response_payload = {
+                "response": assistant_response_text,
+                "request_id": request_id
+            }
+            await websocket.send_text(json.dumps(response_payload))
+        elif response.content: 
+            logger.info("Claude's response did not end with a text block but was not a tool use. Sending a status or nothing.")
+        else: 
+            error_payload = {
+                "error": "EmptyResponse", 
+                "detail": "Assistant provided no content.",
+                "request_id": request_id
+            }
+            await websocket.send_text(json.dumps(error_payload))
+
+        return session_conversation_id
+        
+    finally:
+        # Clean up tracking
+        if request_id:
+            active_tasks.pop(request_id, None)
+            session_key = f"ws_{user_id}_conv_{session_conversation_id}" if session_conversation_id else session_id
+            if session_key in active_requests:
+                active_requests[session_key].discard(request_id)
 
 if __name__ == "__main__":
     import uvicorn
