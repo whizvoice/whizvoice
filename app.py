@@ -14,7 +14,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from anthropic import Anthropic, AuthenticationError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
 from about_me_tool import about_me_tools, get_app_info
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -750,7 +750,7 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     """Execute a tool and return its result"""
     logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
     
-    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference", "get_asana_workspaces", "change_task_parent"]:
+    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference", "get_asana_workspaces", "change_task_parent", "update_task_due_date"]:
         return {"error": f"User authentication required for tool: {tool_name}"}
 
     if tool_name == "get_asana_workspaces":
@@ -786,6 +786,14 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
         task_gid = tool_args.get('task_gid')
         new_parent_gid = tool_args.get('new_parent_gid')
         return change_task_parent(user_id, task_gid, new_parent_gid)
+    elif tool_name == "update_task_due_date":
+        task_gid = tool_args.get('task_gid')
+        new_due_date = tool_args.get('new_due_date')
+        if not task_gid:
+            return {"error": "Task GID is required."}
+        if not new_due_date:
+            return {"error": "New due date is required."}
+        return update_task_due_date(user_id, task_gid, new_due_date)
     elif tool_name == "get_app_info":
         return get_app_info(user_id)
     

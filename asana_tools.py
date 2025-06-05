@@ -237,6 +237,34 @@ def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
+def update_task_due_date(user_id: str, task_gid, new_due_date):
+    configuration = asana.Configuration()
+    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
+    api_client = asana.ApiClient(configuration)
+    try:
+        api_client = get_asana_client(user_id)
+        tasks_api = asana.TasksApi(api_client)
+        
+        # Update the task's due date
+        updated_task = tasks_api.update_task(
+            body={'data': {'due_on': new_due_date}},
+            task_gid=task_gid,
+            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+        )
+        return updated_task
+    except ValueError as e:
+        # Re-raise the token error to be handled by the WebSocket endpoint
+        raise
+    except AsanaError as e:
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
+
 # Define available tools
 asana_tools = [
     {
@@ -317,7 +345,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "create_asana_task",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, please guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. If there could be multiple candidate parent tasks, please confirm the parent task with the user before creating the task.",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, please guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. If there could be multiple candidate parent tasks, please confirm the parent task with the user before creating the task. If the user specifies a specific due date (e.g. two weeks from now), please use the get_current_date tool to use the current_date to calculate the due date in YYYY-MM-DD format to use as a parameter here. Otherwise, you don't need to include the due_date parameter as it defaults to today.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -358,6 +386,25 @@ asana_tools = [
                 }
             },
             "required": ["task_gid"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "update_task_due_date",
+        "description": "Update the due date of an existing Asana task. If you need to calculate the due date, please use the get_current_date tool to calculate the due date in YYYY-MM-DD format to use as a parameter here.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_gid": {
+                    "type": "string",
+                    "description": "The GID of the task to update"
+                },
+                "new_due_date": {
+                    "type": "string",
+                    "description": "The new due date in YYYY-MM-DD format"
+                }
+            },
+            "required": ["task_gid", "new_due_date"]
         }
     }
 ] 
