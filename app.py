@@ -1410,7 +1410,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             return session_conversation_id
 
         response = current_anthropic_client.beta.messages.create(
-            model="claude-3-7-sonnet-20250219",
+            model="claude-sonnet-4-20250514",
             max_tokens=1000,
             messages=chat_sessions[session_id],
             system=CLAUDE_SYSTEM_PROMPT,
@@ -1461,7 +1461,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             ])
             
             response = current_anthropic_client.beta.messages.create(
-                model="claude-3-7-sonnet-20250219",
+                model="claude-sonnet-4-20250514",
                 max_tokens=1000,
                 messages=chat_sessions[session_id],
                 system=CLAUDE_SYSTEM_PROMPT,
