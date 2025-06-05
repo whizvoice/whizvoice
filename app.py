@@ -210,6 +210,128 @@ ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
 active_requests: Dict[str, Set[str]] = {}
 active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 
+# Tool registry that maps tool names to their configuration
+TOOL_REGISTRY = {
+    "get_asana_workspaces": {
+        "function_name": "get_asana_workspaces",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "get_asana_tasks": {
+        "function_name": "get_asana_tasks", 
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('start_date'), args.get('end_date')),
+        "validation": None
+    },
+    "get_current_date": {
+        "function_name": "get_current_date",
+        "requires_auth": False,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "get_parent_tasks": {
+        "function_name": "get_parent_tasks",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "create_asana_task": {
+        "function_name": "create_asana_task",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (
+            user_id,
+            args.get('name'),
+            args.get('due_date'),
+            args.get('notes'),
+            args.get('parent_task_gid')
+        ),
+        "validation": lambda args: {"error": "Task name is required."} if not args.get('name') else None
+    },
+    "set_workspace_preference": {
+        "function_name": "set_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, 'asana_workspace_preference', args.get('workspace_gid')),
+        "validation": lambda args: ValueError("Workspace GID is required for set_workspace_preference") if not args.get('workspace_gid') else None
+    },
+    "get_workspace_preference": {
+        "function_name": "get_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, 'asana_workspace_preference'),
+        "validation": None  # Will handle user_id check in main flow since it's already covered by requires_auth
+    },
+    "change_task_parent": {
+        "function_name": "change_task_parent",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('task_gid'), args.get('new_parent_gid')),
+        "validation": None
+    },
+    "update_task_due_date": {
+        "function_name": "update_task_due_date",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('task_gid'), args.get('new_due_date')),
+        "validation": lambda args: (
+            {"error": "Task GID is required."} if not args.get('task_gid') else
+            {"error": "New due date is required."} if not args.get('new_due_date') else
+            None
+        )
+    },
+    "get_app_info": {
+        "function_name": "get_app_info",
+        "requires_auth": False,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    }
+}
+
+def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
+    """Execute a tool using the tool registry"""
+    logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
+    
+    # Check if tool exists
+    if tool_name not in TOOL_REGISTRY:
+        logger.error(f"Unknown tool requested: {tool_name}")
+        raise ValueError(f"Unknown tool: {tool_name}")
+    
+    tool_config = TOOL_REGISTRY[tool_name]
+    
+    # Check authentication requirements
+    if tool_config["requires_auth"] and not user_id:
+        return {"error": f"User authentication required for tool: {tool_name}"}
+    
+    # Run validation if present
+    if tool_config["validation"]:
+        try:
+            validation_result = tool_config["validation"](tool_args)
+            
+            if validation_result:
+                if isinstance(validation_result, Exception):
+                    logger.error(f"Validation failed for {tool_name}: {str(validation_result)}")
+                    raise validation_result
+                else:
+                    return validation_result  # Return error dict
+        except Exception as e:
+            logger.error(f"Validation error for {tool_name}: {str(e)}")
+            raise e
+    
+    # Get function arguments using the mapping
+    try:
+        func_args = tool_config["args_mapping"](tool_args, user_id)
+        
+        # Get the actual function using globals() for easy mocking
+        function_name = tool_config["function_name"]
+        if function_name in globals():
+            func = globals()[function_name]
+        else:
+            raise ValueError(f"Function {function_name} not found")
+            
+        # Call the function with the mapped arguments
+        return func(*func_args)
+        
+    except Exception as e:
+        logger.error(f"Error executing tool {tool_name}: {str(e)}")
+        raise e
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to WhizVoice API"}
@@ -744,61 +866,6 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")
         return None
-
-# TODO: tool names and call code should be programmatically linked in a dictionary or something
-def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
-    """Execute a tool and return its result"""
-    logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
-    
-    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference", "get_asana_workspaces", "change_task_parent", "update_task_due_date"]:
-        return {"error": f"User authentication required for tool: {tool_name}"}
-
-    if tool_name == "get_asana_workspaces":
-        return get_asana_workspaces(user_id)
-    elif tool_name == "get_asana_tasks":
-        start_date = tool_args.get('start_date')
-        end_date = tool_args.get('end_date')
-        return get_asana_tasks(user_id, start_date, end_date)
-    elif tool_name == "get_current_date":
-        return get_current_date(user_id)
-    elif tool_name == "get_parent_tasks":
-        return get_parent_tasks(user_id)
-    elif tool_name == "create_asana_task":
-        name = tool_args.get('name')
-        due_date = tool_args.get('due_date')
-        notes = tool_args.get('notes')
-        parent_task_gid = tool_args.get('parent_task_gid')
-        if not name:
-            return {"error": "Task name is required."}
-        return create_asana_task(user_id, name, due_date, notes, parent_task_gid)
-    elif tool_name == "set_workspace_preference":
-        workspace_gid = tool_args.get('workspace_gid')
-        if not workspace_gid:
-            logger.error("Workspace GID is required for set_workspace_preference")
-            raise ValueError("Workspace GID is required for set_workspace_preference")
-        return set_preference(user_id, 'asana_workspace_preference', workspace_gid)
-    elif tool_name == "get_workspace_preference":
-        if not user_id:
-            logger.error("User ID is required for get_workspace_preference but not provided.")
-            raise ValueError("User context required for get_workspace_preference")
-        return get_preference(user_id, 'asana_workspace_preference')
-    elif tool_name == "change_task_parent":
-        task_gid = tool_args.get('task_gid')
-        new_parent_gid = tool_args.get('new_parent_gid')
-        return change_task_parent(user_id, task_gid, new_parent_gid)
-    elif tool_name == "update_task_due_date":
-        task_gid = tool_args.get('task_gid')
-        new_due_date = tool_args.get('new_due_date')
-        if not task_gid:
-            return {"error": "Task GID is required."}
-        if not new_due_date:
-            return {"error": "New due date is required."}
-        return update_task_due_date(user_id, task_gid, new_due_date)
-    elif tool_name == "get_app_info":
-        return get_app_info(user_id)
-    
-    logger.error(f"Unknown tool requested: {tool_name}")
-    raise ValueError(f"Unknown tool: {tool_name}")
 
 @app.post("/update_api_tokens")
 async def update_api_tokens(

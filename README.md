@@ -106,11 +106,12 @@ The test suite includes:
 
 - **test_asana_tools.py** - Tests for Asana API integration functions (12 tests)
 - **test_preferences.py** - Tests for user preferences management (3 tests)
-- **test_execute_tool.py** - Tests for the tool execution dispatcher (22 tests)
+- **test_execute_tool.py** - Tests for the tool execution dispatcher (20 tests)
 - **test_about_me_tool.py** - Tests for app information retrieval (7 tests)
 - **test_app_helpers.py** - Tests for authentication and client management (9 tests)
+- **test_tool_registry.py** - Tests for the new tool registry system (8 tests)
 
-Current test coverage: **35%** overall with **51 total tests**
+Current test coverage: **35%** overall with **59 total tests**
 
 Areas with good coverage:
 
@@ -124,5 +125,6 @@ The tests cover:
 - Asana API integration (workspaces, tasks, task creation, parent/child relationships)
 - User preferences management (setting/getting preferences, encrypted preferences)
 - Tool execution system (authentication, parameter validation, error handling)
+- Tool registry system (dynamic tool routing, validation, authentication requirements)
 - Authentication and client caching
 - Error handling and edge cases
