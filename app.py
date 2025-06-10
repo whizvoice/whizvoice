@@ -1259,6 +1259,36 @@ async def update_conversation(
         logger.error(f"Error updating conversation {conversation_id} for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to update conversation")
 
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: int,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Delete a specific conversation by ID (user must own it)"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        # First verify user owns the conversation
+        verify_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
+        if not verify_result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Delete the conversation (messages will cascade delete due to foreign key constraints)
+        result = supabase.table("conversations").delete().eq("id", conversation_id).eq("user_id", user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        logger.info(f"Successfully deleted conversation {conversation_id} for user {user_id}")
+        return {"message": "Conversation deleted successfully", "conversation_id": conversation_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting conversation {conversation_id} for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete conversation")
+
 @app.delete("/conversations")
 async def delete_all_conversations(current_user: Dict = Depends(get_current_user)):
     """Delete all conversations for the authenticated user"""
