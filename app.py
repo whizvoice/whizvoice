@@ -149,6 +149,7 @@ class ConversationResponse(BaseModel):
     last_message_time: str
     source: str
     google_session_id: Optional[str] = None
+    deleted_at: Optional[str] = None
 
 class MessageCreate(BaseModel):
     conversation_id: int
@@ -1126,10 +1127,15 @@ async def get_conversations(
                 # Parse the timestamp and filter for records updated after it
                 since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
                 query = query.gte('updated_at', since_timestamp.isoformat())
-                logger.info(f"Incremental sync: fetching conversations updated since {since_timestamp}")
+                logger.info(f"Incremental sync: fetching conversations updated since {since_timestamp} (includes deleted)")
+                # Note: For incremental sync, we include deleted conversations so client can handle deletions
             except ValueError as e:
                 logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
                 # Fall back to full sync if timestamp is invalid
+        else:
+            # For full sync (no 'since'), exclude deleted conversations
+            query = query.is_('deleted_at', 'null')
+            logger.info(f"Full sync: excluding deleted conversations")
         
         response = query.execute()
         conversations = response.data if response.data else []
@@ -1179,7 +1185,8 @@ async def create_conversation(
             created_at=row["created_at"],
             last_message_time=row["last_message_time"],
             source=row["source"],
-            google_session_id=row.get("google_session_id")
+            google_session_id=row.get("google_session_id"),
+            deleted_at=row.get("deleted_at")
         )
     except Exception as e:
         logger.error(f"Error creating conversation for user {user_id}: {str(e)}")
@@ -1196,7 +1203,7 @@ async def get_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", user_id).execute()
+        result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", user_id).is_("deleted_at", "null").execute()
         
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1209,7 +1216,8 @@ async def get_conversation(
             created_at=row["created_at"],
             last_message_time=row["last_message_time"],
             source=row["source"],
-            google_session_id=row.get("google_session_id")
+            google_session_id=row.get("google_session_id"),
+            deleted_at=row.get("deleted_at")
         )
     except HTTPException:
         raise
@@ -1238,7 +1246,7 @@ async def update_conversation(
             # No updates provided, just return current conversation
             return await get_conversation(conversation_id, current_user)
         
-        result = supabase.table("conversations").update(updates).eq("id", conversation_id).eq("user_id", user_id).execute()
+        result = supabase.table("conversations").update(updates).eq("id", conversation_id).eq("user_id", user_id).is_("deleted_at", "null").execute()
         
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1251,7 +1259,8 @@ async def update_conversation(
             created_at=row["created_at"],
             last_message_time=row["last_message_time"],
             source=row["source"],
-            google_session_id=row.get("google_session_id")
+            google_session_id=row.get("google_session_id"),
+            deleted_at=row.get("deleted_at")
         )
     except HTTPException:
         raise
@@ -1264,24 +1273,30 @@ async def delete_conversation(
     conversation_id: int,
     current_user: Dict = Depends(get_current_user)
 ):
-    """Delete a specific conversation by ID (user must own it)"""
+    """Delete a specific conversation by ID (user must own it) - uses soft delete with tombstone record"""
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # First verify user owns the conversation
-        verify_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
+        # First verify user owns the conversation and it's not already deleted
+        verify_result = supabase.table("conversations").select("id, deleted_at").eq("id", conversation_id).eq("user_id", user_id).execute()
         if not verify_result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        # Delete the conversation (messages will cascade delete due to foreign key constraints)
-        result = supabase.table("conversations").delete().eq("id", conversation_id).eq("user_id", user_id).execute()
+        conversation = verify_result.data[0]
+        if conversation.get("deleted_at") is not None:
+            raise HTTPException(status_code=404, detail="Conversation not found")  # Already deleted
+        
+        # Soft delete: set deleted_at timestamp instead of hard delete
+        result = supabase.table("conversations").update({
+            "deleted_at": "now()"
+        }).eq("id", conversation_id).eq("user_id", user_id).execute()
         
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        logger.info(f"Successfully deleted conversation {conversation_id} for user {user_id}")
+        logger.info(f"Successfully soft-deleted conversation {conversation_id} for user {user_id}")
         return {"message": "Conversation deleted successfully", "conversation_id": conversation_id}
     except HTTPException:
         raise
