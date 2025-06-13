@@ -1,6 +1,6 @@
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Union, Set
 import json
@@ -353,7 +353,7 @@ async def login_with_google(token_request: GoogleTokenRequest):
             "email": user_info["email"],
             "name": user_info["name"]
         }
-        # For refresh token, only sub is strictly needed for stateless, but can include email for logging/context
+        # For refresh token, only sub is strictly needed for stateless, but can include email for context
         refresh_token_data = {
             "sub": user_info["sub"]
             # "email": user_info["email"] # Optional: email can be in refresh token for context if desired
@@ -373,6 +373,107 @@ async def login_with_google(token_request: GoogleTokenRequest):
     except Exception as e:
         logger.error(f"Error during Google authentication: {str(e)}")
         raise HTTPException(status_code=500, detail="Authentication failed")
+
+class TestAuthRequest(BaseModel):
+    email: str
+    user_id: str
+    name: Optional[str] = "Test User"
+
+def load_test_credentials():
+    """Load test credentials from test_credentials.json file"""
+    try:
+        import json
+        with open('test_credentials.json', 'r') as f:
+            creds = json.load(f)
+            return {
+                'username': creds['google_test_account']['email'],
+                'password': creds['google_test_account']['password'],
+                'allowed_email': creds['google_test_account']['email'],
+                'allowed_user_id': creds['google_test_account']['user_id'],
+                'allowed_name': creds['google_test_account']['display_name']
+            }
+    except FileNotFoundError:
+        logger.warning("test_credentials.json not found, falling back to environment variables")
+        return {
+            'username': os.getenv("TEST_AUTH_USERNAME"),
+            'password': os.getenv("TEST_AUTH_PASSWORD"),
+            'allowed_email': os.getenv("TEST_AUTH_USERNAME"),  # Use username as email fallback
+            'allowed_user_id': "test_user_123",
+            'allowed_name': "Test User"
+        }
+    except Exception as e:
+        logger.error(f"Error loading test credentials: {e}")
+        return None
+
+@app.post("/auth/test", response_model=TokenResponse)
+async def login_with_test_credentials(
+    test_request: TestAuthRequest,
+    credentials: HTTPBasicCredentials = Depends(HTTPBasic())
+):
+    """
+    Test-only authentication endpoint that bypasses Google OAuth.
+    Uses HTTP Basic Auth with credentials from test_credentials.json file.
+    """
+    # Load test credentials from file
+    test_creds = load_test_credentials()
+    
+    if not test_creds or not test_creds['username'] or not test_creds['password']:
+        logger.error("Test auth credentials not configured properly")
+        raise HTTPException(status_code=503, detail="Test authentication not configured")
+    
+    # Verify basic auth credentials
+    if credentials.username != test_creds['username'] or credentials.password != test_creds['password']:
+        logger.warning(f"Invalid test auth credentials attempted from email: {test_request.email}")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Additional security: only allow specific test email and user_id from credentials file
+    if test_request.email != test_creds['allowed_email']:
+        logger.warning(f"Test auth attempted with invalid email: {test_request.email}")
+        raise HTTPException(status_code=401, detail="Invalid test email")
+    
+    if test_request.user_id != test_creds['allowed_user_id']:
+        logger.warning(f"Test auth attempted with invalid user_id: {test_request.user_id}")
+        raise HTTPException(status_code=401, detail="Invalid test user_id")
+    
+    try:
+        logger.info(f"Test authentication for: {test_request.email} (user_id: {test_request.user_id})")
+        
+        # Create user info similar to Google auth
+        user_info = {
+            "sub": test_request.user_id,
+            "email": test_request.email,
+            "name": test_request.name,
+            "picture": None,  # No profile picture for test users
+            "email_verified": True  # Assume test emails are verified
+        }
+
+        # Ensure user and preferences exist in database
+        ensure_user_and_prefs(user_info["sub"], email=user_info["email"])
+        
+        # Create token data (same as Google auth)
+        access_token_data = {
+            "sub": user_info["sub"],
+            "email": user_info["email"],
+            "name": user_info["name"]
+        }
+        refresh_token_data = {
+            "sub": user_info["sub"]
+        }
+        
+        access_token = create_access_token(access_token_data)
+        refresh_token = create_refresh_token(refresh_token_data)
+        
+        logger.info(f"Test authentication successful for: {test_request.email}")
+        
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": user_info
+        }
+    except Exception as e:
+        logger.error(f"Error during test authentication: {str(e)}")
+        raise HTTPException(status_code=500, detail="Test authentication failed")
 
 @app.get("/me")
 async def get_me(current_user: Dict = Depends(get_current_user)):
