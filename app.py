@@ -1,6 +1,6 @@
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Union, Set
 import json
@@ -149,6 +149,7 @@ class ConversationResponse(BaseModel):
     last_message_time: str
     source: str
     google_session_id: Optional[str] = None
+    deleted_at: Optional[str] = None
 
 class MessageCreate(BaseModel):
     conversation_id: int
@@ -210,6 +211,128 @@ ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
 active_requests: Dict[str, Set[str]] = {}
 active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 
+# Tool registry that maps tool names to their configuration
+TOOL_REGISTRY = {
+    "get_asana_workspaces": {
+        "function_name": "get_asana_workspaces",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "get_asana_tasks": {
+        "function_name": "get_asana_tasks", 
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('start_date'), args.get('end_date')),
+        "validation": None
+    },
+    "get_current_date": {
+        "function_name": "get_current_date",
+        "requires_auth": False,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "get_parent_tasks": {
+        "function_name": "get_parent_tasks",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "create_asana_task": {
+        "function_name": "create_asana_task",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (
+            user_id,
+            args.get('name'),
+            args.get('due_date'),
+            args.get('notes'),
+            args.get('parent_task_gid')
+        ),
+        "validation": lambda args: {"error": "Task name is required."} if not args.get('name') else None
+    },
+    "set_workspace_preference": {
+        "function_name": "set_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, 'asana_workspace_preference', args.get('workspace_gid')),
+        "validation": lambda args: ValueError("Workspace GID is required for set_workspace_preference") if not args.get('workspace_gid') else None
+    },
+    "get_workspace_preference": {
+        "function_name": "get_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, 'asana_workspace_preference'),
+        "validation": None  # Will handle user_id check in main flow since it's already covered by requires_auth
+    },
+    "change_task_parent": {
+        "function_name": "change_task_parent",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('task_gid'), args.get('new_parent_gid')),
+        "validation": None
+    },
+    "update_task_due_date": {
+        "function_name": "update_task_due_date",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('task_gid'), args.get('new_due_date')),
+        "validation": lambda args: (
+            {"error": "Task GID is required."} if not args.get('task_gid') else
+            {"error": "New due date is required."} if not args.get('new_due_date') else
+            None
+        )
+    },
+    "get_app_info": {
+        "function_name": "get_app_info",
+        "requires_auth": False,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    }
+}
+
+def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
+    """Execute a tool using the tool registry"""
+    logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
+    
+    # Check if tool exists
+    if tool_name not in TOOL_REGISTRY:
+        logger.error(f"Unknown tool requested: {tool_name}")
+        raise ValueError(f"Unknown tool: {tool_name}")
+    
+    tool_config = TOOL_REGISTRY[tool_name]
+    
+    # Check authentication requirements
+    if tool_config["requires_auth"] and not user_id:
+        return {"error": f"User authentication required for tool: {tool_name}"}
+    
+    # Run validation if present
+    if tool_config["validation"]:
+        try:
+            validation_result = tool_config["validation"](tool_args)
+            
+            if validation_result:
+                if isinstance(validation_result, Exception):
+                    logger.error(f"Validation failed for {tool_name}: {str(validation_result)}")
+                    raise validation_result
+                else:
+                    return validation_result  # Return error dict
+        except Exception as e:
+            logger.error(f"Validation error for {tool_name}: {str(e)}")
+            raise e
+    
+    # Get function arguments using the mapping
+    try:
+        func_args = tool_config["args_mapping"](tool_args, user_id)
+        
+        # Get the actual function using globals() for easy mocking
+        function_name = tool_config["function_name"]
+        if function_name in globals():
+            func = globals()[function_name]
+        else:
+            raise ValueError(f"Function {function_name} not found")
+            
+        # Call the function with the mapped arguments
+        return func(*func_args)
+        
+    except Exception as e:
+        logger.error(f"Error executing tool {tool_name}: {str(e)}")
+        raise e
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to WhizVoice API"}
@@ -230,7 +353,7 @@ async def login_with_google(token_request: GoogleTokenRequest):
             "email": user_info["email"],
             "name": user_info["name"]
         }
-        # For refresh token, only sub is strictly needed for stateless, but can include email for logging/context
+        # For refresh token, only sub is strictly needed for stateless, but can include email for context
         refresh_token_data = {
             "sub": user_info["sub"]
             # "email": user_info["email"] # Optional: email can be in refresh token for context if desired
@@ -250,6 +373,107 @@ async def login_with_google(token_request: GoogleTokenRequest):
     except Exception as e:
         logger.error(f"Error during Google authentication: {str(e)}")
         raise HTTPException(status_code=500, detail="Authentication failed")
+
+class TestAuthRequest(BaseModel):
+    email: str
+    user_id: str
+    name: Optional[str] = "Test User"
+
+def load_test_credentials():
+    """Load test credentials from test_credentials.json file"""
+    try:
+        import json
+        with open('test_credentials.json', 'r') as f:
+            creds = json.load(f)
+            return {
+                'username': creds['google_test_account']['email'],
+                'password': creds['google_test_account']['password'],
+                'allowed_email': creds['google_test_account']['email'],
+                'allowed_user_id': creds['google_test_account']['user_id'],
+                'allowed_name': creds['google_test_account']['display_name']
+            }
+    except FileNotFoundError:
+        logger.warning("test_credentials.json not found, falling back to environment variables")
+        return {
+            'username': os.getenv("TEST_AUTH_USERNAME"),
+            'password': os.getenv("TEST_AUTH_PASSWORD"),
+            'allowed_email': os.getenv("TEST_AUTH_USERNAME"),  # Use username as email fallback
+            'allowed_user_id': "test_user_123",
+            'allowed_name': "Test User"
+        }
+    except Exception as e:
+        logger.error(f"Error loading test credentials: {e}")
+        return None
+
+@app.post("/auth/test", response_model=TokenResponse)
+async def login_with_test_credentials(
+    test_request: TestAuthRequest,
+    credentials: HTTPBasicCredentials = Depends(HTTPBasic())
+):
+    """
+    Test-only authentication endpoint that bypasses Google OAuth.
+    Uses HTTP Basic Auth with credentials from test_credentials.json file.
+    """
+    # Load test credentials from file
+    test_creds = load_test_credentials()
+    
+    if not test_creds or not test_creds['username'] or not test_creds['password']:
+        logger.error("Test auth credentials not configured properly")
+        raise HTTPException(status_code=503, detail="Test authentication not configured")
+    
+    # Verify basic auth credentials
+    if credentials.username != test_creds['username'] or credentials.password != test_creds['password']:
+        logger.warning(f"Invalid test auth credentials attempted from email: {test_request.email}")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Additional security: only allow specific test email and user_id from credentials file
+    if test_request.email != test_creds['allowed_email']:
+        logger.warning(f"Test auth attempted with invalid email: {test_request.email}")
+        raise HTTPException(status_code=401, detail="Invalid test email")
+    
+    if test_request.user_id != test_creds['allowed_user_id']:
+        logger.warning(f"Test auth attempted with invalid user_id: {test_request.user_id}")
+        raise HTTPException(status_code=401, detail="Invalid test user_id")
+    
+    try:
+        logger.info(f"Test authentication for: {test_request.email} (user_id: {test_request.user_id})")
+        
+        # Create user info similar to Google auth
+        user_info = {
+            "sub": test_request.user_id,
+            "email": test_request.email,
+            "name": test_request.name,
+            "picture": None,  # No profile picture for test users
+            "email_verified": True  # Assume test emails are verified
+        }
+
+        # Ensure user and preferences exist in database
+        ensure_user_and_prefs(user_info["sub"], email=user_info["email"])
+        
+        # Create token data (same as Google auth)
+        access_token_data = {
+            "sub": user_info["sub"],
+            "email": user_info["email"],
+            "name": user_info["name"]
+        }
+        refresh_token_data = {
+            "sub": user_info["sub"]
+        }
+        
+        access_token = create_access_token(access_token_data)
+        refresh_token = create_refresh_token(refresh_token_data)
+        
+        logger.info(f"Test authentication successful for: {test_request.email}")
+        
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": user_info
+        }
+    except Exception as e:
+        logger.error(f"Error during test authentication: {str(e)}")
+        raise HTTPException(status_code=500, detail="Test authentication failed")
 
 @app.get("/me")
 async def get_me(current_user: Dict = Depends(get_current_user)):
@@ -745,61 +969,6 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         logger.error(f"Error saving message to database: {str(e)}")
         return None
 
-# TODO: tool names and call code should be programmatically linked in a dictionary or something
-def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
-    """Execute a tool and return its result"""
-    logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
-    
-    if not user_id and tool_name in ["get_asana_tasks", "get_parent_tasks", "create_asana_task", "get_workspace_preference", "set_workspace_preference", "get_asana_workspaces", "change_task_parent", "update_task_due_date"]:
-        return {"error": f"User authentication required for tool: {tool_name}"}
-
-    if tool_name == "get_asana_workspaces":
-        return get_asana_workspaces(user_id)
-    elif tool_name == "get_asana_tasks":
-        start_date = tool_args.get('start_date')
-        end_date = tool_args.get('end_date')
-        return get_asana_tasks(user_id, start_date, end_date)
-    elif tool_name == "get_current_date":
-        return get_current_date(user_id)
-    elif tool_name == "get_parent_tasks":
-        return get_parent_tasks(user_id)
-    elif tool_name == "create_asana_task":
-        name = tool_args.get('name')
-        due_date = tool_args.get('due_date')
-        notes = tool_args.get('notes')
-        parent_task_gid = tool_args.get('parent_task_gid')
-        if not name:
-            return {"error": "Task name is required."}
-        return create_asana_task(user_id, name, due_date, notes, parent_task_gid)
-    elif tool_name == "set_workspace_preference":
-        workspace_gid = tool_args.get('workspace_gid')
-        if not workspace_gid:
-            logger.error("Workspace GID is required for set_workspace_preference")
-            raise ValueError("Workspace GID is required for set_workspace_preference")
-        return set_preference(user_id, 'asana_workspace_preference', workspace_gid)
-    elif tool_name == "get_workspace_preference":
-        if not user_id:
-            logger.error("User ID is required for get_workspace_preference but not provided.")
-            raise ValueError("User context required for get_workspace_preference")
-        return get_preference(user_id, 'asana_workspace_preference')
-    elif tool_name == "change_task_parent":
-        task_gid = tool_args.get('task_gid')
-        new_parent_gid = tool_args.get('new_parent_gid')
-        return change_task_parent(user_id, task_gid, new_parent_gid)
-    elif tool_name == "update_task_due_date":
-        task_gid = tool_args.get('task_gid')
-        new_due_date = tool_args.get('new_due_date')
-        if not task_gid:
-            return {"error": "Task GID is required."}
-        if not new_due_date:
-            return {"error": "New due date is required."}
-        return update_task_due_date(user_id, task_gid, new_due_date)
-    elif tool_name == "get_app_info":
-        return get_app_info(user_id)
-    
-    logger.error(f"Unknown tool requested: {tool_name}")
-    raise ValueError(f"Unknown tool: {tool_name}")
-
 @app.post("/update_api_tokens")
 async def update_api_tokens(
     request: TokenUpdateRequest,
@@ -1059,10 +1228,15 @@ async def get_conversations(
                 # Parse the timestamp and filter for records updated after it
                 since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
                 query = query.gte('updated_at', since_timestamp.isoformat())
-                logger.info(f"Incremental sync: fetching conversations updated since {since_timestamp}")
+                logger.info(f"Incremental sync: fetching conversations updated since {since_timestamp} (includes deleted)")
+                # Note: For incremental sync, we include deleted conversations so client can handle deletions
             except ValueError as e:
                 logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
                 # Fall back to full sync if timestamp is invalid
+        else:
+            # For full sync (no 'since'), exclude deleted conversations
+            query = query.is_('deleted_at', 'null')
+            logger.info(f"Full sync: excluding deleted conversations")
         
         response = query.execute()
         conversations = response.data if response.data else []
@@ -1112,7 +1286,8 @@ async def create_conversation(
             created_at=row["created_at"],
             last_message_time=row["last_message_time"],
             source=row["source"],
-            google_session_id=row.get("google_session_id")
+            google_session_id=row.get("google_session_id"),
+            deleted_at=row.get("deleted_at")
         )
     except Exception as e:
         logger.error(f"Error creating conversation for user {user_id}: {str(e)}")
@@ -1129,7 +1304,7 @@ async def get_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", user_id).execute()
+        result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", user_id).is_("deleted_at", "null").execute()
         
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1142,7 +1317,8 @@ async def get_conversation(
             created_at=row["created_at"],
             last_message_time=row["last_message_time"],
             source=row["source"],
-            google_session_id=row.get("google_session_id")
+            google_session_id=row.get("google_session_id"),
+            deleted_at=row.get("deleted_at")
         )
     except HTTPException:
         raise
@@ -1171,7 +1347,7 @@ async def update_conversation(
             # No updates provided, just return current conversation
             return await get_conversation(conversation_id, current_user)
         
-        result = supabase.table("conversations").update(updates).eq("id", conversation_id).eq("user_id", user_id).execute()
+        result = supabase.table("conversations").update(updates).eq("id", conversation_id).eq("user_id", user_id).is_("deleted_at", "null").execute()
         
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1184,13 +1360,50 @@ async def update_conversation(
             created_at=row["created_at"],
             last_message_time=row["last_message_time"],
             source=row["source"],
-            google_session_id=row.get("google_session_id")
+            google_session_id=row.get("google_session_id"),
+            deleted_at=row.get("deleted_at")
         )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error updating conversation {conversation_id} for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to update conversation")
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: int,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Delete a specific conversation by ID (user must own it) - uses soft delete with tombstone record"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        # First verify user owns the conversation and it's not already deleted
+        verify_result = supabase.table("conversations").select("id, deleted_at").eq("id", conversation_id).eq("user_id", user_id).execute()
+        if not verify_result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        conversation = verify_result.data[0]
+        if conversation.get("deleted_at") is not None:
+            raise HTTPException(status_code=404, detail="Conversation not found")  # Already deleted
+        
+        # Soft delete: set deleted_at timestamp instead of hard delete
+        result = supabase.table("conversations").update({
+            "deleted_at": "now()"
+        }).eq("id", conversation_id).eq("user_id", user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        logger.info(f"Successfully soft-deleted conversation {conversation_id} for user {user_id}")
+        return {"message": "Conversation deleted successfully", "conversation_id": conversation_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting conversation {conversation_id} for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete conversation")
 
 @app.delete("/conversations")
 async def delete_all_conversations(current_user: Dict = Depends(get_current_user)):

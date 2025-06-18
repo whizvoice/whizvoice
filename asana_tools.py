@@ -105,8 +105,12 @@ def get_current_date(user_id: str = None) -> str:
     """Get today's date in YYYY-MM-DD format, using the user's timezone if available."""
     if user_id:
         try:
-            user_tz = get_user_timezone(user_id)
-            return datetime.now(user_tz).strftime('%Y-%m-%d')
+            success, user_tz = get_user_timezone(user_id)
+            if success:
+                return datetime.now(user_tz).strftime('%Y-%m-%d')
+            else:
+                # user_tz contains error message in this case
+                return f"Error using timezone for user {user_id}: {user_tz}"
         except Exception as e:
             return f"Error using timezone for user {user_id}, falling back to PST: {str(e)}"
     

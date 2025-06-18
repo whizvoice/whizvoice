@@ -43,4 +43,6 @@ constants.py
 .DS_Store
 
 # User preferences
-user_preferences.json 
+user_preferences.json
+
+test_credentials.json 
