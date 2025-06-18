@@ -1695,10 +1695,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.info(f"About to save assistant message to conversation {session_conversation_id}")
             save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT")
             
-            # Send structured response with request_id
+            # Send structured response with request_id and conversation_id
             response_payload = {
                 "response": assistant_response_text,
-                "request_id": request_id
+                "request_id": request_id,
+                "conversation_id": session_conversation_id  # Include conversation_id for client sync
             }
             await websocket.send_text(json.dumps(response_payload))
         elif response.content: 
