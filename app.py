@@ -447,8 +447,34 @@ async def login_with_test_credentials(
             "email_verified": True  # Assume test emails are verified
         }
 
+        # 🧪 For test accounts, look up the real Google user ID from Supabase if it exists
+        actual_user_id = user_info["sub"]  # Default to the test user ID
+        if user_info["email"] == "whizvoicetest@gmail.com":
+            try:
+                # Look up existing users by email, prioritize non-test user IDs
+                existing_users = supabase.table("users").select("user_id").eq("email", user_info["email"]).execute()
+                if existing_users.data:
+                    # Find the first user that's not the test user ID
+                    real_user_id = None
+                    for user in existing_users.data:
+                        if user["user_id"] != "test_user_123":
+                            real_user_id = user["user_id"]
+                            break
+                    
+                    if real_user_id:
+                        logger.info(f"🧪 Found real Google user ID for test account: {real_user_id}")
+                        actual_user_id = real_user_id
+                        # Update user_info to use the real Google user ID
+                        user_info["sub"] = actual_user_id
+                    else:
+                        logger.info(f"🧪 Only test user ID found for {user_info['email']}, using: {actual_user_id}")
+                else:
+                    logger.info(f"🧪 No existing user found for {user_info['email']}, using test user ID: {actual_user_id}")
+            except Exception as e:
+                logger.warning(f"🧪 Error looking up real user ID for test account: {e}")
+        
         # Ensure user and preferences exist in database
-        ensure_user_and_prefs(user_info["sub"], email=user_info["email"])
+        ensure_user_and_prefs(actual_user_id, email=user_info["email"])
         
         # Create token data (same as Google auth)
         access_token_data = {
@@ -1612,7 +1638,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "type": "error", 
                 "code": "CLAUDE_API_KEY_MISSING",
                 "message": "Claude API key is not set. Please configure it in settings.",
-                "request_id": request_id
+                "request_id": request_id,
+                "conversation_id": session_conversation_id  # Include conversation_id for client sync
             }
             await websocket.send_text(json.dumps(error_payload_key))
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
