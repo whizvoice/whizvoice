@@ -9,7 +9,7 @@ import traceback
 import logging
 import time
 from fastapi.responses import JSONResponse
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -447,8 +447,34 @@ async def login_with_test_credentials(
             "email_verified": True  # Assume test emails are verified
         }
 
+        # 🧪 For test accounts, look up the real Google user ID from Supabase if it exists
+        actual_user_id = user_info["sub"]  # Default to the test user ID
+        if user_info["email"] == "whizvoicetest@gmail.com":
+            try:
+                # Look up existing users by email, prioritize non-test user IDs
+                existing_users = supabase.table("users").select("user_id").eq("email", user_info["email"]).execute()
+                if existing_users.data:
+                    # Find the first user that's not the test user ID
+                    real_user_id = None
+                    for user in existing_users.data:
+                        if user["user_id"] != "test_user_123":
+                            real_user_id = user["user_id"]
+                            break
+                    
+                    if real_user_id:
+                        logger.info(f"🧪 Found real Google user ID for test account: {real_user_id}")
+                        actual_user_id = real_user_id
+                        # Update user_info to use the real Google user ID
+                        user_info["sub"] = actual_user_id
+                    else:
+                        logger.info(f"🧪 Only test user ID found for {user_info['email']}, using: {actual_user_id}")
+                else:
+                    logger.info(f"🧪 No existing user found for {user_info['email']}, using test user ID: {actual_user_id}")
+            except Exception as e:
+                logger.warning(f"🧪 Error looking up real user ID for test account: {e}")
+        
         # Ensure user and preferences exist in database
-        ensure_user_and_prefs(user_info["sub"], email=user_info["email"])
+        ensure_user_and_prefs(actual_user_id, email=user_info["email"])
         
         # Create token data (same as Google auth)
         access_token_data = {
@@ -653,17 +679,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 # Track the current conversation_id for this session
                 session_conversation_id = conversation_id
-                if conversation_id is None and conversation_history:
-                    # We loaded the most recent conversation, but we need to know its ID
-                    # Let's get it from the database again
-                    conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
-                    if conv_result.data:
-                        session_conversation_id = conv_result.data[0]["id"]
-                        # Update session_id to include the found conversation_id
-                        new_session_id = f"ws_{user_id}_conv_{session_conversation_id}"
-                        chat_sessions[new_session_id] = chat_sessions[session_id]
-                        del chat_sessions[session_id]
-                        session_id = new_session_id
+                # FIXED: Don't automatically load existing conversation when conversation_id is None
+                # This allows new chats to create fresh conversations instead of reusing old ones
+                if conversation_id is None:
+                    # For new chats, keep session_conversation_id as None until first message creates it
+                    logger.info(f"New chat session - will create conversation on first message")
+                
+                # 🔧 CRITICAL FIX: Don't modify session_id after creation
+                # The session_id should remain consistent throughout the WebSocket connection
+                # The original session_id is already correctly formatted based on conversation_id
                 
                 # Only send welcome message if no conversation history exists
                 if not conversation_history:
@@ -887,14 +911,11 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
 def load_conversation_history(user_id: str, conversation_id: Optional[int] = None) -> List[Dict]:
     """Load conversation history from database and convert to Claude message format"""
     try:
-        # If no conversation_id specified, get the most recent conversation for the user
+        # FIXED: If no conversation_id specified, return empty history (for new chats)
+        # This prevents new chats from loading old conversation history
         if conversation_id is None:
-            conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
-            if not conv_result.data:
-                logger.info(f"No existing conversations found for user {user_id}")
-                return []
-            conversation_id = conv_result.data[0]["id"]
-            logger.info(f"Loading most recent conversation {conversation_id} for user {user_id}")
+            logger.info(f"New chat session for user {user_id} - returning empty history")
+            return []
         else:
             # Verify user owns the specified conversation
             conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
@@ -942,7 +963,9 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 return None
                 
             conversation_id = conv_result.data[0]["id"]
-            logger.warning(f"Created NEW conversation {conversation_id} for user {user_id}")
+            created_at = conv_result.data[0]["created_at"]
+            updated_at = conv_result.data[0]["updated_at"]
+            logger.warning(f"Created NEW conversation {conversation_id} for user {user_id} at {created_at} (updated_at: {updated_at})")
         else:
             logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
@@ -957,9 +980,10 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             logger.error(f"Failed to save message to conversation {conversation_id}")
             return None
         
-        # Update conversation last_message_time
+        # Update conversation last_message_time and updated_at for incremental sync
         supabase.table("conversations").update({
-            "last_message_time": "now()"
+            "last_message_time": "now()",
+            "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
         }).eq("id", conversation_id).execute()
         
         logger.info(f"Successfully saved {message_type} message to conversation {conversation_id}")
@@ -1227,8 +1251,11 @@ async def get_conversations(
             try:
                 # Parse the timestamp and filter for records updated after it
                 since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
-                query = query.gte('updated_at', since_timestamp.isoformat())
-                logger.info(f"Incremental sync: fetching conversations updated since {since_timestamp} (includes deleted)")
+                # Use slightly older timestamp to avoid edge case timing issues
+                # Go back 1 second to catch any conversations that might be missed due to timing precision
+                adjusted_timestamp = since_timestamp - timedelta(seconds=1)
+                query = query.gte('updated_at', adjusted_timestamp.isoformat())
+                logger.info(f"Incremental sync: fetching conversations updated since {adjusted_timestamp} (original: {since_timestamp}, includes deleted)")
                 # Note: For incremental sync, we include deleted conversations so client can handle deletions
             except ValueError as e:
                 logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
@@ -1240,6 +1267,14 @@ async def get_conversations(
         
         response = query.execute()
         conversations = response.data if response.data else []
+        
+        # Log detailed information about what we're returning
+        if conversations:
+            logger.info(f"Found {len(conversations)} conversations for user {user_id}:")
+            for conv in conversations[:3]:  # Log first 3 conversations
+                logger.info(f"  - ID {conv['id']}: '{conv['title'][:30]}...' updated_at: {conv['updated_at']}")
+        else:
+            logger.warning(f"No conversations found for user {user_id} with filter since={since}")
         
         # Return with server timestamp for next incremental sync
         result = {
@@ -1433,7 +1468,8 @@ async def update_conversation_last_message_time(
     
     try:
         result = supabase.table("conversations").update({
-            "last_message_time": "now()"
+            "last_message_time": "now()",
+            "updated_at": "now()"  # Critical: update this so incremental sync catches conversation updates
         }).eq("id", conversation_id).eq("user_id", user_id).execute()
         
         if not result.data:
@@ -1534,9 +1570,10 @@ async def create_message(
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create message")
         
-        # Update conversation last_message_time
+        # Update conversation last_message_time and updated_at for incremental sync
         supabase.table("conversations").update({
-            "last_message_time": "now()"
+            "last_message_time": "now()",
+            "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
         }).eq("id", message.conversation_id).execute()
         
         row = result.data[0]
@@ -1612,7 +1649,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "type": "error", 
                 "code": "CLAUDE_API_KEY_MISSING",
                 "message": "Claude API key is not set. Please configure it in settings.",
-                "request_id": request_id
+                "request_id": request_id,
+                "conversation_id": session_conversation_id  # Include conversation_id for client sync
             }
             await websocket.send_text(json.dumps(error_payload_key))
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
@@ -1695,10 +1733,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.info(f"About to save assistant message to conversation {session_conversation_id}")
             save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT")
             
-            # Send structured response with request_id
+            # Send structured response with request_id and conversation_id
             response_payload = {
                 "response": assistant_response_text,
-                "request_id": request_id
+                "request_id": request_id,
+                "conversation_id": session_conversation_id  # Include conversation_id for client sync
             }
             await websocket.send_text(json.dumps(response_payload))
         elif response.content: 
@@ -1717,9 +1756,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Clean up tracking
         if request_id:
             active_tasks.pop(request_id, None)
-            session_key = f"ws_{user_id}_conv_{session_conversation_id}" if session_conversation_id else session_id
-            if session_key in active_requests:
-                active_requests[session_key].discard(request_id)
+            # 🔧 CRITICAL FIX: Use the actual session_id, not a reconstructed one
+            # The session_id is consistent throughout the connection
+            if session_id in active_requests:
+                active_requests[session_id].discard(request_id)
 
 if __name__ == "__main__":
     import uvicorn
