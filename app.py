@@ -684,12 +684,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 if conversation_id is None:
                     # For new chats, keep session_conversation_id as None until first message creates it
                     logger.info(f"New chat session - will create conversation on first message")
-                elif conversation_id is not None and conversation_history:
-                    # Only for existing conversations - update session_id to include conversation_id
-                    new_session_id = f"ws_{user_id}_conv_{session_conversation_id}"
-                    chat_sessions[new_session_id] = chat_sessions[session_id]
-                    del chat_sessions[session_id]
-                    session_id = new_session_id
+                
+                # 🔧 CRITICAL FIX: Don't modify session_id after creation
+                # The session_id should remain consistent throughout the WebSocket connection
+                # The original session_id is already correctly formatted based on conversation_id
                 
                 # Only send welcome message if no conversation history exists
                 if not conversation_history:
@@ -1758,9 +1756,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Clean up tracking
         if request_id:
             active_tasks.pop(request_id, None)
-            session_key = f"ws_{user_id}_conv_{session_conversation_id}" if session_conversation_id else session_id
-            if session_key in active_requests:
-                active_requests[session_key].discard(request_id)
+            # 🔧 CRITICAL FIX: Use the actual session_id, not a reconstructed one
+            # The session_id is consistent throughout the connection
+            if session_id in active_requests:
+                active_requests[session_id].discard(request_id)
 
 if __name__ == "__main__":
     import uvicorn
