@@ -679,17 +679,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 # Track the current conversation_id for this session
                 session_conversation_id = conversation_id
-                if conversation_id is None and conversation_history:
-                    # We loaded the most recent conversation, but we need to know its ID
-                    # Let's get it from the database again
-                    conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
-                    if conv_result.data:
-                        session_conversation_id = conv_result.data[0]["id"]
-                        # Update session_id to include the found conversation_id
-                        new_session_id = f"ws_{user_id}_conv_{session_conversation_id}"
-                        chat_sessions[new_session_id] = chat_sessions[session_id]
-                        del chat_sessions[session_id]
-                        session_id = new_session_id
+                # FIXED: Don't automatically load existing conversation when conversation_id is None
+                # This allows new chats to create fresh conversations instead of reusing old ones
+                if conversation_id is None:
+                    # For new chats, keep session_conversation_id as None until first message creates it
+                    logger.info(f"New chat session - will create conversation on first message")
+                elif conversation_id is not None and conversation_history:
+                    # Only for existing conversations - update session_id to include conversation_id
+                    new_session_id = f"ws_{user_id}_conv_{session_conversation_id}"
+                    chat_sessions[new_session_id] = chat_sessions[session_id]
+                    del chat_sessions[session_id]
+                    session_id = new_session_id
                 
                 # Only send welcome message if no conversation history exists
                 if not conversation_history:
@@ -913,14 +913,11 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
 def load_conversation_history(user_id: str, conversation_id: Optional[int] = None) -> List[Dict]:
     """Load conversation history from database and convert to Claude message format"""
     try:
-        # If no conversation_id specified, get the most recent conversation for the user
+        # FIXED: If no conversation_id specified, return empty history (for new chats)
+        # This prevents new chats from loading old conversation history
         if conversation_id is None:
-            conv_result = supabase.table("conversations").select("id").eq("user_id", user_id).order("last_message_time", desc=True).limit(1).execute()
-            if not conv_result.data:
-                logger.info(f"No existing conversations found for user {user_id}")
-                return []
-            conversation_id = conv_result.data[0]["id"]
-            logger.info(f"Loading most recent conversation {conversation_id} for user {user_id}")
+            logger.info(f"New chat session for user {user_id} - returning empty history")
+            return []
         else:
             # Verify user owns the specified conversation
             conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
