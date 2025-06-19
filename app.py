@@ -983,9 +983,10 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             logger.error(f"Failed to save message to conversation {conversation_id}")
             return None
         
-        # Update conversation last_message_time
+        # Update conversation last_message_time and updated_at for incremental sync
         supabase.table("conversations").update({
-            "last_message_time": "now()"
+            "last_message_time": "now()",
+            "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
         }).eq("id", conversation_id).execute()
         
         logger.info(f"Successfully saved {message_type} message to conversation {conversation_id}")
@@ -1459,7 +1460,8 @@ async def update_conversation_last_message_time(
     
     try:
         result = supabase.table("conversations").update({
-            "last_message_time": "now()"
+            "last_message_time": "now()",
+            "updated_at": "now()"  # Critical: update this so incremental sync catches conversation updates
         }).eq("id", conversation_id).eq("user_id", user_id).execute()
         
         if not result.data:
@@ -1560,9 +1562,10 @@ async def create_message(
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create message")
         
-        # Update conversation last_message_time
+        # Update conversation last_message_time and updated_at for incremental sync
         supabase.table("conversations").update({
-            "last_message_time": "now()"
+            "last_message_time": "now()",
+            "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
         }).eq("id", message.conversation_id).execute()
         
         row = result.data[0]
