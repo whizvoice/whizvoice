@@ -9,7 +9,7 @@ import traceback
 import logging
 import time
 from fastapi.responses import JSONResponse
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -968,7 +968,9 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 return None
                 
             conversation_id = conv_result.data[0]["id"]
-            logger.warning(f"Created NEW conversation {conversation_id} for user {user_id}")
+            created_at = conv_result.data[0]["created_at"]
+            updated_at = conv_result.data[0]["updated_at"]
+            logger.warning(f"Created NEW conversation {conversation_id} for user {user_id} at {created_at} (updated_at: {updated_at})")
         else:
             logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
@@ -1254,8 +1256,11 @@ async def get_conversations(
             try:
                 # Parse the timestamp and filter for records updated after it
                 since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
-                query = query.gte('updated_at', since_timestamp.isoformat())
-                logger.info(f"Incremental sync: fetching conversations updated since {since_timestamp} (includes deleted)")
+                # Use slightly older timestamp to avoid edge case timing issues
+                # Go back 1 second to catch any conversations that might be missed due to timing precision
+                adjusted_timestamp = since_timestamp - timedelta(seconds=1)
+                query = query.gte('updated_at', adjusted_timestamp.isoformat())
+                logger.info(f"Incremental sync: fetching conversations updated since {adjusted_timestamp} (original: {since_timestamp}, includes deleted)")
                 # Note: For incremental sync, we include deleted conversations so client can handle deletions
             except ValueError as e:
                 logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
@@ -1267,6 +1272,14 @@ async def get_conversations(
         
         response = query.execute()
         conversations = response.data if response.data else []
+        
+        # Log detailed information about what we're returning
+        if conversations:
+            logger.info(f"Found {len(conversations)} conversations for user {user_id}:")
+            for conv in conversations[:3]:  # Log first 3 conversations
+                logger.info(f"  - ID {conv['id']}: '{conv['title'][:30]}...' updated_at: {conv['updated_at']}")
+        else:
+            logger.warning(f"No conversations found for user {user_id} with filter since={since}")
         
         # Return with server timestamp for next incremental sync
         result = {
