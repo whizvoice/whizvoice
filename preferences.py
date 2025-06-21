@@ -49,27 +49,19 @@ def ensure_user_and_prefs(user_id, email=None):
             #    An empty preferences JSON is fine here as it will be overwritten.
             supabase.table("user_preferences").insert({
                 "user_id": user_id,
-                "preferences": json.dumps({}), # Initial empty object for unencrypted, will be set by RPC
+                "preferences": {}, # Initial empty object for unencrypted, will be set by RPC
                 # encrypted_preferences will be set by its RPC too
             }).execute()
             logger.info(f"Inserted base user_preferences row for {user_id}.")
 
             # 2. Set default unencrypted preferences using RPC
-            logger.info(f"Setting default unencrypted preferences for {user_id} via RPC.")
-            supabase.rpc('set_entire_unencrypted_preferences', {
-                'p_user_id': user_id,
-                'p_preferences_payload': DEFAULT_PREFERENCES
-            }).execute()
+            logger.info(f"Setting default unencrypted preferences for {user_id} via direct update.")
+            supabase.table("user_preferences").update({
+                "preferences": DEFAULT_PREFERENCES
+            }).eq("user_id", user_id).execute()
             logger.info(f"Successfully set default unencrypted preferences for {user_id}.")
 
-            # 3. Set initial empty encrypted preferences using RPC
-            logger.info(f"Setting initial empty encrypted preferences for {user_id} via RPC.")
-            supabase.rpc('set_entire_encrypted_preferences', {
-                'p_user_id': user_id,
-                'p_preferences_payload': {}, # Empty JSON object for initial encrypted store
-                'p_encryption_key': PGCRYPTO_KEY
-            }).execute()
-            logger.info(f"Successfully set initial empty encrypted preferences for {user_id}.")
+            # Note: encrypted_preferences will be initialized when first needed
         else:
             logger.info(f"Preferences row already exists for {user_id}.")
             
