@@ -61,7 +61,14 @@ def ensure_user_and_prefs(user_id, email=None):
             }).eq("user_id", user_id).execute()
             logger.info(f"Successfully set default unencrypted preferences for {user_id}.")
 
-            # Note: encrypted_preferences will be initialized when first needed
+            # 3. Set initial empty encrypted preferences using RPC
+            logger.info(f"Setting initial empty encrypted preferences for {user_id} via RPC.")
+            supabase.rpc('set_encrypted_preferences', {
+                'p_user_id': user_id,
+                'p_preferences_payload': {}, # Empty JSON object for initial encrypted store
+                'p_encryption_key': PGCRYPTO_KEY
+            }).execute()
+            logger.info(f"Successfully set initial empty encrypted preferences for {user_id}.")
         else:
             logger.info(f"Preferences row already exists for {user_id}.")
             
