@@ -37,8 +37,11 @@ jobs:
         run: |
           cat > constants.py << EOF
           # Generated from GitHub secrets for CI
+          GOOGLE_WEB_CLIENT_SECRET = "${{ secrets.GOOGLE_WEB_CLIENT_SECRET }}"
+          SUPABASE_KEY = "${{ secrets.SUPABASE_KEY }}"
           SUPABASE_URL = "${{ secrets.SUPABASE_URL }}"
           SUPABASE_SERVICE_ROLE = "${{ secrets.SUPABASE_SERVICE_ROLE }}"
+          PGCRYPTO_KEY = "${{ secrets.PGCRYPTO_KEY }}"
           EOF
 
       - name: Set up test environment variables
