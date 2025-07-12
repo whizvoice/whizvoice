@@ -45,6 +45,30 @@ sudo systemctl status whizvoice
 
 ## Running the Chatbot
 
+### nginx and ssl certs
+
+i have my repo in /var/www.
+
+```
+sudo ln -s /var/www/whizvoice/whizvoice.com/nginx/whizvoice.bootstrap /etc/nginx/conf.d/whizvoice.com.conf
+sudo nginx -t #to make sure nginx conf is valid
+sudo service nginx reload
+sudo certbot certonly --webroot -w /var/www/whizvoice/whizvoice.com -d whizvoice.com -d www.whizvoice.com
+sudo rm /etc/nginx/conf.d/whizvoice.com.conf
+sudo ln -s /var/www/whizvoice/whizvoice.com/nginx/whizvoice.com.conf /etc/nginx/conf.d/whizvoice.com.conf
+sudo nginx -t #to make sure nginx conf is valid
+sudo service nginx reload
+```
+
+set up cron job to autorenew ssl cert
+```
+crontab -e
+```
+add this to your crontab
+```
+0 12 * * * /usr/bin/certbot renew --quiet && /usr/bin/systemctl reload nginx
+```
+
 ### Development server
 
 ```
