@@ -692,11 +692,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 # The session_id should remain consistent throughout the WebSocket connection
                 # The original session_id is already correctly formatted based on conversation_id
                 
-                # Only send welcome message if no conversation history exists
-                if not conversation_history:
-                    await websocket.send_text(f"Hello {user_name}! I'm Claude with Asana integration.")
-                else:
+                # Don't send welcome message for new chats - let the UI show placeholder text instead
+                if conversation_history:
                     logger.info(f"Loaded {len(conversation_history)} messages from conversation history for user {user_id}")
+                else:
+                    logger.info(f"New chat session - no conversation history, UI will show placeholder text")
                     
             except JWTError as e:
                 logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
