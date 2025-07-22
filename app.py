@@ -211,6 +211,9 @@ ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
 active_requests: Dict[str, Set[str]] = {}
 active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 
+# Global dictionary to track optimistic ID mappings per session
+session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # session_id -> {"optimistic_to_real": {client_id: real_id}, "real_to_optimistic": {real_id: client_id}}
+
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
     "get_asana_workspaces": {
@@ -732,6 +735,12 @@ async def websocket_endpoint(websocket: WebSocket):
             user_sessions[user_id] = []
         user_sessions[user_id].append(session_id)
         
+        # Initialize session mappings for optimistic ID tracking
+        session_mappings[session_id] = {
+            "optimistic_to_real": {},
+            "real_to_optimistic": {}
+        }
+        
         try:
             while True:
                 try:
@@ -741,12 +750,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Parse incoming message - support both structured JSON and legacy plain text
                     request_id = None
                     message_type = "message"  # default type
+                    client_conversation_id = None
+                    client_message_id = None
                     try:
                         message_data = json.loads(message_text)
                         message = message_data.get("message", "")
                         request_id = message_data.get("request_id")
                         message_type = message_data.get("type", "message")  # Support message types
-                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}")
+                        client_conversation_id = message_data.get("client_conversation_id")
+                        client_message_id = message_data.get("client_message_id")
+                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, client_conversation_id: {client_conversation_id}")
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -777,6 +790,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     if message_type == "message" and message:
                         # Check for active requests and handle interrupts
                         if session_id in active_requests and active_requests[session_id]:
+                            # Validate interrupt context if optimistic ID provided
+                            if client_conversation_id and session_id in session_mappings:
+                                mappings = session_mappings[session_id]
+                                real_id = mappings["optimistic_to_real"].get(client_conversation_id)
+                                
+                                if real_id and real_id != session_conversation_id:
+                                    logger.warning(f"Interrupt attempt with mismatched conversation context: "
+                                                 f"client={client_conversation_id}, session={session_conversation_id}")
+                                    
+                                logger.info(f"Validated interrupt: optimistic {client_conversation_id} → real {real_id}")
+                            
                             logger.info(f"Interrupt detected. Cancelling {len(active_requests[session_id])} active requests")
                             # Cancel all active requests for this session
                             for active_request_id in list(active_requests[session_id]):
@@ -785,11 +809,12 @@ async def websocket_endpoint(websocket: WebSocket):
                                     del active_tasks[active_request_id]
                             active_requests[session_id].clear()
                             
-                            # Send interrupt notification
+                            # Send interrupt notification with client context
                             interrupt_response = {
                                 "type": "interrupted", 
                                 "message": "Previous request cancelled due to new message",
-                                "request_id": request_id
+                                "request_id": request_id,
+                                "client_conversation_id": client_conversation_id
                             }
                             await websocket.send_text(json.dumps(interrupt_response))
                         
@@ -802,7 +827,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                 user_id=user_id,
                                 message=message,
                                 request_id=request_id,
-                                chat_sessions=chat_sessions
+                                chat_sessions=chat_sessions,
+                                client_conversation_id=client_conversation_id,
+                                client_message_id=client_message_id
                             )
                         )
                         
@@ -897,6 +924,11 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
     if session_id in chat_sessions:
         del chat_sessions[session_id]
         logger.info(f"Cleaned up chat session: {session_id}")
+    
+    # Clean up session mappings
+    if session_id in session_mappings:
+        del session_mappings[session_id]
+        logger.info(f"Cleaned up session mappings: {session_id}")
     
     if user_id and user_id in user_sessions:
         if session_id in user_sessions[user_id]:
@@ -1621,25 +1653,36 @@ async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, chat_sessions):
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, chat_sessions, client_conversation_id=None, client_message_id=None):
     """Process a single message in a cancellable task"""
     try:
         logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(chat_sessions[session_id])}")
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        session_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER")
-        logger.info(f"After saving user message. Updated session_conversation_id: {session_conversation_id}")
-        if session_conversation_id is None:
+        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER")
+        logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}")
+        if real_conversation_id is None:
             logger.error("Failed to save user message to database")
             error_payload = {
                 "type": "error",
                 "code": "DATABASE_ERROR",
                 "message": "Failed to save message to database",
-                "request_id": request_id
+                "request_id": request_id,
+                "client_conversation_id": client_conversation_id
             }
             await websocket.send_text(json.dumps(error_payload))
-            return session_conversation_id
+            return real_conversation_id
+        
+        # Update optimistic → real mapping if client provided optimistic ID
+        if client_conversation_id and client_conversation_id < 0 and real_conversation_id and session_id in session_mappings:
+            mappings = session_mappings[session_id]
+            mappings["optimistic_to_real"][client_conversation_id] = real_conversation_id
+            mappings["real_to_optimistic"][real_conversation_id] = client_conversation_id
+            logger.info(f"Mapped optimistic ID {client_conversation_id} → real ID {real_conversation_id}")
+        
+        # Use real conversation ID for rest of processing
+        session_conversation_id = real_conversation_id
 
         chat_sessions[session_id].append({"role": "user", "content": message})
 
@@ -1650,7 +1693,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "code": "CLAUDE_API_KEY_MISSING",
                 "message": "Claude API key is not set. Please configure it in settings.",
                 "request_id": request_id,
-                "conversation_id": session_conversation_id  # Include conversation_id for client sync
+                "conversation_id": session_conversation_id,  # Include conversation_id for client sync
+                "client_conversation_id": client_conversation_id
             }
             await websocket.send_text(json.dumps(error_payload_key))
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
@@ -1683,7 +1727,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 error_payload = {
                     "error": "ServerError", 
                     "detail": "Tool use indicated but no tool found.",
-                    "request_id": request_id
+                    "request_id": request_id,
+                    "client_conversation_id": client_conversation_id
                 }
                 await websocket.send_text(json.dumps(error_payload))
                 raise StopIteration("ToolBlockMissingError")
@@ -1696,8 +1741,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                tool_execution_result.get("status_code") == 401 and \
                "Asana authentication failed" in tool_execution_result.get("error", ""):
                 logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
-                # Add request_id to Asana error response
+                # Add request_id and client context to Asana error response
                 tool_execution_result["request_id"] = request_id
+                tool_execution_result["client_conversation_id"] = client_conversation_id
                 await websocket.send_text(json.dumps(tool_execution_result))
                 raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
 
@@ -1737,7 +1783,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             response_payload = {
                 "response": assistant_response_text,
                 "request_id": request_id,
-                "conversation_id": session_conversation_id  # Include conversation_id for client sync
+                "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
+                "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
+                "client_message_id": client_message_id  # Echo back optimistic message ID
             }
             await websocket.send_text(json.dumps(response_payload))
         elif response.content: 
@@ -1746,7 +1794,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             error_payload = {
                 "error": "EmptyResponse", 
                 "detail": "Assistant provided no content.",
-                "request_id": request_id
+                "request_id": request_id,
+                "client_conversation_id": client_conversation_id
             }
             await websocket.send_text(json.dumps(error_payload))
 
