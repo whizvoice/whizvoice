@@ -155,6 +155,7 @@ class MessageCreate(BaseModel):
     conversation_id: int
     content: str
     message_type: str  # 'USER' or 'ASSISTANT'
+    request_id: Optional[str] = None  # Client-generated UUID for request tracking
 
 class MessageResponse(BaseModel):
     id: int
@@ -162,6 +163,7 @@ class MessageResponse(BaseModel):
     content: str
     message_type: str
     timestamp: str
+    request_id: Optional[str] = None  # Request ID for tracking request/response pairs
 
 # Dialogflow webhook models
 class DialogflowWebhookRequest(BaseModel):
@@ -975,7 +977,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         logger.error(f"Error loading conversation history for user {user_id}, conversation {conversation_id}: {str(e)}")
         return []
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str) -> Optional[int]:
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None) -> Optional[int]:
     """Save a message to the database and return the conversation_id"""
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, content='{content[:50]}...'")
@@ -1005,7 +1007,8 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         result = supabase.table("messages").insert({
             "conversation_id": conversation_id,
             "content": content,
-            "message_type": message_type
+            "message_type": message_type,
+            "request_id": request_id
         }).execute()
         
         if not result.data:
@@ -1596,7 +1599,8 @@ async def create_message(
         result = supabase.table("messages").insert({
             "conversation_id": message.conversation_id,
             "content": message.content,
-            "message_type": message.message_type
+            "message_type": message.message_type,
+            "request_id": message.request_id
         }).execute()
         
         if not result.data:
@@ -1614,7 +1618,8 @@ async def create_message(
             conversation_id=row["conversation_id"],
             content=row["content"],
             message_type=row["message_type"],
-            timestamp=row["timestamp"]
+            timestamp=row["timestamp"],
+            request_id=row.get("request_id")
         )
     except HTTPException:
         raise
@@ -1660,7 +1665,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER")
+        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id)
         logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}")
         if real_conversation_id is None:
             logger.error("Failed to save user message to database")
@@ -1777,7 +1782,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Save assistant message to database
             logger.info(f"About to save assistant message to conversation {session_conversation_id}")
-            save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT")
+            save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
             
             # Send structured response with request_id and conversation_id
             response_payload = {
