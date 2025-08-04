@@ -220,12 +220,13 @@ session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # session_id -> {"o
 
 # File-based cache for optimistic->real conversation ID mappings across reconnections
 # This allows cache sharing between multiple worker processes
-CACHE_FILE_PATH = Path("/var/www/whizvoice/optimistic_cache.json")
+# Use project root directory for the cache file
+CACHE_FILE_PATH = Path(__file__).parent / "optimistic_cache.json"
 OPTIMISTIC_CACHE_TTL_SECONDS = 3600  # 1 hour TTL
 last_cache_cleanup = 0.0  # Timestamp of last cleanup
 CACHE_CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes between cleanups
 
-# Ensure cache directory exists
+# Ensure cache directory exists (should always work since it's the project directory)
 CACHE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Tool registry that maps tool names to their configuration
