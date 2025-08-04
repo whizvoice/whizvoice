@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 import asyncio
 from contextlib import asynccontextmanager
-import fcntl
 from pathlib import Path
 
 from anthropic import Anthropic, AuthenticationError
@@ -218,16 +217,6 @@ active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 # Global dictionary to track optimistic ID mappings per session
 session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # session_id -> {"optimistic_to_real": {client_id: real_id}, "real_to_optimistic": {real_id: client_id}}
 
-# File-based cache for optimistic->real conversation ID mappings across reconnections
-# This allows cache sharing between multiple worker processes
-# Use project root directory for the cache file
-CACHE_FILE_PATH = Path(__file__).parent / "optimistic_cache.json"
-OPTIMISTIC_CACHE_TTL_SECONDS = 3600  # 1 hour TTL
-last_cache_cleanup = 0.0  # Timestamp of last cleanup
-CACHE_CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes between cleanups
-
-# Ensure cache directory exists (should always work since it's the project directory)
-CACHE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
@@ -934,136 +923,6 @@ async def websocket_endpoint(websocket: WebSocket):
         except:
             pass
 
-def get_cached_conversation_id(user_id: str, client_conversation_id: int) -> Optional[int]:
-    """Get real conversation ID from cache for an optimistic ID"""
-    try:
-        # Read cache file with file locking
-        if not CACHE_FILE_PATH.exists():
-            return None
-            
-        with open(CACHE_FILE_PATH, 'r+') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
-            try:
-                cache_data = json.load(f)
-            except json.JSONDecodeError:
-                logger.warning("Cache file is corrupted, returning None")
-                return None
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                
-        # Check if user and conversation exist in cache
-        if user_id in cache_data and str(client_conversation_id) in cache_data[user_id]:
-            entry = cache_data[user_id][str(client_conversation_id)]
-            # Check if entry is expired
-            if time.time() - entry["created_at"] < OPTIMISTIC_CACHE_TTL_SECONDS:
-                logger.info(f"Cache hit: Found mapping {client_conversation_id} -> {entry['real_id']} for user {user_id}")
-                return entry["real_id"]
-        return None
-    except Exception as e:
-        logger.error(f"Error reading cache: {e}")
-        return None
-
-def cache_conversation_mapping(user_id: str, client_conversation_id: int, real_conversation_id: int):
-    """Cache the mapping from optimistic to real conversation ID"""
-    try:
-        # Read existing cache or create new one
-        cache_data = {}
-        if CACHE_FILE_PATH.exists():
-            try:
-                with open(CACHE_FILE_PATH, 'r') as f:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-                    try:
-                        cache_data = json.load(f)
-                    finally:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            except (json.JSONDecodeError, FileNotFoundError):
-                logger.warning("Cache file is corrupted or missing, creating new cache")
-                cache_data = {}
-        
-        # Update cache data
-        if user_id not in cache_data:
-            cache_data[user_id] = {}
-            
-        current_time = time.time()
-        cache_data[user_id][str(client_conversation_id)] = {
-            "real_id": real_conversation_id,
-            "created_at": current_time,
-            "last_used_at": current_time
-        }
-        
-        # Write updated cache with exclusive lock
-        with open(CACHE_FILE_PATH, 'w') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                json.dump(cache_data, f, indent=2)
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                
-        logger.info(f"Cached optimistic mapping for user {user_id}: {client_conversation_id} -> {real_conversation_id}")
-    except Exception as e:
-        logger.error(f"Error caching conversation mapping: {e}")
-
-def cleanup_expired_cache_entries():
-    """Remove expired entries from the optimistic conversation cache"""
-    global last_cache_cleanup
-    current_time = time.time()
-    
-    # Check if enough time has passed since last cleanup
-    if current_time - last_cache_cleanup < CACHE_CLEANUP_INTERVAL_SECONDS:
-        return
-        
-    logger.info("Running opportunistic cache cleanup")
-    last_cache_cleanup = current_time
-    
-    try:
-        if not CACHE_FILE_PATH.exists():
-            return
-            
-        # Read cache file
-        with open(CACHE_FILE_PATH, 'r') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-            try:
-                cache_data = json.load(f)
-            except json.JSONDecodeError:
-                logger.warning("Cache file is corrupted during cleanup")
-                return
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        
-        # Clean up expired entries
-        entries_cleaned = 0
-        users_to_remove = []
-        
-        for user_id, user_cache in cache_data.items():
-            ids_to_remove = []
-            for client_id, entry in user_cache.items():
-                if current_time - entry["created_at"] > OPTIMISTIC_CACHE_TTL_SECONDS:
-                    ids_to_remove.append(client_id)
-            
-            # Remove expired entries
-            for client_id in ids_to_remove:
-                del user_cache[client_id]
-                entries_cleaned += 1
-                
-            # Mark empty user caches for removal
-            if not user_cache:
-                users_to_remove.append(user_id)
-        
-        for user_id in users_to_remove:
-            del cache_data[user_id]
-        
-        if entries_cleaned > 0:
-            # Write cleaned cache back to file
-            with open(CACHE_FILE_PATH, 'w') as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    json.dump(cache_data, f, indent=2)
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            logger.info(f"Cleaned up {entries_cleaned} expired cache entries")
-    except Exception as e:
-        logger.error(f"Error during cache cleanup: {e}")
-
 def cleanup_session(session_id: str, user_id: Optional[str] = None):
     """Clean up a session when a WebSocket disconnects"""
     if session_id in chat_sessions:
@@ -1136,11 +995,18 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         if conversation_id is None:
             logger.warning(f"Creating NEW conversation for user {user_id} because conversation_id is None")
             # Create a new conversation
-            conv_result = supabase.table("conversations").insert({
+            conversation_data = {
                 "user_id": user_id,
                 "title": content[:50] + "..." if len(content) > 50 else content,  # Use first part of message as title
                 "source": "app"
-            }).execute()
+            }
+            
+            # If this is an optimistic chat (negative client_conversation_id), store it
+            if client_conversation_id is not None and client_conversation_id < 0:
+                conversation_data["optimistic_chat_id"] = str(client_conversation_id)
+                logger.info(f"Storing optimistic_chat_id {client_conversation_id} for new conversation")
+            
+            conv_result = supabase.table("conversations").insert(conversation_data).execute()
             
             if not conv_result.data:
                 logger.error(f"Failed to create new conversation for user {user_id}")
@@ -1150,10 +1016,6 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             created_at = conv_result.data[0]["created_at"]
             updated_at = conv_result.data[0]["updated_at"]
             logger.warning(f"Created NEW conversation {conversation_id} for user {user_id} at {created_at} (updated_at: {updated_at})")
-            
-            # Cache the mapping if we have an optimistic ID
-            if client_conversation_id is not None and client_conversation_id < 0:
-                cache_conversation_mapping(user_id, client_conversation_id, conversation_id)
         else:
             logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
@@ -1688,15 +1550,33 @@ async def get_messages(
         
         logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since: {since}")
         
-        # First verify the conversation belongs to the user
-        conv_result = supabase.table("conversations").select("user_id").eq("id", conversation_id).execute()
-        if not conv_result.data or conv_result.data[0]["user_id"] != user_id:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+        # Handle optimistic chat IDs (negative IDs)
+        actual_conversation_id = conversation_id
+        if conversation_id < 0:
+            logger.info(f"Received optimistic chat ID {conversation_id}, looking up real conversation")
+            # Look up the real conversation using the optimistic_chat_id
+            conv_result = supabase.table("conversations")\
+                .select("id, user_id")\
+                .eq("optimistic_chat_id", str(conversation_id))\
+                .eq("user_id", user_id)\
+                .execute()
+            
+            if conv_result.data:
+                actual_conversation_id = conv_result.data[0]["id"]
+                logger.info(f"Found real conversation ID {actual_conversation_id} for optimistic ID {conversation_id}")
+            else:
+                logger.warning(f"No conversation found for optimistic chat ID {conversation_id}")
+                raise HTTPException(status_code=404, detail="Conversation not found")
+        else:
+            # For positive IDs, verify the conversation belongs to the user
+            conv_result = supabase.table("conversations").select("user_id").eq("id", conversation_id).execute()
+            if not conv_result.data or conv_result.data[0]["user_id"] != user_id:
+                raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Build the messages query
         query = supabase.table("messages")\
             .select("*")\
-            .eq("conversation_id", conversation_id)\
+            .eq("conversation_id", actual_conversation_id)\
             .order("updated_at", desc=False)\
             .limit(limit)
         
@@ -1792,13 +1672,28 @@ async def get_message_count(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # First verify user owns the conversation
-        conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
-        if not conv_result.data:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+        # Handle optimistic chat IDs (negative IDs)
+        actual_conversation_id = conversation_id
+        if conversation_id < 0:
+            # Look up the real conversation using the optimistic_chat_id
+            conv_result = supabase.table("conversations")\
+                .select("id")\
+                .eq("optimistic_chat_id", str(conversation_id))\
+                .eq("user_id", user_id)\
+                .execute()
+            
+            if conv_result.data:
+                actual_conversation_id = conv_result.data[0]["id"]
+            else:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+        else:
+            # First verify user owns the conversation
+            conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
+            if not conv_result.data:
+                raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Get message count
-        result = supabase.table("messages").select("id", count="exact").eq("conversation_id", conversation_id).execute()
+        result = supabase.table("messages").select("id", count="exact").eq("conversation_id", actual_conversation_id).execute()
         
         return {"count": result.count}
     except HTTPException:
