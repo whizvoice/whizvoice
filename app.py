@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 import asyncio
 from contextlib import asynccontextmanager
+import fcntl
+from pathlib import Path
 
 from anthropic import Anthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
@@ -216,12 +218,15 @@ active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 # Global dictionary to track optimistic ID mappings per session
 session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # session_id -> {"optimistic_to_real": {client_id: real_id}, "real_to_optimistic": {real_id: client_id}}
 
-# Global cache for optimistic->real conversation ID mappings across reconnections
-# Structure: {user_id: {client_conversation_id: {"real_id": int, "created_at": float, "last_used_at": float}}}
-optimistic_conversation_cache: Dict[str, Dict[int, Dict[str, Union[int, float]]]] = {}
+# File-based cache for optimistic->real conversation ID mappings across reconnections
+# This allows cache sharing between multiple worker processes
+CACHE_FILE_PATH = Path("/var/www/whizvoice/optimistic_cache.json")
 OPTIMISTIC_CACHE_TTL_SECONDS = 3600  # 1 hour TTL
 last_cache_cleanup = 0.0  # Timestamp of last cleanup
 CACHE_CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes between cleanups
+
+# Ensure cache directory exists
+CACHE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
@@ -930,32 +935,72 @@ async def websocket_endpoint(websocket: WebSocket):
 
 def get_cached_conversation_id(user_id: str, client_conversation_id: int) -> Optional[int]:
     """Get real conversation ID from cache for an optimistic ID"""
-    if user_id in optimistic_conversation_cache and client_conversation_id in optimistic_conversation_cache[user_id]:
-        entry = optimistic_conversation_cache[user_id][client_conversation_id]
-        # Check if entry is expired
-        if time.time() - entry["created_at"] < OPTIMISTIC_CACHE_TTL_SECONDS:
-            # Update last used time
-            entry["last_used_at"] = time.time()
-            return entry["real_id"]
-        else:
-            # Remove expired entry
-            del optimistic_conversation_cache[user_id][client_conversation_id]
-            if not optimistic_conversation_cache[user_id]:
-                del optimistic_conversation_cache[user_id]
-    return None
+    try:
+        # Read cache file with file locking
+        if not CACHE_FILE_PATH.exists():
+            return None
+            
+        with open(CACHE_FILE_PATH, 'r+') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+            try:
+                cache_data = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning("Cache file is corrupted, returning None")
+                return None
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                
+        # Check if user and conversation exist in cache
+        if user_id in cache_data and str(client_conversation_id) in cache_data[user_id]:
+            entry = cache_data[user_id][str(client_conversation_id)]
+            # Check if entry is expired
+            if time.time() - entry["created_at"] < OPTIMISTIC_CACHE_TTL_SECONDS:
+                logger.info(f"Cache hit: Found mapping {client_conversation_id} -> {entry['real_id']} for user {user_id}")
+                return entry["real_id"]
+        return None
+    except Exception as e:
+        logger.error(f"Error reading cache: {e}")
+        return None
 
 def cache_conversation_mapping(user_id: str, client_conversation_id: int, real_conversation_id: int):
     """Cache the mapping from optimistic to real conversation ID"""
-    if user_id not in optimistic_conversation_cache:
-        optimistic_conversation_cache[user_id] = {}
-    
-    current_time = time.time()
-    optimistic_conversation_cache[user_id][client_conversation_id] = {
-        "real_id": real_conversation_id,
-        "created_at": current_time,
-        "last_used_at": current_time
-    }
-    logger.info(f"Cached optimistic mapping for user {user_id}: {client_conversation_id} -> {real_conversation_id}")
+    try:
+        # Read existing cache or create new one
+        cache_data = {}
+        if CACHE_FILE_PATH.exists():
+            try:
+                with open(CACHE_FILE_PATH, 'r') as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                    try:
+                        cache_data = json.load(f)
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except (json.JSONDecodeError, FileNotFoundError):
+                logger.warning("Cache file is corrupted or missing, creating new cache")
+                cache_data = {}
+        
+        # Update cache data
+        if user_id not in cache_data:
+            cache_data[user_id] = {}
+            
+        current_time = time.time()
+        cache_data[user_id][str(client_conversation_id)] = {
+            "real_id": real_conversation_id,
+            "created_at": current_time,
+            "last_used_at": current_time
+        }
+        
+        # Write updated cache with exclusive lock
+        with open(CACHE_FILE_PATH, 'w') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                json.dump(cache_data, f, indent=2)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                
+        logger.info(f"Cached optimistic mapping for user {user_id}: {client_conversation_id} -> {real_conversation_id}")
+    except Exception as e:
+        logger.error(f"Error caching conversation mapping: {e}")
 
 def cleanup_expired_cache_entries():
     """Remove expired entries from the optimistic conversation cache"""
@@ -965,30 +1010,58 @@ def cleanup_expired_cache_entries():
     # Check if enough time has passed since last cleanup
     if current_time - last_cache_cleanup < CACHE_CLEANUP_INTERVAL_SECONDS:
         return
-    
+        
+    logger.info("Running opportunistic cache cleanup")
     last_cache_cleanup = current_time
-    users_to_remove = []
-    entries_cleaned = 0
     
-    for user_id, user_cache in optimistic_conversation_cache.items():
-        ids_to_remove = []
-        for client_id, entry in user_cache.items():
-            if current_time - entry["created_at"] > OPTIMISTIC_CACHE_TTL_SECONDS:
-                ids_to_remove.append(client_id)
+    try:
+        if not CACHE_FILE_PATH.exists():
+            return
+            
+        # Read cache file
+        with open(CACHE_FILE_PATH, 'r') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            try:
+                cache_data = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning("Cache file is corrupted during cleanup")
+                return
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         
-        for client_id in ids_to_remove:
-            del user_cache[client_id]
-            entries_cleaned += 1
-            logger.debug(f"Removed expired optimistic mapping for user {user_id}: {client_id}")
+        # Clean up expired entries
+        entries_cleaned = 0
+        users_to_remove = []
         
-        if not user_cache:
-            users_to_remove.append(user_id)
-    
-    for user_id in users_to_remove:
-        del optimistic_conversation_cache[user_id]
-    
-    if entries_cleaned > 0:
-        logger.info(f"Cache cleanup: removed {entries_cleaned} expired entries")
+        for user_id, user_cache in cache_data.items():
+            ids_to_remove = []
+            for client_id, entry in user_cache.items():
+                if current_time - entry["created_at"] > OPTIMISTIC_CACHE_TTL_SECONDS:
+                    ids_to_remove.append(client_id)
+            
+            # Remove expired entries
+            for client_id in ids_to_remove:
+                del user_cache[client_id]
+                entries_cleaned += 1
+                
+            # Mark empty user caches for removal
+            if not user_cache:
+                users_to_remove.append(user_id)
+        
+        for user_id in users_to_remove:
+            del cache_data[user_id]
+        
+        if entries_cleaned > 0:
+            # Write cleaned cache back to file
+            with open(CACHE_FILE_PATH, 'w') as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    json.dump(cache_data, f, indent=2)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            logger.info(f"Cleaned up {entries_cleaned} expired cache entries")
+    except Exception as e:
+        logger.error(f"Error during cache cleanup: {e}")
 
 def cleanup_session(session_id: str, user_id: Optional[str] = None):
     """Clean up a session when a WebSocket disconnects"""

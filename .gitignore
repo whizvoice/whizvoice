@@ -48,3 +48,6 @@ user_preferences.json
 test_credentials.json
 test_output.log
 test_summary.log
+
+# Cache files
+optimistic_cache.json
