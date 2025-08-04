@@ -30,36 +30,10 @@ CLAUDE_SYSTEM_PROMPT = "You are Whiz Voice, a friendly AI chatbot that can help 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools
 
-# Background task for periodic cleanup
-async def periodic_cache_cleanup():
-    """Periodically clean up expired cache entries"""
-    while True:
-        await asyncio.sleep(300)  # Run every 5 minutes
-        try:
-            cleanup_expired_cache_entries()
-            logger.debug("Completed periodic cache cleanup")
-        except Exception as e:
-            logger.error(f"Error during periodic cache cleanup: {e}")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    cleanup_task = asyncio.create_task(periodic_cache_cleanup())
-    logger.info("Started periodic cache cleanup task")
-    yield
-    # Shutdown
-    cleanup_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        pass
-    logger.info("Stopped periodic cache cleanup task")
-
 app = FastAPI(
     title="WhizVoice API",
     description="API for WhizVoice chatbot with Asana integration",
-    version="1.0.0",
-    lifespan=lifespan
+    version="1.0.0"
 )
 
 # Add Request Logging Middleware
@@ -246,6 +220,8 @@ session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # session_id -> {"o
 # Structure: {user_id: {client_conversation_id: {"real_id": int, "created_at": float, "last_used_at": float}}}
 optimistic_conversation_cache: Dict[str, Dict[int, Dict[str, Union[int, float]]]] = {}
 OPTIMISTIC_CACHE_TTL_SECONDS = 3600  # 1 hour TTL
+last_cache_cleanup = 0.0  # Timestamp of last cleanup
+CACHE_CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes between cleanups
 
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
@@ -983,8 +959,16 @@ def cache_conversation_mapping(user_id: str, client_conversation_id: int, real_c
 
 def cleanup_expired_cache_entries():
     """Remove expired entries from the optimistic conversation cache"""
+    global last_cache_cleanup
     current_time = time.time()
+    
+    # Check if enough time has passed since last cleanup
+    if current_time - last_cache_cleanup < CACHE_CLEANUP_INTERVAL_SECONDS:
+        return
+    
+    last_cache_cleanup = current_time
     users_to_remove = []
+    entries_cleaned = 0
     
     for user_id, user_cache in optimistic_conversation_cache.items():
         ids_to_remove = []
@@ -994,6 +978,7 @@ def cleanup_expired_cache_entries():
         
         for client_id in ids_to_remove:
             del user_cache[client_id]
+            entries_cleaned += 1
             logger.debug(f"Removed expired optimistic mapping for user {user_id}: {client_id}")
         
         if not user_cache:
@@ -1001,6 +986,9 @@ def cleanup_expired_cache_entries():
     
     for user_id in users_to_remove:
         del optimistic_conversation_cache[user_id]
+    
+    if entries_cleaned > 0:
+        logger.info(f"Cache cleanup: removed {entries_cleaned} expired entries")
 
 def cleanup_session(session_id: str, user_id: Optional[str] = None):
     """Clean up a session when a WebSocket disconnects"""
@@ -1885,6 +1873,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "client_message_id": client_message_id  # Echo back optimistic message ID
             }
             await websocket.send_text(json.dumps(response_payload))
+            
+            # Opportunistically clean up expired cache entries after successful response
+            cleanup_expired_cache_entries()
         elif response.content: 
             logger.info("Claude's response did not end with a text block but was not a tool use. Sending a status or nothing.")
         else: 
