@@ -30,10 +30,36 @@ CLAUDE_SYSTEM_PROMPT = "You are Whiz Voice, a friendly AI chatbot that can help 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools
 
+# Background task for periodic cleanup
+async def periodic_cache_cleanup():
+    """Periodically clean up expired cache entries"""
+    while True:
+        await asyncio.sleep(300)  # Run every 5 minutes
+        try:
+            cleanup_expired_cache_entries()
+            logger.debug("Completed periodic cache cleanup")
+        except Exception as e:
+            logger.error(f"Error during periodic cache cleanup: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    cleanup_task = asyncio.create_task(periodic_cache_cleanup())
+    logger.info("Started periodic cache cleanup task")
+    yield
+    # Shutdown
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Stopped periodic cache cleanup task")
+
 app = FastAPI(
     title="WhizVoice API",
     description="API for WhizVoice chatbot with Asana integration",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add Request Logging Middleware
@@ -215,6 +241,11 @@ active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 
 # Global dictionary to track optimistic ID mappings per session
 session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # session_id -> {"optimistic_to_real": {client_id: real_id}, "real_to_optimistic": {real_id: client_id}}
+
+# Global cache for optimistic->real conversation ID mappings across reconnections
+# Structure: {user_id: {client_conversation_id: {"real_id": int, "created_at": float, "last_used_at": float}}}
+optimistic_conversation_cache: Dict[str, Dict[int, Dict[str, Union[int, float]]]] = {}
+OPTIMISTIC_CACHE_TTL_SECONDS = 3600  # 1 hour TTL
 
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
@@ -921,6 +952,56 @@ async def websocket_endpoint(websocket: WebSocket):
         except:
             pass
 
+def get_cached_conversation_id(user_id: str, client_conversation_id: int) -> Optional[int]:
+    """Get real conversation ID from cache for an optimistic ID"""
+    if user_id in optimistic_conversation_cache and client_conversation_id in optimistic_conversation_cache[user_id]:
+        entry = optimistic_conversation_cache[user_id][client_conversation_id]
+        # Check if entry is expired
+        if time.time() - entry["created_at"] < OPTIMISTIC_CACHE_TTL_SECONDS:
+            # Update last used time
+            entry["last_used_at"] = time.time()
+            return entry["real_id"]
+        else:
+            # Remove expired entry
+            del optimistic_conversation_cache[user_id][client_conversation_id]
+            if not optimistic_conversation_cache[user_id]:
+                del optimistic_conversation_cache[user_id]
+    return None
+
+def cache_conversation_mapping(user_id: str, client_conversation_id: int, real_conversation_id: int):
+    """Cache the mapping from optimistic to real conversation ID"""
+    if user_id not in optimistic_conversation_cache:
+        optimistic_conversation_cache[user_id] = {}
+    
+    current_time = time.time()
+    optimistic_conversation_cache[user_id][client_conversation_id] = {
+        "real_id": real_conversation_id,
+        "created_at": current_time,
+        "last_used_at": current_time
+    }
+    logger.info(f"Cached optimistic mapping for user {user_id}: {client_conversation_id} -> {real_conversation_id}")
+
+def cleanup_expired_cache_entries():
+    """Remove expired entries from the optimistic conversation cache"""
+    current_time = time.time()
+    users_to_remove = []
+    
+    for user_id, user_cache in optimistic_conversation_cache.items():
+        ids_to_remove = []
+        for client_id, entry in user_cache.items():
+            if current_time - entry["created_at"] > OPTIMISTIC_CACHE_TTL_SECONDS:
+                ids_to_remove.append(client_id)
+        
+        for client_id in ids_to_remove:
+            del user_cache[client_id]
+            logger.debug(f"Removed expired optimistic mapping for user {user_id}: {client_id}")
+        
+        if not user_cache:
+            users_to_remove.append(user_id)
+    
+    for user_id in users_to_remove:
+        del optimistic_conversation_cache[user_id]
+
 def cleanup_session(session_id: str, user_id: Optional[str] = None):
     """Clean up a session when a WebSocket disconnects"""
     if session_id in chat_sessions:
@@ -977,10 +1058,17 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         logger.error(f"Error loading conversation history for user {user_id}, conversation {conversation_id}: {str(e)}")
         return []
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None) -> Optional[int]:
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None) -> Optional[int]:
     """Save a message to the database and return the conversation_id"""
     try:
-        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, content='{content[:50]}...'")
+        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, client_conversation_id={client_conversation_id}, content='{content[:50]}...'")
+        
+        # Check cache if we have an optimistic ID but no real conversation_id
+        if conversation_id is None and client_conversation_id is not None and client_conversation_id < 0:
+            cached_id = get_cached_conversation_id(user_id, client_conversation_id)
+            if cached_id:
+                logger.info(f"Found cached conversation ID {cached_id} for optimistic ID {client_conversation_id}")
+                conversation_id = cached_id
         
         # If no conversation_id provided, create a new conversation
         if conversation_id is None:
@@ -1000,6 +1088,10 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             created_at = conv_result.data[0]["created_at"]
             updated_at = conv_result.data[0]["updated_at"]
             logger.warning(f"Created NEW conversation {conversation_id} for user {user_id} at {created_at} (updated_at: {updated_at})")
+            
+            # Cache the mapping if we have an optimistic ID
+            if client_conversation_id is not None and client_conversation_id < 0:
+                cache_conversation_mapping(user_id, client_conversation_id, conversation_id)
         else:
             logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
@@ -1665,7 +1757,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id)
+        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id)
         logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}")
         if real_conversation_id is None:
             logger.error("Failed to save user message to database")
