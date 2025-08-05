@@ -984,12 +984,25 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, client_conversation_id={client_conversation_id}, content='{content[:50]}...'")
         
-        # Check cache if we have an optimistic ID but no real conversation_id
-        if conversation_id is None and client_conversation_id is not None and client_conversation_id < 0:
-            cached_id = get_cached_conversation_id(user_id, client_conversation_id)
-            if cached_id:
-                logger.info(f"Found cached conversation ID {cached_id} for optimistic ID {client_conversation_id}")
-                conversation_id = cached_id
+        # Handle optimistic conversation IDs (negative IDs)
+        original_optimistic_id = None
+        if conversation_id is not None and conversation_id < 0:
+            logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
+            original_optimistic_id = conversation_id
+            # Look up the real conversation using the optimistic_chat_id
+            conv_result = supabase.table("conversations")\
+                .select("id")\
+                .eq("optimistic_chat_id", str(conversation_id))\
+                .eq("user_id", user_id)\
+                .execute()
+            
+            if conv_result.data:
+                real_id = conv_result.data[0]["id"]
+                logger.info(f"Found real conversation ID {real_id} for optimistic ID {conversation_id}")
+                conversation_id = real_id
+            else:
+                logger.info(f"No existing conversation found for optimistic ID {conversation_id}, will create new one")
+                conversation_id = None
         
         # If no conversation_id provided, create a new conversation
         if conversation_id is None:
@@ -1001,10 +1014,12 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 "source": "app"
             }
             
-            # If this is an optimistic chat (negative client_conversation_id), store it
-            if client_conversation_id is not None and client_conversation_id < 0:
-                conversation_data["optimistic_chat_id"] = str(client_conversation_id)
-                logger.info(f"Storing optimistic_chat_id {client_conversation_id} for new conversation")
+            # If this is an optimistic chat (negative ID), store it
+            # Priority: use original_optimistic_id if we had one, otherwise check client_conversation_id
+            optimistic_id_to_store = original_optimistic_id or client_conversation_id
+            if optimistic_id_to_store is not None and optimistic_id_to_store < 0:
+                conversation_data["optimistic_chat_id"] = str(optimistic_id_to_store)
+                logger.info(f"Storing optimistic_chat_id {optimistic_id_to_store} for new conversation")
             
             conv_result = supabase.table("conversations").insert(conversation_data).execute()
             
@@ -1624,14 +1639,30 @@ async def create_message(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # First verify user owns the conversation
-        conv_result = supabase.table("conversations").select("id").eq("id", message.conversation_id).eq("user_id", user_id).execute()
-        if not conv_result.data:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+        # Handle optimistic chat IDs (negative IDs)
+        actual_conversation_id = message.conversation_id
+        if message.conversation_id < 0:
+            # Look up the real conversation using the optimistic_chat_id
+            conv_result = supabase.table("conversations")\
+                .select("id")\
+                .eq("optimistic_chat_id", str(message.conversation_id))\
+                .eq("user_id", user_id)\
+                .execute()
+            
+            if conv_result.data:
+                actual_conversation_id = conv_result.data[0]["id"]
+                logger.info(f"Creating message for optimistic chat ID {message.conversation_id}, real ID {actual_conversation_id}")
+            else:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+        else:
+            # First verify user owns the conversation
+            conv_result = supabase.table("conversations").select("id").eq("id", message.conversation_id).eq("user_id", user_id).execute()
+            if not conv_result.data:
+                raise HTTPException(status_code=404, detail="Conversation not found")
         
-        # Create the message
+        # Create the message with the actual conversation ID
         result = supabase.table("messages").insert({
-            "conversation_id": message.conversation_id,
+            "conversation_id": actual_conversation_id,
             "content": message.content,
             "message_type": message.message_type,
             "request_id": message.request_id
@@ -1644,7 +1675,7 @@ async def create_message(
         supabase.table("conversations").update({
             "last_message_time": "now()",
             "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
-        }).eq("id", message.conversation_id).execute()
+        }).eq("id", actual_conversation_id).execute()
         
         row = result.data[0]
         return MessageResponse(
@@ -1844,7 +1875,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             await websocket.send_text(json.dumps(response_payload))
             
             # Opportunistically clean up expired cache entries after successful response
-            cleanup_expired_cache_entries()
         elif response.content: 
             logger.info("Claude's response did not end with a text block but was not a tool use. Sending a status or nothing.")
         else: 
