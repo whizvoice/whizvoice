@@ -1681,7 +1681,7 @@ async def get_messages(
         # Return with server timestamp for next incremental sync
         result = {
             'messages': messages,
-            'conversation_id': conversation_id,
+            'conversation_id': actual_conversation_id,  # Return the resolved server-backed ID, not the parameter
             'server_timestamp': datetime.utcnow().isoformat() + 'Z',
             'is_incremental': since is not None,
             'count': len(messages),
