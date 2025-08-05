@@ -1308,6 +1308,42 @@ async def update_sync_metadata(
         logger.error(f"Error updating sync metadata: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to update sync metadata")
 
+# ================== CONVERSATION HELPER FUNCTIONS ==================
+
+def resolve_conversation_id(conversation_id: int, user_id: str) -> Optional[int]:
+    """
+    Resolve a conversation ID, handling optimistic (negative) IDs by looking them up.
+    Returns the actual conversation ID or None if not found.
+    """
+    try:
+        if conversation_id < 0:
+            # Look up the real conversation using the optimistic_chat_id
+            result = supabase.table("conversations")\
+                .select("id")\
+                .eq("optimistic_chat_id", str(conversation_id))\
+                .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
+                .execute()
+            
+            if result.data:
+                return result.data[0]["id"]
+            return None
+        else:
+            # For positive IDs, verify it exists and user owns it
+            result = supabase.table("conversations")\
+                .select("id")\
+                .eq("id", conversation_id)\
+                .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
+                .execute()
+            
+            if result.data:
+                return conversation_id
+            return None
+    except Exception as e:
+        logger.error(f"Error resolving conversation ID {conversation_id}: {str(e)}")
+        return None
+
 # ================== CONVERSATION ENDPOINTS ==================
 
 @app.get("/conversations")
@@ -1422,7 +1458,18 @@ async def get_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", user_id).is_("deleted_at", "null").execute()
+        # Resolve the actual conversation ID (handles optimistic IDs)
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Fetch the full conversation data
+        result = supabase.table("conversations")\
+            .select("*")\
+            .eq("id", actual_conversation_id)\
+            .eq("user_id", user_id)\
+            .is_("deleted_at", "null")\
+            .execute()
         
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1465,7 +1512,18 @@ async def update_conversation(
             # No updates provided, just return current conversation
             return await get_conversation(conversation_id, current_user)
         
-        result = supabase.table("conversations").update(updates).eq("id", conversation_id).eq("user_id", user_id).is_("deleted_at", "null").execute()
+        # Resolve the actual conversation ID (handles optimistic IDs)
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Update the conversation
+        result = supabase.table("conversations")\
+            .update(updates)\
+            .eq("id", actual_conversation_id)\
+            .eq("user_id", user_id)\
+            .is_("deleted_at", "null")\
+            .execute()
         
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1498,24 +1556,29 @@ async def delete_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # First verify user owns the conversation and it's not already deleted
-        verify_result = supabase.table("conversations").select("id, deleted_at").eq("id", conversation_id).eq("user_id", user_id).execute()
-        if not verify_result.data:
+        # Resolve the actual conversation ID (handles optimistic IDs)
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        conversation = verify_result.data[0]
-        if conversation.get("deleted_at") is not None:
+        # Check if already deleted
+        verify_result = supabase.table("conversations")\
+            .select("deleted_at")\
+            .eq("id", actual_conversation_id)\
+            .execute()
+        
+        if verify_result.data and verify_result.data[0].get("deleted_at") is not None:
             raise HTTPException(status_code=404, detail="Conversation not found")  # Already deleted
         
         # Soft delete: set deleted_at timestamp instead of hard delete
         result = supabase.table("conversations").update({
             "deleted_at": "now()"
-        }).eq("id", conversation_id).eq("user_id", user_id).execute()
+        }).eq("id", actual_conversation_id).eq("user_id", user_id).execute()
         
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        logger.info(f"Successfully soft-deleted conversation {conversation_id} for user {user_id}")
+        logger.info(f"Successfully soft-deleted conversation {actual_conversation_id} (requested: {conversation_id}) for user {user_id}")
         return {"message": "Conversation deleted successfully", "conversation_id": conversation_id}
     except HTTPException:
         raise
@@ -1550,10 +1613,16 @@ async def update_conversation_last_message_time(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
+        # Resolve the actual conversation ID (handles optimistic IDs)
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Update the last message time
         result = supabase.table("conversations").update({
             "last_message_time": "now()",
             "updated_at": "now()"  # Critical: update this so incremental sync catches conversation updates
-        }).eq("id", conversation_id).eq("user_id", user_id).execute()
+        }).eq("id", actual_conversation_id).eq("user_id", user_id).execute()
         
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1582,28 +1651,11 @@ async def get_messages(
         
         logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since: {since}")
         
-        # Handle optimistic chat IDs (negative IDs)
-        actual_conversation_id = conversation_id
-        if conversation_id < 0:
-            logger.info(f"Received optimistic chat ID {conversation_id}, looking up real conversation")
-            # Look up the real conversation using the optimistic_chat_id
-            conv_result = supabase.table("conversations")\
-                .select("id, user_id")\
-                .eq("optimistic_chat_id", str(conversation_id))\
-                .eq("user_id", user_id)\
-                .execute()
-            
-            if conv_result.data:
-                actual_conversation_id = conv_result.data[0]["id"]
-                logger.info(f"Found real conversation ID {actual_conversation_id} for optimistic ID {conversation_id}")
-            else:
-                logger.warning(f"No conversation found for optimistic chat ID {conversation_id}")
-                raise HTTPException(status_code=404, detail="Conversation not found")
-        else:
-            # For positive IDs, verify the conversation belongs to the user
-            conv_result = supabase.table("conversations").select("user_id").eq("id", conversation_id).execute()
-            if not conv_result.data or conv_result.data[0]["user_id"] != user_id:
-                raise HTTPException(status_code=404, detail="Conversation not found")
+        # Resolve the actual conversation ID (handles optimistic IDs)
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
+            logger.warning(f"No conversation found for conversation ID {conversation_id}")
+            raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Build the messages query
         query = supabase.table("messages")\
@@ -1720,25 +1772,10 @@ async def get_message_count(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # Handle optimistic chat IDs (negative IDs)
-        actual_conversation_id = conversation_id
-        if conversation_id < 0:
-            # Look up the real conversation using the optimistic_chat_id
-            conv_result = supabase.table("conversations")\
-                .select("id")\
-                .eq("optimistic_chat_id", str(conversation_id))\
-                .eq("user_id", user_id)\
-                .execute()
-            
-            if conv_result.data:
-                actual_conversation_id = conv_result.data[0]["id"]
-            else:
-                raise HTTPException(status_code=404, detail="Conversation not found")
-        else:
-            # First verify user owns the conversation
-            conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
-            if not conv_result.data:
-                raise HTTPException(status_code=404, detail="Conversation not found")
+        # Resolve the actual conversation ID (handles optimistic IDs)
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Get message count
         result = supabase.table("messages").select("id", count="exact").eq("conversation_id", actual_conversation_id).execute()
