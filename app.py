@@ -1678,6 +1678,11 @@ async def get_messages(
         response = query.execute()
         messages = response.data if response.data else []
         
+        # Update conversation_id in messages to use the actual server-backed ID
+        # This ensures clients always receive messages with positive server-backed IDs
+        for message in messages:
+            message['conversation_id'] = actual_conversation_id
+        
         # Return with server timestamp for next incremental sync
         result = {
             'messages': messages,
