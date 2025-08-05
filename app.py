@@ -1004,7 +1004,24 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 logger.info(f"No existing conversation found for optimistic ID {conversation_id}, will create new one")
                 conversation_id = None
         
-        # If no conversation_id provided, create a new conversation
+        # If no conversation_id provided, check if we can find one by client_conversation_id
+        if conversation_id is None and client_conversation_id is not None and client_conversation_id < 0:
+            logger.info(f"No conversation_id but have client_conversation_id {client_conversation_id}, checking for existing conversation")
+            # Look up existing conversation by optimistic_chat_id
+            conv_result = supabase.table("conversations")\
+                .select("id")\
+                .eq("optimistic_chat_id", str(client_conversation_id))\
+                .eq("user_id", user_id)\
+                .execute()
+            
+            if conv_result.data:
+                conversation_id = conv_result.data[0]["id"]
+                logger.info(f"Found existing conversation {conversation_id} for optimistic_chat_id {client_conversation_id}")
+                # Don't return here - we still need to save the message below
+            else:
+                logger.info(f"No existing conversation found for optimistic_chat_id {client_conversation_id}, will create new one")
+        
+        # If still no conversation_id, create a new conversation
         if conversation_id is None:
             logger.warning(f"Creating NEW conversation for user {user_id} because conversation_id is None")
             # Create a new conversation
