@@ -2,7 +2,7 @@ from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depe
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any, Union, Set
+from typing import List, Optional, Dict, Any, Union, Set, Tuple
 import json
 import os
 import traceback
@@ -206,6 +206,10 @@ chat_sessions = {}
 
 # User sessions mapping - maps user IDs to their chat sessions
 user_sessions = {}
+
+# Store WebSocket connections by conversation ID for broadcasting
+# conversation_id -> list of (session_id, websocket) tuples
+conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}
 
 # Define the response model for the new GET endpoint
 ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
@@ -686,6 +690,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 # Track the current conversation_id for this session
                 session_conversation_id = conversation_id
+                
+                # Register WebSocket with conversation for broadcasting
+                if conversation_id is not None:
+                    if conversation_id not in conversation_websockets:
+                        conversation_websockets[conversation_id] = []
+                    conversation_websockets[conversation_id].append((session_id, websocket))
+                    logger.info(f"Registered WebSocket for session {session_id} with conversation {conversation_id}")
+                
                 # FIXED: Don't automatically load existing conversation when conversation_id is None
                 # This allows new chats to create fresh conversations instead of reusing old ones
                 if conversation_id is None:
@@ -848,6 +860,23 @@ async def websocket_endpoint(websocket: WebSocket):
                         try:
                             updated_session_conversation_id = await task
                             if updated_session_conversation_id is not None:
+                                # Register WebSocket with new conversation ID if it changed
+                                if updated_session_conversation_id != session_conversation_id:
+                                    # Remove from old conversation if any
+                                    if session_conversation_id and session_conversation_id in conversation_websockets:
+                                        conversation_websockets[session_conversation_id] = [
+                                            (sid, ws) for sid, ws in conversation_websockets[session_conversation_id]
+                                            if sid != session_id
+                                        ]
+                                        if not conversation_websockets[session_conversation_id]:
+                                            del conversation_websockets[session_conversation_id]
+                                    
+                                    # Add to new conversation
+                                    if updated_session_conversation_id not in conversation_websockets:
+                                        conversation_websockets[updated_session_conversation_id] = []
+                                    conversation_websockets[updated_session_conversation_id].append((session_id, websocket))
+                                    logger.info(f"Updated WebSocket registration for session {session_id}: {session_conversation_id} → {updated_session_conversation_id}")
+                                
                                 session_conversation_id = updated_session_conversation_id
                         except asyncio.CancelledError:
                             logger.info(f"Request {request_id} was cancelled")
@@ -887,7 +916,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         logger.warning(f"Unhandled StopIteration: {str(si)}. Re-raising.")
                         raise # Re-raise other StopIterations if any
                 except WebSocketDisconnect:
-                    cleanup_session(session_id, user_id)
+                    cleanup_session(session_id, user_id, session_conversation_id)
                     logger.info(f"WebSocket disconnected for session {session_id}")
                     break
                 except Exception as e:
@@ -908,7 +937,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     
         except Exception as e:
             # Handle any other errors that might occur
-            cleanup_session(session_id, user_id)
+            cleanup_session(session_id, user_id, session_conversation_id)
             logger.error(f"WebSocket error: {str(e)}")
             logger.error(traceback.format_exc())
             raise
@@ -923,7 +952,36 @@ async def websocket_endpoint(websocket: WebSocket):
         except:
             pass
 
-def cleanup_session(session_id: str, user_id: Optional[str] = None):
+async def broadcast_to_conversation(conversation_id: int, message_payload: dict, exclude_session: Optional[str] = None):
+    """Broadcast a message to all WebSocket connections for a specific conversation"""
+    if conversation_id not in conversation_websockets:
+        return
+    
+    # Create a copy of the list to avoid modification during iteration
+    connections = list(conversation_websockets[conversation_id])
+    disconnected_sessions = []
+    
+    for session_id, websocket in connections:
+        # Skip the session that originated the message (if specified)
+        if exclude_session and session_id == exclude_session:
+            continue
+            
+        try:
+            await websocket.send_text(json.dumps(message_payload))
+            logger.info(f"Broadcasted message to session {session_id} for conversation {conversation_id}")
+        except Exception as e:
+            logger.warning(f"Failed to broadcast to session {session_id}: {str(e)}")
+            disconnected_sessions.append((session_id, websocket))
+    
+    # Clean up disconnected sessions
+    for session_id, websocket in disconnected_sessions:
+        conversation_websockets[conversation_id].remove((session_id, websocket))
+    
+    # Remove empty conversation entries
+    if conversation_id in conversation_websockets and not conversation_websockets[conversation_id]:
+        del conversation_websockets[conversation_id]
+
+def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation_id: Optional[int] = None):
     """Clean up a session when a WebSocket disconnects"""
     if session_id in chat_sessions:
         del chat_sessions[session_id]
@@ -933,6 +991,18 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None):
     if session_id in session_mappings:
         del session_mappings[session_id]
         logger.info(f"Cleaned up session mappings: {session_id}")
+    
+    # Clean up conversation websockets
+    if conversation_id and conversation_id in conversation_websockets:
+        # Remove this session's WebSocket from the conversation
+        conversation_websockets[conversation_id] = [
+            (sid, ws) for sid, ws in conversation_websockets[conversation_id] 
+            if sid != session_id
+        ]
+        # Remove empty conversation entries
+        if not conversation_websockets[conversation_id]:
+            del conversation_websockets[conversation_id]
+        logger.info(f"Removed WebSocket for session {session_id} from conversation {conversation_id}")
     
     if user_id and user_id in user_sessions:
         if session_id in user_sessions[user_id]:
@@ -1950,6 +2020,16 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "client_message_id": client_message_id  # Echo back optimistic message ID
             }
             await websocket.send_text(json.dumps(response_payload))
+            
+            # Broadcast to other WebSocket sessions for the same conversation
+            broadcast_payload = {
+                "type": "broadcast",
+                "response": assistant_response_text,
+                "conversation_id": session_conversation_id,
+                "message_type": "ASSISTANT"
+            }
+            await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=session_id)
+            logger.info(f"Broadcasted assistant message to other sessions for conversation {session_conversation_id}")
             
             # Opportunistically clean up expired cache entries after successful response
         elif response.content: 
