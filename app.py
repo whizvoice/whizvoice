@@ -974,33 +974,9 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
             # Verify user owns the specified conversation
             conv_result = supabase.table("conversations").select("id").eq("id", actual_conversation_id).eq("user_id", user_id).execute()
             if not conv_result.data:
-                # For positive IDs that don't exist, also check if it might be stored as an optimistic ID
-                if actual_conversation_id > 0:
-                    logger.info(f"Conversation {actual_conversation_id} not found, checking if it's stored as optimistic ID")
-                    opt_result = supabase.table("conversations")\
-                        .select("id")\
-                        .eq("user_id", user_id)\
-                        .eq("optimistic_chat_id", str(actual_conversation_id))\
-                        .execute()
-                    
-                    if opt_result.data and len(opt_result.data) > 0:
-                        actual_conversation_id = opt_result.data[0]["id"]
-                        logger.info(f"Found real conversation ID {actual_conversation_id} for what was thought to be server ID {conversation_id}")
-                        # Re-verify ownership with the real ID
-                        conv_result = supabase.table("conversations").select("id").eq("id", actual_conversation_id).eq("user_id", user_id).execute()
-                        if conv_result.data:
-                            logger.info(f"Loading specified conversation {actual_conversation_id} for user {user_id}")
-                        else:
-                            logger.warning(f"Conversation {actual_conversation_id} not owned by user {user_id}")
-                            return []
-                    else:
-                        logger.warning(f"Conversation {actual_conversation_id} not found in database and not stored as optimistic ID, treating as new chat")
-                        return []  # Treat as new chat if ID not found anywhere
-                else:
-                    logger.warning(f"Conversation {actual_conversation_id} not found or not owned by user {user_id}")
-                    return []
-            else:
-                logger.info(f"Loading specified conversation {actual_conversation_id} for user {user_id}")
+                logger.warning(f"Conversation {actual_conversation_id} not found or not owned by user {user_id}")
+                return []
+            logger.info(f"Loading specified conversation {actual_conversation_id} for user {user_id}")
         
         # Get messages for the conversation
         result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
