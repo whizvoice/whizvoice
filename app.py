@@ -958,15 +958,18 @@ async def websocket_endpoint(websocket: WebSocket):
 async def broadcast_to_conversation(conversation_id: int, message_payload: dict, exclude_session: Optional[str] = None):
     """Broadcast a message to all WebSocket connections for a specific conversation"""
     if conversation_id not in conversation_websockets:
+        logger.info(f"No WebSocket sessions registered for conversation {conversation_id}")
         return
     
     # Create a copy of the list to avoid modification during iteration
     connections = list(conversation_websockets[conversation_id])
+    logger.info(f"Broadcasting to conversation {conversation_id} with {len(connections)} registered sessions: {[sid for sid, _ in connections]}")
     disconnected_sessions = []
     
     for session_id, websocket in connections:
         # Skip the session that originated the message (if specified)
         if exclude_session and session_id == exclude_session:
+            logger.info(f"Skipping originating session {session_id}")
             continue
             
         try:
