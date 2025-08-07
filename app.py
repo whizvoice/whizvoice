@@ -953,15 +953,57 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
             logger.info(f"New chat session for user {user_id} - returning empty history")
             return []
         else:
+            # Handle optimistic/negative conversation IDs
+            actual_conversation_id = conversation_id
+            if conversation_id < 0:
+                logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
+                # Look up the real conversation using the optimistic_chat_id
+                opt_result = supabase.table("conversations")\
+                    .select("id")\
+                    .eq("user_id", user_id)\
+                    .eq("optimistic_chat_id", str(conversation_id))\
+                    .execute()
+                
+                if opt_result.data and len(opt_result.data) > 0:
+                    actual_conversation_id = opt_result.data[0]["id"]
+                    logger.info(f"Found real conversation ID {actual_conversation_id} for optimistic ID {conversation_id}")
+                else:
+                    logger.info(f"No existing conversation found for optimistic ID {conversation_id}, treating as new chat")
+                    return []  # Treat as new chat if optimistic ID not found
+            
             # Verify user owns the specified conversation
-            conv_result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", user_id).execute()
+            conv_result = supabase.table("conversations").select("id").eq("id", actual_conversation_id).eq("user_id", user_id).execute()
             if not conv_result.data:
-                logger.warning(f"Conversation {conversation_id} not found or not owned by user {user_id}")
-                return []
-            logger.info(f"Loading specified conversation {conversation_id} for user {user_id}")
+                # For positive IDs that don't exist, also check if it might be stored as an optimistic ID
+                if actual_conversation_id > 0:
+                    logger.info(f"Conversation {actual_conversation_id} not found, checking if it's stored as optimistic ID")
+                    opt_result = supabase.table("conversations")\
+                        .select("id")\
+                        .eq("user_id", user_id)\
+                        .eq("optimistic_chat_id", str(actual_conversation_id))\
+                        .execute()
+                    
+                    if opt_result.data and len(opt_result.data) > 0:
+                        actual_conversation_id = opt_result.data[0]["id"]
+                        logger.info(f"Found real conversation ID {actual_conversation_id} for what was thought to be server ID {conversation_id}")
+                        # Re-verify ownership with the real ID
+                        conv_result = supabase.table("conversations").select("id").eq("id", actual_conversation_id).eq("user_id", user_id).execute()
+                        if conv_result.data:
+                            logger.info(f"Loading specified conversation {actual_conversation_id} for user {user_id}")
+                        else:
+                            logger.warning(f"Conversation {actual_conversation_id} not owned by user {user_id}")
+                            return []
+                    else:
+                        logger.warning(f"Conversation {actual_conversation_id} not found in database and not stored as optimistic ID, treating as new chat")
+                        return []  # Treat as new chat if ID not found anywhere
+                else:
+                    logger.warning(f"Conversation {actual_conversation_id} not found or not owned by user {user_id}")
+                    return []
+            else:
+                logger.info(f"Loading specified conversation {actual_conversation_id} for user {user_id}")
         
         # Get messages for the conversation
-        result = supabase.table("messages").select("*").eq("conversation_id", conversation_id).order("timestamp", desc=False).execute()
+        result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
         
         # Convert database messages to Claude format
         claude_messages = []
@@ -972,7 +1014,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 "content": row["content"]
             })
         
-        logger.info(f"Loaded {len(claude_messages)} messages from conversation {conversation_id} for user {user_id}")
+        logger.info(f"Loaded {len(claude_messages)} messages from conversation {actual_conversation_id} for user {user_id}")
         return claude_messages
         
     except Exception as e:
