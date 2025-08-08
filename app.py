@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+import redis.asyncio as redis
+from redis.asyncio.client import PubSub
 
 from anthropic import Anthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
@@ -36,6 +38,11 @@ app = FastAPI(
     description="API for WhizVoice chatbot with Asana integration",
     version="1.0.0"
 )
+
+# Initialize Redis on app startup
+@app.on_event("startup")
+async def startup_event():
+    await init_redis()
 
 # Add Request Logging Middleware
 @app.middleware("http")
@@ -211,6 +218,11 @@ user_sessions = {}
 # conversation_id -> list of (session_id, websocket) tuples
 conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}
 
+# Redis connection for pub/sub
+redis_client: Optional[redis.Redis] = None
+# Store pubsub instances for each WebSocket connection
+websocket_pubsubs: Dict[str, PubSub] = {}  # session_id -> PubSub instance
+
 # Define the response model for the new GET endpoint
 ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
 
@@ -220,6 +232,88 @@ active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 
 # Global dictionary to track optimistic ID mappings per session
 session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # session_id -> {"optimistic_to_real": {client_id: real_id}, "real_to_optimistic": {real_id: client_id}}
+
+
+async def init_redis():
+    """Initialize Redis connection for pub/sub"""
+    global redis_client
+    try:
+        # Connect to local Redis (default port 6379)
+        redis_client = await redis.from_url(
+            "redis://localhost:6379",
+            encoding="utf-8",
+            decode_responses=True
+        )
+        # Test the connection
+        await redis_client.ping()
+        logger.info("Successfully connected to Redis for pub/sub")
+    except Exception as e:
+        logger.warning(f"Failed to connect to Redis: {str(e)}. WebSocket broadcasting will be limited to single process.")
+        redis_client = None
+
+
+async def subscribe_to_conversation(session_id: str, conversation_id: int, websocket: WebSocket):
+    """Subscribe to Redis channel for a conversation"""
+    if not redis_client:
+        return
+    
+    try:
+        # Create a pubsub instance for this WebSocket
+        pubsub = redis_client.pubsub()
+        channel_name = f"conversation:{conversation_id}"
+        
+        # Subscribe to the conversation channel
+        await pubsub.subscribe(channel_name)
+        websocket_pubsubs[session_id] = pubsub
+        
+        logger.info(f"Session {session_id} subscribed to Redis channel {channel_name}")
+        
+        # Start listening for messages in the background
+        asyncio.create_task(redis_message_listener(session_id, pubsub, websocket))
+        
+    except Exception as e:
+        logger.error(f"Failed to subscribe session {session_id} to conversation {conversation_id}: {str(e)}")
+
+
+async def unsubscribe_from_conversation(session_id: str):
+    """Unsubscribe from Redis channels"""
+    if session_id in websocket_pubsubs:
+        try:
+            pubsub = websocket_pubsubs[session_id]
+            await pubsub.unsubscribe()
+            await pubsub.close()
+            del websocket_pubsubs[session_id]
+            logger.info(f"Session {session_id} unsubscribed from Redis channels")
+        except Exception as e:
+            logger.error(f"Error unsubscribing session {session_id}: {str(e)}")
+
+
+async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: WebSocket):
+    """Listen for Redis pub/sub messages and forward to WebSocket"""
+    try:
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    # Parse the message data
+                    data = json.loads(message["data"])
+                    
+                    # Don't send to the originating session
+                    if data.get("exclude_session") == session_id:
+                        continue
+                    
+                    # Forward the message to this WebSocket
+                    await websocket.send_text(json.dumps(data["payload"]))
+                    logger.info(f"Forwarded Redis message to session {session_id}")
+                    
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid JSON in Redis message: {message['data']}")
+                except Exception as e:
+                    logger.error(f"Error forwarding message to session {session_id}: {str(e)}")
+                    break
+    except asyncio.CancelledError:
+        logger.info(f"Redis listener cancelled for session {session_id}")
+    except Exception as e:
+        logger.error(f"Redis listener error for session {session_id}: {str(e)}")
 
 
 # Tool registry that maps tool names to their configuration
@@ -700,6 +794,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         conversation_websockets[conversation_id] = []
                     conversation_websockets[conversation_id].append((session_id, websocket))
                     logger.info(f"Registered WebSocket for session {session_id} with conversation {conversation_id}")
+                    
+                    # Subscribe to Redis channel for this conversation
+                    await subscribe_to_conversation(session_id, conversation_id, websocket)
                 
                 # FIXED: Don't automatically load existing conversation when conversation_id is None
                 # This allows new chats to create fresh conversations instead of reusing old ones
@@ -865,6 +962,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             if updated_session_conversation_id is not None:
                                 # Register WebSocket with new conversation ID if it changed
                                 if updated_session_conversation_id != session_conversation_id:
+                                    # Unsubscribe from old Redis channel
+                                    if session_conversation_id:
+                                        await unsubscribe_from_conversation(session_id)
+                                    
                                     # Remove from old conversation if any
                                     if session_conversation_id and session_conversation_id in conversation_websockets:
                                         conversation_websockets[session_conversation_id] = [
@@ -879,6 +980,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                         conversation_websockets[updated_session_conversation_id] = []
                                     conversation_websockets[updated_session_conversation_id].append((session_id, websocket))
                                     logger.info(f"Updated WebSocket registration for session {session_id}: {session_conversation_id} → {updated_session_conversation_id}")
+                                    
+                                    # Subscribe to new Redis channel
+                                    await subscribe_to_conversation(session_id, updated_session_conversation_id, websocket)
                                 
                                 session_conversation_id = updated_session_conversation_id
                         except asyncio.CancelledError:
@@ -957,13 +1061,28 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def broadcast_to_conversation(conversation_id: int, message_payload: dict, exclude_session: Optional[str] = None):
     """Broadcast a message to all WebSocket connections for a specific conversation"""
+    
+    # First, try Redis pub/sub for cross-process broadcasting
+    if redis_client:
+        try:
+            channel_name = f"conversation:{conversation_id}"
+            message_data = {
+                "payload": message_payload,
+                "exclude_session": exclude_session
+            }
+            await redis_client.publish(channel_name, json.dumps(message_data))
+            logger.info(f"Published message to Redis channel {channel_name} (excluding session: {exclude_session})")
+        except Exception as e:
+            logger.error(f"Failed to publish to Redis: {str(e)}")
+    
+    # Also use local broadcasting for WebSockets in this process
     if conversation_id not in conversation_websockets:
-        logger.info(f"No WebSocket sessions registered for conversation {conversation_id}")
+        logger.info(f"No local WebSocket sessions registered for conversation {conversation_id}")
         return
     
     # Create a copy of the list to avoid modification during iteration
     connections = list(conversation_websockets[conversation_id])
-    logger.info(f"Broadcasting to conversation {conversation_id} with {len(connections)} registered sessions: {[sid for sid, _ in connections]}")
+    logger.info(f"Broadcasting locally to conversation {conversation_id} with {len(connections)} registered sessions: {[sid for sid, _ in connections]}")
     disconnected_sessions = []
     
     for session_id, websocket in connections:
@@ -974,9 +1093,9 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             
         try:
             await websocket.send_text(json.dumps(message_payload))
-            logger.info(f"Broadcasted message to session {session_id} for conversation {conversation_id}")
+            logger.info(f"Broadcasted message locally to session {session_id} for conversation {conversation_id}")
         except Exception as e:
-            logger.warning(f"Failed to broadcast to session {session_id}: {str(e)}")
+            logger.warning(f"Failed to broadcast locally to session {session_id}: {str(e)}")
             disconnected_sessions.append((session_id, websocket))
     
     # Clean up disconnected sessions
@@ -992,6 +1111,9 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation
     if session_id in chat_sessions:
         del chat_sessions[session_id]
         logger.info(f"Cleaned up chat session: {session_id}")
+    
+    # Clean up Redis subscriptions
+    asyncio.create_task(unsubscribe_from_conversation(session_id))
     
     # Clean up session mappings
     if session_id in session_mappings:
