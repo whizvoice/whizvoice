@@ -28,7 +28,21 @@ pip install -r requirements.txt
 pre-commit install
 ```
 
-5. set up service
+5. Install and enable Redis (for WebSocket broadcasting across worker processes):
+
+```bash
+# Install Redis
+sudo dnf install redis -y
+
+# Start and enable Redis to run on boot
+sudo systemctl start redis
+sudo systemctl enable redis
+
+# Test Redis is working
+redis-cli ping  # Should return PONG
+```
+
+6. Set up service
 
 ```bash
 sudo cp whizvoice.service /etc/systemd/system/
@@ -37,10 +51,11 @@ sudo systemctl enable whizvoice
 sudo systemctl start whizvoice
 ```
 
-check the status
+Check the status
 
 ```bash
 sudo systemctl status whizvoice
+# Look for "Successfully connected to Redis for pub/sub" in logs
 ```
 
 ## Running the Chatbot
