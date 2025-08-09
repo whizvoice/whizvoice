@@ -223,6 +223,7 @@ session_timestamps: Dict[str, float] = {}
 # Configuration for session management
 SESSION_TIMEOUT_SECONDS = 900  # 15 minutes timeout for inactive sessions
 CLEANUP_INTERVAL_SECONDS = 300  # Run cleanup every 5 minutes
+MAX_SESSIONS_PER_USER = int(os.getenv("MAX_SESSIONS_PER_USER", "5"))  # Max concurrent sessions per user
 
 # Store WebSocket connections by conversation ID for broadcasting
 # conversation_id -> list of (session_id, websocket) tuples
@@ -859,6 +860,9 @@ async def websocket_endpoint(websocket: WebSocket):
         # session_id = f"ws_{user_id}"  # Already created above
         # chat_sessions[session_id] = []  # Already initialized above with conversation history
         
+        # Check if user has reached session limit and evict old sessions if needed
+        await evict_user_sessions_if_needed(user_id, session_id)
+        
         # Associate session with user
         if user_id not in user_sessions:
             user_sessions[user_id] = []
@@ -1169,6 +1173,74 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation
         if not user_sessions[user_id]:
             del user_sessions[user_id]
             logger.info(f"Cleaned up empty user sessions for user {user_id}")
+
+async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> None:
+    """Evict old sessions if user has reached the session limit"""
+    if user_id not in user_sessions:
+        return
+    
+    current_sessions = user_sessions[user_id]
+    
+    # If under the limit, no eviction needed
+    if len(current_sessions) < MAX_SESSIONS_PER_USER:
+        return
+    
+    logger.info(f"User {user_id} at session limit ({MAX_SESSIONS_PER_USER}), need to evict a session")
+    
+    # Find the least recently active session
+    current_time = time.time()
+    inactive_threshold = current_time - 120  # Sessions inactive for 2 minutes
+    
+    # First, try to find truly inactive sessions
+    eviction_candidate = None
+    oldest_activity = current_time
+    
+    for sess_id in current_sessions:
+        if sess_id == new_session_id:
+            continue  # Don't evict the session we're trying to create
+            
+        last_activity = session_timestamps.get(sess_id, 0)
+        
+        # Prefer evicting inactive sessions
+        if last_activity < inactive_threshold:
+            eviction_candidate = sess_id
+            break
+        
+        # Track the oldest active session as fallback
+        if last_activity < oldest_activity:
+            oldest_activity = last_activity
+            eviction_candidate = sess_id
+    
+    if eviction_candidate:
+        logger.info(f"Evicting session {eviction_candidate} (last active: {int(current_time - session_timestamps.get(eviction_candidate, 0))} seconds ago)")
+        
+        # Extract conversation_id from the evicted session if possible
+        evicted_conversation_id = None
+        parts = eviction_candidate.split('_')
+        if len(parts) >= 4 and parts[2] == 'conv':
+            try:
+                evicted_conversation_id = int(parts[3])
+            except ValueError:
+                pass
+        
+        # Find and notify the websocket for the evicted session
+        if evicted_conversation_id and evicted_conversation_id in conversation_websockets:
+            for sid, ws in conversation_websockets[evicted_conversation_id]:
+                if sid == eviction_candidate:
+                    try:
+                        eviction_message = {
+                            "type": "session_evicted",
+                            "code": "MAX_SESSIONS_REACHED",
+                            "reason": "New connection from another device"
+                        }
+                        await ws.send_text(json.dumps(eviction_message))
+                        await ws.close(code=1000, reason="Session evicted: max sessions reached")
+                    except Exception as e:
+                        logger.warning(f"Failed to notify evicted session: {e}")
+                    break
+        
+        # Clean up the evicted session
+        cleanup_session(eviction_candidate, user_id, evicted_conversation_id)
 
 async def cleanup_stale_sessions():
     """Periodically clean up stale sessions that haven't been active"""
