@@ -1040,7 +1040,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         await websocket.send_text(json.dumps(error_payload))
                     except Exception as send_exc:
                         logger.error(f"Failed to send error to client for session {session_id}: {str(send_exc)}")
-                    continue # Attempt to recover and wait for next message if possible
+                    # CRITICAL FIX: Break from loop instead of continue when WebSocket errors occur
+                    # to prevent infinite error loops when connection is lost
+                    if "WebSocket is not connected" in str(e) or "close message has been sent" in str(e):
+                        cleanup_session(session_id, user_id, session_conversation_id)
+                        logger.info(f"WebSocket connection lost for session {session_id}, breaking from loop")
+                        break
+                    continue # Only continue for recoverable errors
                     
         except Exception as e:
             # Handle any other errors that might occur
