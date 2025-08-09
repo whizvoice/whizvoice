@@ -221,7 +221,7 @@ user_sessions = {}
 session_timestamps: Dict[str, float] = {}
 
 # Configuration for session management
-SESSION_TIMEOUT_SECONDS = 3600  # 1 hour timeout for inactive sessions
+SESSION_TIMEOUT_SECONDS = 900  # 15 minutes timeout for inactive sessions
 CLEANUP_INTERVAL_SECONDS = 300  # Run cleanup every 5 minutes
 
 # Store WebSocket connections by conversation ID for broadcasting
