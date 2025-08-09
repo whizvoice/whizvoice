@@ -860,13 +860,14 @@ async def websocket_endpoint(websocket: WebSocket):
         # session_id = f"ws_{user_id}"  # Already created above
         # chat_sessions[session_id] = []  # Already initialized above with conversation history
         
-        # Check if user has reached session limit and evict old sessions if needed
-        await evict_user_sessions_if_needed(user_id, session_id)
-        
         # Associate session with user
         if user_id not in user_sessions:
             user_sessions[user_id] = []
         user_sessions[user_id].append(session_id)
+        
+        # Check if user has exceeded session limit and evict old sessions if needed
+        # IMPORTANT: Must happen AFTER adding new session to get accurate count
+        await evict_user_sessions_if_needed(user_id, session_id)
         
         # Initialize session mappings for optimistic ID tracking
         session_mappings[session_id] = {
@@ -1181,8 +1182,8 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
     
     current_sessions = user_sessions[user_id]
     
-    # If under the limit, no eviction needed
-    if len(current_sessions) < MAX_SESSIONS_PER_USER:
+    # If at or under the limit, no eviction needed (new session already added)
+    if len(current_sessions) <= MAX_SESSIONS_PER_USER:
         return
     
     logger.info(f"User {user_id} at session limit ({MAX_SESSIONS_PER_USER}), need to evict a session")
