@@ -790,11 +790,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     # If no specific conversation, create a session for a new conversation
                     session_id = f"ws_{user_id}_new_{int(time.time())}"
                 
+                # IMPORTANT: Track session immediately to ensure cleanup even if errors occur
+                session_timestamps[session_id] = time.time()
+                
                 conversation_history = load_conversation_history(user_id, conversation_id)
                 chat_sessions[session_id] = conversation_history
-                
-                # Track session creation time
-                session_timestamps[session_id] = time.time()
                 
                 logger.info(f"Created session {session_id} with {len(conversation_history)} messages")
                 
