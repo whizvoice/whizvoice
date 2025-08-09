@@ -43,6 +43,9 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup_event():
     await init_redis()
+    # Start the background task for cleaning up stale sessions
+    asyncio.create_task(cleanup_stale_sessions())
+    logger.info(f"Started stale session cleanup task (checking every {CLEANUP_INTERVAL_SECONDS} seconds for sessions older than {SESSION_TIMEOUT_SECONDS} seconds)")
 
 # Add Request Logging Middleware
 @app.middleware("http")
@@ -213,6 +216,13 @@ chat_sessions = {}
 
 # User sessions mapping - maps user IDs to their chat sessions
 user_sessions = {}
+
+# Session timestamp tracking for cleanup - maps session_id to last activity timestamp
+session_timestamps: Dict[str, float] = {}
+
+# Configuration for session management
+SESSION_TIMEOUT_SECONDS = 3600  # 1 hour timeout for inactive sessions
+CLEANUP_INTERVAL_SECONDS = 300  # Run cleanup every 5 minutes
 
 # Store WebSocket connections by conversation ID for broadcasting
 # conversation_id -> list of (session_id, websocket) tuples
@@ -783,6 +793,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 conversation_history = load_conversation_history(user_id, conversation_id)
                 chat_sessions[session_id] = conversation_history
                 
+                # Track session creation time
+                session_timestamps[session_id] = time.time()
+                
                 logger.info(f"Created session {session_id} with {len(conversation_history)} messages")
                 
                 # Track the current conversation_id for this session
@@ -862,6 +875,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     # Receive message from client
                     message_text = await websocket.receive_text()
+                    
+                    # Update session timestamp on activity
+                    if session_id in session_timestamps:
+                        session_timestamps[session_id] = time.time()
                     
                     # Parse incoming message - support both structured JSON and legacy plain text
                     request_id = None
@@ -1118,6 +1135,11 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation
         del chat_sessions[session_id]
         logger.info(f"Cleaned up chat session: {session_id}")
     
+    # Clean up session timestamp
+    if session_id in session_timestamps:
+        del session_timestamps[session_id]
+        logger.info(f"Cleaned up session timestamp: {session_id}")
+    
     # Clean up Redis subscriptions
     asyncio.create_task(unsubscribe_from_conversation(session_id))
     
@@ -1147,6 +1169,50 @@ def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation
         if not user_sessions[user_id]:
             del user_sessions[user_id]
             logger.info(f"Cleaned up empty user sessions for user {user_id}")
+
+async def cleanup_stale_sessions():
+    """Periodically clean up stale sessions that haven't been active"""
+    while True:
+        try:
+            await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+            
+            current_time = time.time()
+            cutoff_time = current_time - SESSION_TIMEOUT_SECONDS
+            
+            # Find all stale sessions
+            stale_sessions = []
+            for session_id, last_activity in list(session_timestamps.items()):
+                if last_activity < cutoff_time:
+                    stale_sessions.append(session_id)
+            
+            if stale_sessions:
+                logger.info(f"Found {len(stale_sessions)} stale sessions to clean up")
+                
+                for session_id in stale_sessions:
+                    # Extract user_id and conversation_id from session_id if possible
+                    user_id = None
+                    conversation_id = None
+                    
+                    # Session ID format: ws_{user_id}_conv_{conversation_id} or ws_{user_id}_new_{timestamp}
+                    parts = session_id.split('_')
+                    if len(parts) >= 2:
+                        user_id = parts[1]
+                    if len(parts) >= 4 and parts[2] == 'conv':
+                        try:
+                            conversation_id = int(parts[3])
+                        except ValueError:
+                            pass
+                    
+                    logger.info(f"Cleaning up stale session: {session_id} (inactive for {int(current_time - session_timestamps.get(session_id, 0))} seconds)")
+                    cleanup_session(session_id, user_id, conversation_id)
+            else:
+                logger.debug(f"No stale sessions found during cleanup check")
+                
+        except Exception as e:
+            logger.error(f"Error during stale session cleanup: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Continue running even if an error occurs
+            continue
 
 def load_conversation_history(user_id: str, conversation_id: Optional[int] = None) -> List[Dict]:
     """Load conversation history from database and convert to Claude message format"""
