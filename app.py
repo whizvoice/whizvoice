@@ -224,6 +224,8 @@ session_timestamps: Dict[str, float] = {}
 SESSION_TIMEOUT_SECONDS = 900  # 15 minutes timeout for inactive sessions
 CLEANUP_INTERVAL_SECONDS = 300  # Run cleanup every 5 minutes
 MAX_SESSIONS_PER_USER = int(os.getenv("MAX_SESSIONS_PER_USER", "5"))  # Max concurrent sessions per user
+MAX_TOTAL_SESSIONS = int(os.getenv("MAX_TOTAL_SESSIONS", "500"))  # Max total concurrent sessions
+SESSION_WARNING_THRESHOLD = 0.8  # Warn when at 80% capacity
 
 # Store WebSocket connections by conversation ID for broadcasting
 # conversation_id -> list of (session_id, websocket) tuples
@@ -782,6 +784,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 user_name = payload.get("name", "there")
                 
                 logger.info(f"Authenticated WebSocket connection for user {user_email} ({user_id})")
+                
+                # Check global session limit before creating new session
+                total_sessions = len(chat_sessions)
+                
+                # Reject if at capacity
+                if total_sessions >= MAX_TOTAL_SESSIONS:
+                    logger.error(f"MAX_TOTAL_SESSIONS reached: {total_sessions}/{MAX_TOTAL_SESSIONS}. Rejecting connection from {user_email}")
+                    error_payload = {
+                        "type": "error",
+                        "code": "SERVICE_AT_CAPACITY",
+                        "message": "Service at capacity. Please try again later."
+                    }
+                    await websocket.send_text(json.dumps(error_payload))
+                    await websocket.close(code=1013, reason="Service at capacity")  # 1013: Try Again Later
+                    return
+                
+                # Warn if approaching capacity
+                warning_threshold = int(MAX_TOTAL_SESSIONS * SESSION_WARNING_THRESHOLD)
+                if total_sessions >= warning_threshold:
+                    capacity_percent = (total_sessions / MAX_TOTAL_SESSIONS) * 100
+                    logger.warning(f"Session count high: {total_sessions}/{MAX_TOTAL_SESSIONS} ({capacity_percent:.1f}% capacity)")
                 
                 # Load conversation history and initialize session
                 # Create a unique session ID per conversation, not just per user

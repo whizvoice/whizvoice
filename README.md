@@ -186,3 +186,5 @@ See detailed connections
 ```
 netstat -an | grep :8000 | grep ESTABLISHED
 ```
+
+*** NOTE THAT WE HAVE A GLOBAL CONNECTIONS LIMIT OF 500 AND A LIMIT OF 5 PER USER ***
