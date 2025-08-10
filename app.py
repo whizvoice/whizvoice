@@ -1182,6 +1182,12 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
     
     current_sessions = user_sessions[user_id]
     
+    # First, clean up any dead sessions from the list
+    dead_sessions = [sess for sess in current_sessions if sess not in chat_sessions and sess != new_session_id]
+    for dead_sess in dead_sessions:
+        logger.info(f"Removing dead session {dead_sess} from user_sessions during eviction check")
+        current_sessions.remove(dead_sess)
+    
     # If at or under the limit, no eviction needed (new session already added)
     if len(current_sessions) <= MAX_SESSIONS_PER_USER:
         return
@@ -1199,6 +1205,11 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
     for sess_id in current_sessions:
         if sess_id == new_session_id:
             continue  # Don't evict the session we're trying to create
+        
+        # Skip sessions that are already cleaned up (disconnected)
+        if sess_id not in chat_sessions:
+            logger.debug(f"Skipping already-disconnected session {sess_id}")
+            continue
             
         last_activity = session_timestamps.get(sess_id, 0)
         
