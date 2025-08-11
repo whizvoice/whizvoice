@@ -1241,6 +1241,13 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
                 del conversation_websockets[conversation_id]
             logger.info(f"Removed WebSocket for session {session_id} from conversation {conversation_id}")
     
+    # Clean up active requests tracking (but let tasks continue running to save responses)
+    async with active_requests_lock:
+        if session_id in active_requests:
+            num_requests = len(active_requests[session_id])
+            del active_requests[session_id]
+            logger.info(f"Removed active_requests entry for disconnected session {session_id} ({num_requests} requests will continue processing)")
+    
     async with user_sessions_lock:
         if user_id and user_id in user_sessions:
             if session_id in user_sessions[user_id]:
@@ -2284,7 +2291,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "client_conversation_id": client_conversation_id
             }
-            await websocket.send_text(json.dumps(error_payload))
+            try:
+                await websocket.send_text(json.dumps(error_payload))
+            except Exception as e:
+                logger.warning(f"Failed to send database error to disconnected session {session_id}: {str(e)}")
             return real_conversation_id
         
         # Update optimistic → real mapping if client provided optimistic ID
@@ -2312,7 +2322,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "conversation_id": session_conversation_id,  # Include conversation_id for client sync
                 "client_conversation_id": client_conversation_id
             }
-            await websocket.send_text(json.dumps(error_payload_key))
+            try:
+                await websocket.send_text(json.dumps(error_payload_key))
+            except Exception as e:
+                logger.warning(f"Failed to send API key error to disconnected session {session_id}: {str(e)}")
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
             return session_conversation_id
 
@@ -2346,7 +2359,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "request_id": request_id,
                     "client_conversation_id": client_conversation_id
                 }
-                await websocket.send_text(json.dumps(error_payload))
+                try:
+                    await websocket.send_text(json.dumps(error_payload))
+                except Exception as e:
+                    logger.warning(f"Failed to send tool error to disconnected session {session_id}: {str(e)}")
                 raise StopIteration("ToolBlockMissingError")
 
             logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
@@ -2360,7 +2376,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Add request_id and client context to Asana error response
                 tool_execution_result["request_id"] = request_id
                 tool_execution_result["client_conversation_id"] = client_conversation_id
-                await websocket.send_text(json.dumps(tool_execution_result))
+                try:
+                    await websocket.send_text(json.dumps(tool_execution_result))
+                except Exception as e:
+                    logger.warning(f"Failed to send Asana auth error to disconnected session {session_id}: {str(e)}")
                 raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
 
             # If not the specific Asana auth error, proceed as before with Claude:
@@ -2405,7 +2424,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
                 "client_message_id": client_message_id  # Echo back optimistic message ID
             }
-            await websocket.send_text(json.dumps(response_payload))
+            try:
+                await websocket.send_text(json.dumps(response_payload))
+                logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
+            except Exception as e:
+                logger.warning(f"Failed to send response to disconnected session {session_id}: {str(e)}")
+                # Response was still saved to database, so user will see it on reconnect
             
             # Broadcast to other WebSocket sessions for the same conversation
             broadcast_payload = {
@@ -2427,7 +2451,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "client_conversation_id": client_conversation_id
             }
-            await websocket.send_text(json.dumps(error_payload))
+            try:
+                await websocket.send_text(json.dumps(error_payload))
+            except Exception as e:
+                logger.warning(f"Failed to send empty response error to disconnected session {session_id}: {str(e)}")
 
         return session_conversation_id
         
