@@ -23,6 +23,25 @@ from preferences import set_preference, get_preference, ensure_user_and_prefs, g
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 from supabase_client import supabase
 from redis_managers import create_managers
+from redis_helpers import (
+    # Chat session functions
+    get_chat_messages, add_chat_message, set_chat_messages, clear_chat_session,
+    # User session functions  
+    get_user_sessions, add_user_session, remove_user_session, get_all_user_sessions,
+    # Session timestamp functions
+    update_session_activity as update_session_activity_redis, 
+    get_session_timestamp, remove_session_timestamp,
+    get_stale_sessions, get_all_session_timestamps,
+    # Active request functions
+    add_active_request, remove_active_request, get_active_requests, clear_active_requests,
+    # Session mapping functions
+    set_session_mapping, get_real_id, get_optimistic_id, clear_session_mappings,
+    init_session_mappings,
+    # Utility functions
+    get_total_session_count, get_user_session_count,
+    # Module initialization
+    set_managers_and_storage
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -292,47 +311,6 @@ async def migrate_local_to_redis():
         logger.error(f"Failed to migrate local data to Redis: {e}")
 
 
-# Helper functions to use Redis managers with fallback to local storage
-async def get_chat_messages(session_id: str) -> List[Dict]:
-    """Get chat messages for a session from Redis or local storage"""
-    if redis_managers:
-        messages = await redis_managers["chat_sessions"].get_messages(session_id)
-        return messages if messages else []
-    else:
-        async with chat_sessions_lock:
-            return chat_sessions.get(session_id, [])
-
-
-async def add_chat_message(session_id: str, message: Dict):
-    """Add a chat message to a session in Redis or local storage"""
-    if redis_managers:
-        await redis_managers["chat_sessions"].add_message(session_id, message)
-    else:
-        async with chat_sessions_lock:
-            if session_id not in chat_sessions:
-                chat_sessions[session_id] = []
-            chat_sessions[session_id].append(message)
-
-
-async def set_chat_messages(session_id: str, messages: List[Dict]):
-    """Set all chat messages for a session in Redis or local storage"""
-    if redis_managers:
-        await redis_managers["chat_sessions"].set_messages(session_id, messages)
-    else:
-        async with chat_sessions_lock:
-            chat_sessions[session_id] = messages
-
-
-async def clear_chat_session(session_id: str):
-    """Clear chat session from Redis or local storage"""
-    if redis_managers:
-        await redis_managers["chat_sessions"].clear(session_id)
-    else:
-        async with chat_sessions_lock:
-            if session_id in chat_sessions:
-                del chat_sessions[session_id]
-
-
 async def init_redis():
     """Initialize Redis connection for pub/sub and session management"""
     global redis_client, redis_managers
@@ -350,6 +328,23 @@ async def init_redis():
         # Initialize Redis managers for distributed session state
         redis_managers = create_managers(redis_client)
         logger.info("Initialized Redis managers for distributed session management")
+        
+        # Initialize the helper module with managers and local storage
+        local_storage = {
+            "chat_sessions": chat_sessions,
+            "user_sessions": user_sessions,
+            "session_timestamps": session_timestamps,
+            "active_requests": active_requests,
+            "session_mappings": session_mappings
+        }
+        locks = {
+            "chat_sessions_lock": chat_sessions_lock,
+            "user_sessions_lock": user_sessions_lock,
+            "session_timestamps_lock": session_timestamps_lock,
+            "active_requests_lock": active_requests_lock,
+            "session_mappings_lock": session_mappings_lock
+        }
+        set_managers_and_storage(redis_managers, local_storage, locks)
         
         # Migrate any existing local data to Redis (for smooth transition)
         await migrate_local_to_redis()
@@ -926,13 +921,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     session_id = f"ws_{user_id}_new_{int(time.time())}"
                 
                 # IMPORTANT: Track session immediately to ensure cleanup even if errors occur
-                async with session_timestamps_lock:
-                    session_timestamps[session_id] = time.time()
+                await update_session_activity_redis(session_id)
                 
                 conversation_history = load_conversation_history(user_id, conversation_id)
                 
-                async with chat_sessions_lock:
-                    chat_sessions[session_id] = conversation_history
+                await set_chat_messages(session_id, conversation_history)
                 
                 logger.info(f"Created session {session_id} with {len(conversation_history)} messages")
                 
@@ -999,21 +992,14 @@ async def websocket_endpoint(websocket: WebSocket):
         # chat_sessions[session_id] = []  # Already initialized above with conversation history
         
         # Associate session with user
-        async with user_sessions_lock:
-            if user_id not in user_sessions:
-                user_sessions[user_id] = []
-            user_sessions[user_id].append(session_id)
+        await add_user_session(user_id, session_id)
         
         # Check if user has exceeded session limit and evict old sessions if needed
         # IMPORTANT: Must happen AFTER adding new session to get accurate count
         await evict_user_sessions_if_needed(user_id, session_id)
         
         # Initialize session mappings for optimistic ID tracking
-        async with session_mappings_lock:
-            session_mappings[session_id] = {
-                "optimistic_to_real": {},
-                "real_to_optimistic": {}
-        }
+        await init_session_mappings(session_id)
         
         try:
             while True:
@@ -1023,10 +1009,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # Update session timestamp on activity
                     # Update activity timestamp for receiving a message
-                    async with session_timestamps_lock:
-                        if session_id in session_timestamps:
-                            session_timestamps[session_id] = time.time()
-                            logger.debug(f"Updated activity timestamp for session {session_id} (received message)")
+                    await update_session_activity_redis(session_id)
+                    logger.debug(f"Updated activity timestamp for session {session_id} (received message)")
                     
                     # Parse incoming message - support both structured JSON and legacy plain text
                     request_id = None
@@ -1117,7 +1101,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                 user_id=user_id,
                                 message=message,
                                 request_id=request_id,
-                                chat_sessions=chat_sessions,
                                 client_conversation_id=client_conversation_id,
                                 client_message_id=client_message_id
                             )
@@ -1247,11 +1230,9 @@ async def websocket_endpoint(websocket: WebSocket):
             pass
 
 async def update_session_activity(session_id: str) -> None:
-    """Helper function to update session activity timestamp"""
-    async with session_timestamps_lock:
-        if session_id in session_timestamps:
-            session_timestamps[session_id] = time.time()
-            logger.debug(f"Updated activity for session {session_id}")
+    """Helper function to update session activity timestamp - wrapper for Redis version"""
+    await update_session_activity_redis(session_id)
+    logger.debug(f"Updated activity for session {session_id}")
 
 async def broadcast_to_conversation(conversation_id: int, message_payload: dict, exclude_session: Optional[str] = None):
     """Broadcast a message to all WebSocket connections for a specific conversation"""
@@ -1318,19 +1299,15 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
     logger.info(f"WebSocket disconnected for session {session_id}, but keeping chat history for active tasks")
     
     # Clean up session timestamp
-    async with session_timestamps_lock:
-        if session_id in session_timestamps:
-            del session_timestamps[session_id]
-            logger.info(f"Cleaned up session timestamp: {session_id}")
+    await remove_session_timestamp(session_id)
+    logger.info(f"Cleaned up session timestamp: {session_id}")
     
     # Clean up Redis subscriptions
     asyncio.create_task(unsubscribe_from_conversation(session_id))
     
     # Clean up session mappings
-    async with session_mappings_lock:
-        if session_id in session_mappings:
-            del session_mappings[session_id]
-            logger.info(f"Cleaned up session mappings: {session_id}")
+    await clear_session_mappings(session_id)
+    logger.info(f"Cleaned up session mappings: {session_id}")
     
     # Clean up conversation websockets
     async with conversation_websockets_lock:
@@ -1346,22 +1323,20 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
             logger.info(f"Removed WebSocket for session {session_id} from conversation {conversation_id}")
     
     # Clean up active requests tracking (but let tasks continue running to save responses)
-    async with active_requests_lock:
-        if session_id in active_requests:
-            num_requests = len(active_requests[session_id])
-            del active_requests[session_id]
-            logger.info(f"Removed active_requests entry for disconnected session {session_id} ({num_requests} requests will continue processing)")
+    active_reqs = await get_active_requests(session_id)
+    num_requests = len(active_reqs)
+    if num_requests > 0:
+        await clear_active_requests(session_id)
+        logger.info(f"Removed active_requests entry for disconnected session {session_id} ({num_requests} requests will continue processing)")
     
-    async with user_sessions_lock:
-        if user_id and user_id in user_sessions:
-            if session_id in user_sessions[user_id]:
-                user_sessions[user_id].remove(session_id)
-                logger.info(f"Removed session {session_id} from user {user_id} sessions")
-                
-            # Clean up empty user sessions list
-            if not user_sessions[user_id]:
-                del user_sessions[user_id]
-                logger.info(f"Cleaned up empty user sessions for user {user_id}")
+    if user_id:
+        await remove_user_session(user_id, session_id)
+        logger.info(f"Removed session {session_id} from user {user_id} sessions")
+        
+        # Check if user has no more sessions
+        remaining_sessions = await get_user_sessions(user_id)
+        if not remaining_sessions:
+            logger.info(f"Cleaned up empty user sessions for user {user_id}")
 
 async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> None:
     """Evict old sessions if user has reached the session limit
@@ -1372,24 +1347,24 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
     3. Never evict the new session being created
     """
     # Get current sessions first
-    async with user_sessions_lock:
-        if user_id not in user_sessions:
-            return
-        current_sessions = list(user_sessions[user_id])  # Make a copy
+    current_sessions = await get_user_sessions(user_id)
+    if not current_sessions:
+        return
     
-    # Check for dead sessions without holding user_sessions_lock
-    async with chat_sessions_lock:
-        dead_sessions = [sess for sess in current_sessions if sess not in chat_sessions and sess != new_session_id]
+    # Check for dead sessions (sessions without chat history)
+    dead_sessions = []
+    for sess in current_sessions:
+        if sess != new_session_id:
+            messages = await get_chat_messages(sess)
+            if not messages:
+                dead_sessions.append(sess)
     
-    # Update user_sessions if there are dead sessions
+    # Remove dead sessions
     if dead_sessions:
-        async with user_sessions_lock:
-            if user_id in user_sessions:
-                for dead_sess in dead_sessions:
-                    if dead_sess in user_sessions[user_id]:
-                        logger.info(f"Removing dead session {dead_sess} from user_sessions during eviction check")
-                        user_sessions[user_id].remove(dead_sess)
-                current_sessions = list(user_sessions[user_id])
+        for dead_sess in dead_sessions:
+            logger.info(f"Removing dead session {dead_sess} from user_sessions during eviction check")
+            await remove_user_session(user_id, dead_sess)
+        current_sessions = await get_user_sessions(user_id)
     
     # If at or under the limit, no eviction needed (new session already added)
     if len(current_sessions) <= MAX_SESSIONS_PER_USER:
@@ -1404,21 +1379,19 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
     # Collect sessions with their activity times
     sessions_with_activity = []
     
-    async with user_sessions_lock:
-        current_sessions = user_sessions.get(user_id, [])
+    current_sessions = await get_user_sessions(user_id)
     
     for sess_id in current_sessions:
         if sess_id == new_session_id:
             continue  # Don't evict the session we're trying to create
         
         # Skip sessions that are already cleaned up (disconnected)
-        async with chat_sessions_lock:
-            if sess_id not in chat_sessions:
-                logger.debug(f"Skipping already-disconnected session {sess_id}")
-                continue
+        messages = await get_chat_messages(sess_id)
+        if not messages:
+            logger.debug(f"Skipping already-disconnected session {sess_id}")
+            continue
         
-        async with session_timestamps_lock:
-            last_activity = session_timestamps.get(sess_id, 0)
+        last_activity = await get_session_timestamp(sess_id) or 0
             
         sessions_with_activity.append((sess_id, last_activity))
     
@@ -1434,7 +1407,8 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
         logger.info(f"Selected session {eviction_candidate} for eviction (inactive for {inactive_duration}s)")
     
     if eviction_candidate:
-        logger.info(f"Evicting session {eviction_candidate} (last active: {int(current_time - session_timestamps.get(eviction_candidate, 0))} seconds ago)")
+        evicted_timestamp = await get_session_timestamp(eviction_candidate) or 0
+        logger.info(f"Evicting session {eviction_candidate} (last active: {int(current_time - evicted_timestamp)} seconds ago)")
         
         # Extract conversation_id from the evicted session if possible
         evicted_conversation_id = None
@@ -1479,11 +1453,7 @@ async def cleanup_stale_sessions():
             cutoff_time = current_time - SESSION_TIMEOUT_SECONDS
             
             # Find all stale sessions
-            stale_sessions = []
-            async with session_timestamps_lock:
-                for session_id, last_activity in list(session_timestamps.items()):
-                    if last_activity < cutoff_time:
-                        stale_sessions.append(session_id)
+            stale_sessions = await get_stale_sessions(cutoff_time)
             
             if stale_sessions:
                 logger.info(f"Found {len(stale_sessions)} stale sessions to clean up")
@@ -1503,7 +1473,8 @@ async def cleanup_stale_sessions():
                         except ValueError:
                             pass
                     
-                    logger.info(f"Cleaning up stale session: {session_id} (inactive for {int(current_time - session_timestamps.get(session_id, 0))} seconds)")
+                    stale_timestamp = await get_session_timestamp(session_id) or 0
+                    logger.info(f"Cleaning up stale session: {session_id} (inactive for {int(current_time - stale_timestamp)} seconds)")
                     await cleanup_session(session_id, user_id, conversation_id)
             else:
                 logger.debug(f"No stale sessions found during cleanup check")
@@ -2385,10 +2356,11 @@ async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, chat_sessions, client_conversation_id=None, client_message_id=None):
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None):
     """Process a single message in a cancellable task"""
     try:
-        logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(chat_sessions[session_id])}")
+        messages = await get_chat_messages(session_id)
+        logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(messages)}")
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
@@ -2422,7 +2394,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         session_conversation_id = real_conversation_id
 
         async with chat_sessions_lock:
-            chat_sessions[session_id].append({"role": "user", "content": message})
+            await add_chat_message(session_id, {"role": "user", "content": message})
 
         current_anthropic_client = await get_anthropic_client(user_id)
         if not current_anthropic_client:
@@ -2448,7 +2420,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         response = current_anthropic_client.beta.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=1000,
-            messages=chat_sessions[session_id],
+            messages=await get_chat_messages(session_id),
             system=CLAUDE_SYSTEM_PROMPT,
             tools=tools,
             tool_choice={"type": "auto"},
@@ -2496,19 +2468,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
             # If not the specific Asana auth error, proceed as before with Claude:
             async with chat_sessions_lock:
-                chat_sessions[session_id].extend([
-                    {"role": "assistant", "content": [tool_block]},
-                    {"role": "user", "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": json.dumps(tool_execution_result) 
-                    }]}
-                ])
+                await add_chat_message(session_id, {"role": "assistant", "content": [tool_block]})
+                await add_chat_message(session_id, {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_block.id,
+                    "content": json.dumps(tool_execution_result) 
+                }]})
             
             response = current_anthropic_client.beta.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=1000,
-                messages=chat_sessions[session_id],
+                messages=await get_chat_messages(session_id),
                 system=CLAUDE_SYSTEM_PROMPT,
                 tools=tools,
                 tool_choice={"type": "auto"},
@@ -2517,7 +2487,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Add assistant final response to session history (if not an intercepted error)
         async with chat_sessions_lock:
-            chat_sessions[session_id].append({"role": "assistant", "content": response.content})
+            await add_chat_message(session_id, {"role": "assistant", "content": response.content})
         
         # Extract and save assistant response to database
         assistant_response_text = ""
@@ -2595,14 +2565,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # If disconnected and no more active tasks for this session, clean up chat history
             if not websocket_connected:
-                async with active_requests_lock:
-                    session_has_active_requests = session_id in active_requests and len(active_requests[session_id]) > 0
+                active_reqs = await get_active_requests(session_id)
+                session_has_active_requests = bool(active_reqs)
                 
                 if not session_has_active_requests:
-                    async with chat_sessions_lock:
-                        if session_id in chat_sessions:
-                            del chat_sessions[session_id]
-                            logger.info(f"Cleaned up chat session {session_id} after task completion (WebSocket disconnected)")
+                    # Check if session has messages before clearing
+                    messages = await get_chat_messages(session_id)
+                    if messages:
+                        await clear_chat_session(session_id)
+                        logger.info(f"Cleaned up chat session {session_id} after task completion (WebSocket disconnected)")
         except Exception as e:
             logger.warning(f"Error during post-task cleanup for session {session_id}: {str(e)}")
 
