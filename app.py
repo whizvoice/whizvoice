@@ -22,6 +22,7 @@ from about_me_tool import about_me_tools, get_app_info
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 from supabase_client import supabase
+from redis_managers import create_managers
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -212,15 +213,6 @@ ALLOWED_PREFERENCE_KEYS = {
     # Add other preference keys here as needed
 }
 
-# Store active chat sessions
-chat_sessions = {}
-
-# User sessions mapping - maps user IDs to their chat sessions
-user_sessions = {}
-
-# Session timestamp tracking for cleanup - maps session_id to last activity timestamp
-session_timestamps: Dict[str, float] = {}
-
 # Configuration for session management
 SESSION_TIMEOUT_SECONDS = 900  # 15 minutes timeout for inactive sessions
 CLEANUP_INTERVAL_SECONDS = 300  # Run cleanup every 5 minutes
@@ -228,24 +220,29 @@ MAX_SESSIONS_PER_USER = int(os.getenv("MAX_SESSIONS_PER_USER", "5"))  # Max conc
 MAX_TOTAL_SESSIONS = int(os.getenv("MAX_TOTAL_SESSIONS", "500"))  # Max total concurrent sessions
 SESSION_WARNING_THRESHOLD = 0.8  # Warn when at 80% capacity
 
+# Redis connection and managers
+redis_client: Optional[redis.Redis] = None
+redis_managers = None  # Will be initialized after Redis connection
+
+# Local-only data structures (can't be serialized to Redis)
 # Store WebSocket connections by conversation ID for broadcasting
 # conversation_id -> list of (session_id, websocket) tuples
 conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}
-
-# Redis connection for pub/sub
-redis_client: Optional[redis.Redis] = None
 # Store pubsub instances for each WebSocket connection
 websocket_pubsubs: Dict[str, PubSub] = {}  # session_id -> PubSub instance
+# Active tasks tracking
+active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
+
+# Legacy local dictionaries - to be replaced by Redis managers
+# Keeping temporarily for backwards compatibility during migration
+chat_sessions = {}  # DEPRECATED - use redis_managers["chat_sessions"]
+user_sessions = {}  # DEPRECATED - use redis_managers["user_sessions"]
+session_timestamps: Dict[str, float] = {}  # DEPRECATED - use redis_managers["session_timestamps"]
+active_requests: Dict[str, Set[str]] = {}  # DEPRECATED - use redis_managers["active_requests"]
+session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # DEPRECATED - use redis_managers["session_mappings"]
 
 # Define the response model for the new GET endpoint
 ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
-
-# Add global tracking for active requests (session_id -> set of request_ids)
-active_requests: Dict[str, Set[str]] = {}
-active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
-
-# Global dictionary to track optimistic ID mappings per session
-session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # session_id -> {"optimistic_to_real": {client_id: real_id}, "real_to_optimistic": {real_id: client_id}}
 
 # Locks for thread-safe access to shared dictionaries
 chat_sessions_lock = asyncio.Lock()
@@ -259,9 +256,86 @@ session_mappings_lock = asyncio.Lock()
 anthropic_clients_cache_lock = asyncio.Lock()
 
 
+async def migrate_local_to_redis():
+    """Migrate existing local session data to Redis (one-time during startup)"""
+    if not redis_managers:
+        return
+    
+    try:
+        # Migrate chat sessions
+        for session_id, messages in chat_sessions.items():
+            await redis_managers["chat_sessions"].set_messages(session_id, messages)
+        
+        # Migrate user sessions
+        for user_id, session_ids in user_sessions.items():
+            for session_id in session_ids:
+                await redis_managers["user_sessions"].add_session(user_id, session_id)
+        
+        # Migrate session timestamps
+        for session_id, timestamp in session_timestamps.items():
+            await redis_managers["session_timestamps"].update(session_id, timestamp)
+        
+        # Migrate active requests
+        for session_id, request_ids in active_requests.items():
+            for request_id in request_ids:
+                await redis_managers["active_requests"].add(session_id, request_id)
+        
+        # Migrate session mappings
+        for session_id, mappings in session_mappings.items():
+            for client_id, real_id in mappings.get("optimistic_to_real", {}).items():
+                await redis_managers["session_mappings"].set_mapping(session_id, client_id, real_id)
+        
+        if chat_sessions or user_sessions or session_timestamps:
+            logger.info(f"Migrated local data to Redis: {len(chat_sessions)} chat sessions, "
+                       f"{len(user_sessions)} user sessions, {len(session_timestamps)} timestamps")
+    except Exception as e:
+        logger.error(f"Failed to migrate local data to Redis: {e}")
+
+
+# Helper functions to use Redis managers with fallback to local storage
+async def get_chat_messages(session_id: str) -> List[Dict]:
+    """Get chat messages for a session from Redis or local storage"""
+    if redis_managers:
+        messages = await redis_managers["chat_sessions"].get_messages(session_id)
+        return messages if messages else []
+    else:
+        async with chat_sessions_lock:
+            return chat_sessions.get(session_id, [])
+
+
+async def add_chat_message(session_id: str, message: Dict):
+    """Add a chat message to a session in Redis or local storage"""
+    if redis_managers:
+        await redis_managers["chat_sessions"].add_message(session_id, message)
+    else:
+        async with chat_sessions_lock:
+            if session_id not in chat_sessions:
+                chat_sessions[session_id] = []
+            chat_sessions[session_id].append(message)
+
+
+async def set_chat_messages(session_id: str, messages: List[Dict]):
+    """Set all chat messages for a session in Redis or local storage"""
+    if redis_managers:
+        await redis_managers["chat_sessions"].set_messages(session_id, messages)
+    else:
+        async with chat_sessions_lock:
+            chat_sessions[session_id] = messages
+
+
+async def clear_chat_session(session_id: str):
+    """Clear chat session from Redis or local storage"""
+    if redis_managers:
+        await redis_managers["chat_sessions"].clear(session_id)
+    else:
+        async with chat_sessions_lock:
+            if session_id in chat_sessions:
+                del chat_sessions[session_id]
+
+
 async def init_redis():
-    """Initialize Redis connection for pub/sub"""
-    global redis_client
+    """Initialize Redis connection for pub/sub and session management"""
+    global redis_client, redis_managers
     try:
         # Connect to local Redis (default port 6379)
         redis_client = await redis.from_url(
@@ -272,9 +346,18 @@ async def init_redis():
         # Test the connection
         await redis_client.ping()
         logger.info("Successfully connected to Redis for pub/sub")
+        
+        # Initialize Redis managers for distributed session state
+        redis_managers = create_managers(redis_client)
+        logger.info("Initialized Redis managers for distributed session management")
+        
+        # Migrate any existing local data to Redis (for smooth transition)
+        await migrate_local_to_redis()
+        
     except Exception as e:
         logger.warning(f"Failed to connect to Redis: {str(e)}. WebSocket broadcasting will be limited to single process.")
         redis_client = None
+        redis_managers = None
 
 
 async def subscribe_to_conversation(session_id: str, conversation_id: int, websocket: WebSocket):
