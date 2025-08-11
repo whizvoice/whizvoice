@@ -342,11 +342,18 @@ async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: Web
                     logger.error(f"Invalid JSON in Redis message: {message['data']}")
                 except Exception as e:
                     logger.error(f"Error forwarding message to session {session_id}: {str(e)}")
-                    break
+                    # Don't break on transient forwarding errors - let client retry
+                    if "WebSocket" in str(e):
+                        break
     except asyncio.CancelledError:
         logger.info(f"Redis listener cancelled for session {session_id}")
     except Exception as e:
         logger.error(f"Redis listener error for session {session_id}: {str(e)}")
+        # Close WebSocket on Redis failure
+        try:
+            await websocket.close(code=1011, reason="Redis connection lost")
+        except:
+            pass
 
 
 # Tool registry that maps tool names to their configuration
