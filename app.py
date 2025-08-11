@@ -332,6 +332,9 @@ async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: Web
                         continue
                     
                     # Forward the message to this WebSocket
+                    # Update activity timestamp before forwarding
+                    await update_session_activity(session_id)
+                    
                     await websocket.send_text(json.dumps(data["payload"]))
                     logger.info(f"Forwarded Redis message to session {session_id}")
                     
@@ -929,9 +932,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     message_text = await websocket.receive_text()
                     
                     # Update session timestamp on activity
+                    # Update activity timestamp for receiving a message
                     async with session_timestamps_lock:
                         if session_id in session_timestamps:
                             session_timestamps[session_id] = time.time()
+                            logger.debug(f"Updated activity timestamp for session {session_id} (received message)")
                     
                     # Parse incoming message - support both structured JSON and legacy plain text
                     request_id = None
@@ -1151,6 +1156,13 @@ async def websocket_endpoint(websocket: WebSocket):
         except:
             pass
 
+async def update_session_activity(session_id: str) -> None:
+    """Helper function to update session activity timestamp"""
+    async with session_timestamps_lock:
+        if session_id in session_timestamps:
+            session_timestamps[session_id] = time.time()
+            logger.debug(f"Updated activity for session {session_id}")
+
 async def broadcast_to_conversation(conversation_id: int, message_payload: dict, exclude_session: Optional[str] = None):
     """Broadcast a message to all WebSocket connections for a specific conversation"""
     
@@ -1186,6 +1198,8 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             continue
             
         try:
+            # Update activity for session receiving broadcast
+            await update_session_activity(session_id)
             await websocket.send_text(json.dumps(message_payload))
             logger.info(f"Broadcasted message locally to session {session_id} for conversation {conversation_id}")
         except Exception as e:
@@ -1208,10 +1222,10 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
 
 async def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation_id: Optional[int] = None):
     """Clean up a session when a WebSocket disconnects"""
-    async with chat_sessions_lock:
-        if session_id in chat_sessions:
-            del chat_sessions[session_id]
-            logger.info(f"Cleaned up chat session: {session_id}")
+    # Don't delete chat_sessions immediately - let any active message processing tasks complete
+    # They need the session history to generate responses
+    # The session will be cleaned up when the task completes or after a timeout
+    logger.info(f"WebSocket disconnected for session {session_id}, but keeping chat history for active tasks")
     
     # Clean up session timestamp
     async with session_timestamps_lock:
@@ -1260,7 +1274,13 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
                 logger.info(f"Cleaned up empty user sessions for user {user_id}")
 
 async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> None:
-    """Evict old sessions if user has reached the session limit"""
+    """Evict old sessions if user has reached the session limit
+    
+    Eviction priority (highest to lowest):
+    1. Dead/disconnected sessions (already cleaned up)
+    2. Least recently active session
+    3. Never evict the new session being created
+    """
     # Get current sessions first
     async with user_sessions_lock:
         if user_id not in user_sessions:
@@ -1291,9 +1311,8 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
     current_time = time.time()
     inactive_threshold = current_time - 120  # Sessions inactive for 2 minutes
     
-    # First, try to find truly inactive sessions
-    eviction_candidate = None
-    oldest_activity = current_time
+    # Collect sessions with their activity times
+    sessions_with_activity = []
     
     async with user_sessions_lock:
         current_sessions = user_sessions.get(user_id, [])
@@ -1310,16 +1329,19 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
         
         async with session_timestamps_lock:
             last_activity = session_timestamps.get(sess_id, 0)
-        
-        # Prefer evicting inactive sessions
-        if last_activity < inactive_threshold:
-            eviction_candidate = sess_id
-            break
-        
-        # Track the oldest active session as fallback
-        if last_activity < oldest_activity:
-            oldest_activity = last_activity
-            eviction_candidate = sess_id
+            
+        sessions_with_activity.append((sess_id, last_activity))
+    
+    # Sort by activity time (oldest first)
+    sessions_with_activity.sort(key=lambda x: x[1])
+    
+    # Find eviction candidate
+    eviction_candidate = None
+    if sessions_with_activity:
+        # Evict the least recently active session
+        eviction_candidate, oldest_activity = sessions_with_activity[0]
+        inactive_duration = int(current_time - oldest_activity)
+        logger.info(f"Selected session {eviction_candidate} for eviction (inactive for {inactive_duration}s)")
     
     if eviction_candidate:
         logger.info(f"Evicting session {eviction_candidate} (last active: {int(current_time - session_timestamps.get(eviction_candidate, 0))} seconds ago)")
@@ -2468,6 +2490,31 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             async with active_requests_lock:
                 if session_id in active_requests:
                     active_requests[session_id].discard(request_id)
+        
+        # Clean up chat session if WebSocket is disconnected and no more active tasks
+        # This ensures we don't leak memory from disconnected sessions
+        try:
+            # Check if WebSocket is still connected
+            websocket_connected = False
+            try:
+                # Try to check WebSocket state without sending anything
+                # WebSocket.client_state tells us if it's connected
+                websocket_connected = websocket.client_state.name == "CONNECTED"
+            except:
+                websocket_connected = False
+            
+            # If disconnected and no more active tasks for this session, clean up chat history
+            if not websocket_connected:
+                async with active_requests_lock:
+                    session_has_active_requests = session_id in active_requests and len(active_requests[session_id]) > 0
+                
+                if not session_has_active_requests:
+                    async with chat_sessions_lock:
+                        if session_id in chat_sessions:
+                            del chat_sessions[session_id]
+                            logger.info(f"Cleaned up chat session {session_id} after task completion (WebSocket disconnected)")
+        except Exception as e:
+            logger.warning(f"Error during post-task cleanup for session {session_id}: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
