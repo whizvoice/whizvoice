@@ -44,6 +44,10 @@ class ChatSessionManager:
         """Alias for get() method - for backward compatibility"""
         return await self.get(session_id)
     
+    async def add_message(self, session_id: str, message: Dict):
+        """Alias for append() method - for backward compatibility"""
+        await self.append(session_id, message)
+    
     async def append(self, session_id: str, message: Dict):
         """Append a message to chat history"""
         # Get existing messages
@@ -241,6 +245,10 @@ class SessionMappingManager:
         """Delete all mappings for a session"""
         await self.redis.delete(f"session_mapping:{session_id}:opt_to_real")
         await self.redis.delete(f"session_mapping:{session_id}:real_to_opt")
+    
+    async def clear(self, session_id: str):
+        """Alias for delete() method - for backward compatibility"""
+        await self.delete(session_id)
 
 
 class ConnectionTracker:
