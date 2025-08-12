@@ -1025,6 +1025,17 @@ async def websocket_endpoint(websocket: WebSocket):
                         client_conversation_id = message_data.get("client_conversation_id")
                         client_message_id = message_data.get("client_message_id")
                         logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, client_conversation_id: {client_conversation_id}")
+                        
+                        # Validate client_conversation_id immediately
+                        if client_conversation_id is not None and client_conversation_id > 0:
+                            error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. Use the conversation_id URL parameter for server-assigned IDs."
+                            logger.error(error_msg)
+                            await websocket.send_json({
+                                "error": error_msg,
+                                "type": "error",
+                                "request_id": request_id
+                            })
+                            continue  # Skip processing this message
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -1563,9 +1574,16 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 logger.info(f"No existing conversation found for optimistic ID {conversation_id}, will create new one")
                 conversation_id = None
         
-        # If no conversation_id provided, check if we can find one by client_conversation_id
-        if conversation_id is None and client_conversation_id is not None and client_conversation_id < 0:
-            logger.info(f"No conversation_id but have client_conversation_id {client_conversation_id}, checking for existing conversation")
+        # Validate client_conversation_id - it should ONLY be negative (optimistic) values
+        if client_conversation_id is not None and client_conversation_id > 0:
+            error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. The client should use the conversation_id parameter for server-assigned IDs."
+            logger.error(error_msg)
+            return {"error": error_msg, "status": 400}
+        
+        # If no conversation_id provided, check if we can find one by optimistic client_conversation_id
+        if conversation_id is None and client_conversation_id is not None:
+            # client_conversation_id should always be negative (optimistic) at this point
+            logger.info(f"No conversation_id but have optimistic client_conversation_id {client_conversation_id}, checking for existing conversation")
             # Look up existing conversation by optimistic_chat_id
             conv_result = supabase.table("conversations")\
                 .select("id")\
