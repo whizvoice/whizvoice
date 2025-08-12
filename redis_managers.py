@@ -36,6 +36,10 @@ class ChatSessionManager:
             ex=self.ttl
         )
     
+    async def set_messages(self, session_id: str, messages: List[Dict]):
+        """Alias for set() method - for backward compatibility"""
+        await self.set(session_id, messages)
+    
     async def append(self, session_id: str, message: Dict):
         """Append a message to chat history"""
         # Get existing messages
