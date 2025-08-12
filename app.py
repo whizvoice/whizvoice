@@ -268,8 +268,6 @@ redis_managers = None  # Will be initialized after Redis connection
 # Store WebSocket connections by conversation ID for broadcasting
 # conversation_id -> list of (session_id, websocket) tuples
 conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}
-# Store pubsub instances for each WebSocket connection
-websocket_pubsubs: Dict[str, PubSub] = {}  # session_id -> PubSub instance
 # Active tasks tracking
 active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 
@@ -289,7 +287,6 @@ chat_sessions_lock = asyncio.Lock()
 user_sessions_lock = asyncio.Lock()
 session_timestamps_lock = asyncio.Lock()
 conversation_websockets_lock = asyncio.Lock()
-websocket_pubsubs_lock = asyncio.Lock()
 active_requests_lock = asyncio.Lock()
 active_tasks_lock = asyncio.Lock()
 session_mappings_lock = asyncio.Lock()
@@ -388,8 +385,12 @@ async def subscribe_to_conversation(session_id: str, conversation_id: int, webso
         
         # Subscribe to the conversation channel
         await pubsub.subscribe(channel_name)
-        async with websocket_pubsubs_lock:
-            websocket_pubsubs[session_id] = pubsub
+        
+        # Store pubsub in LocalObjectManager
+        if redis_managers and "local_objects" in redis_managers:
+            await redis_managers["local_objects"].add_pubsub(session_id, pubsub)
+        else:
+            logger.warning(f"Redis managers not available, pubsub for {session_id} not stored")
         
         logger.info(f"Session {session_id} subscribed to Redis channel {channel_name}")
         
@@ -407,12 +408,13 @@ async def subscribe_to_conversation(session_id: str, conversation_id: int, webso
 
 async def unsubscribe_from_conversation(session_id: str):
     """Unsubscribe from Redis channels"""
-    async with websocket_pubsubs_lock:
-        if session_id in websocket_pubsubs:
-            pubsub = websocket_pubsubs[session_id]
-            del websocket_pubsubs[session_id]
-        else:
-            return
+    # Get and remove pubsub from LocalObjectManager
+    pubsub = None
+    if redis_managers and "local_objects" in redis_managers:
+        pubsub = await redis_managers["local_objects"].remove_pubsub(session_id)
+    
+    if not pubsub:
+        return
     
     try:
         await pubsub.unsubscribe()

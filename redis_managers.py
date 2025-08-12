@@ -380,6 +380,10 @@ class LocalObjectManager:
         async with self.pubsub_lock:
             self.websocket_pubsubs[session_id] = pubsub
     
+    async def get_pubsub(self, session_id: str):
+        async with self.pubsub_lock:
+            return self.websocket_pubsubs.get(session_id)
+    
     async def remove_pubsub(self, session_id: str):
         async with self.pubsub_lock:
             if session_id in self.websocket_pubsubs:
