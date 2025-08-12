@@ -422,6 +422,52 @@ async def unsubscribe_from_conversation(session_id: str):
         logger.error(f"Error unsubscribing session {session_id}: {str(e)}")
 
 
+async def update_websocket_conversation(session_id: str, old_conversation_id: Optional[int], new_conversation_id: int, websocket: WebSocket):
+    """Safely update WebSocket conversation mapping and Redis subscriptions.
+    
+    This function ensures there's always an active listener during the transition
+    by creating the new subscription before destroying the old one.
+    """
+    if old_conversation_id == new_conversation_id:
+        return  # No change needed
+    
+    logger.info(f"Updating WebSocket conversation for session {session_id}: {old_conversation_id} → {new_conversation_id}")
+    
+    try:
+        # STEP 1: Subscribe to new Redis channel FIRST (before unsubscribing from old)
+        await subscribe_to_conversation(session_id, new_conversation_id, websocket)
+        
+        # STEP 2: Update the conversation_websockets mapping
+        async with conversation_websockets_lock:
+            # Remove from old conversation mapping
+            if old_conversation_id and old_conversation_id in conversation_websockets:
+                conversation_websockets[old_conversation_id] = [
+                    (sid, ws) for sid, ws in conversation_websockets[old_conversation_id]
+                    if sid != session_id
+                ]
+                if not conversation_websockets[old_conversation_id]:
+                    del conversation_websockets[old_conversation_id]
+            
+            # Add to new conversation mapping
+            if new_conversation_id not in conversation_websockets:
+                conversation_websockets[new_conversation_id] = []
+            conversation_websockets[new_conversation_id].append((session_id, websocket))
+        
+        # STEP 3: NOW unsubscribe from old channel (after new one is active)
+        if old_conversation_id:
+            # Cancel the old listener task first
+            if redis_managers and "local_objects" in redis_managers:
+                await redis_managers["local_objects"].cancel_listener_task(session_id)
+            await unsubscribe_from_conversation(session_id)
+        
+        logger.info(f"Successfully updated WebSocket registration for session {session_id}")
+        
+    except Exception as e:
+        logger.error(f"Error updating WebSocket conversation for session {session_id}: {str(e)}")
+        # Don't close the WebSocket on error - let it continue with the original setup
+        raise
+
+
 async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: WebSocket):
     """Listen for Redis pub/sub messages and forward to WebSocket"""
     try:
@@ -453,12 +499,16 @@ async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: Web
         logger.info(f"Redis listener cancelled for session {session_id}")
         raise  # Re-raise to properly propagate cancellation
     except Exception as e:
-        logger.error(f"Redis listener error for session {session_id}: {str(e)}")
-        # Close WebSocket on Redis failure
-        try:
-            await websocket.close(code=1011, reason="Redis connection lost")
-        except:
-            pass
+        # Check if this is just a connection close during channel switch (expected)
+        if "Connection closed by server" in str(e):
+            logger.info(f"Redis listener connection closed for session {session_id} (likely during channel switch)")
+        else:
+            logger.error(f"Redis listener error for session {session_id}: {str(e)}")
+            # Only close WebSocket on unexpected Redis failures
+            try:
+                await websocket.close(code=1011, reason="Redis connection lost")
+            except:
+                pass
 
 
 # Tool registry that maps tool names to their configuration
@@ -1055,10 +1105,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         client_conversation_id = message_data.get("client_conversation_id")
                         client_message_id = message_data.get("client_message_id")
                         
-                        # If message includes a conversation_id, update the session's conversation_id
+                        # If message includes a conversation_id, update the session's conversation_id only if it changed
                         if message_conversation_id is not None and message_conversation_id > 0:
-                            logger.info(f"Message includes conversation_id {message_conversation_id}, updating session")
-                            session_conversation_id = message_conversation_id
+                            if session_conversation_id != message_conversation_id:
+                                logger.info(f"Updating session conversation_id from {session_conversation_id} to {message_conversation_id}")
+                                session_conversation_id = message_conversation_id
+                            # else: conversation_id matches, no update needed
                         
                         logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}")
                         
@@ -1177,28 +1229,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             if updated_session_conversation_id is not None:
                                 # Register WebSocket with new conversation ID if it changed
                                 if updated_session_conversation_id != session_conversation_id:
-                                    # Unsubscribe from old Redis channel
-                                    if session_conversation_id:
-                                        await unsubscribe_from_conversation(session_id)
-                                    
-                                    # Remove from old conversation if any and add to new one
-                                    async with conversation_websockets_lock:
-                                        if session_conversation_id and session_conversation_id in conversation_websockets:
-                                            conversation_websockets[session_conversation_id] = [
-                                                (sid, ws) for sid, ws in conversation_websockets[session_conversation_id]
-                                                if sid != session_id
-                                            ]
-                                            if not conversation_websockets[session_conversation_id]:
-                                                del conversation_websockets[session_conversation_id]
-                                        
-                                        # Add to new conversation
-                                        if updated_session_conversation_id not in conversation_websockets:
-                                            conversation_websockets[updated_session_conversation_id] = []
-                                        conversation_websockets[updated_session_conversation_id].append((session_id, websocket))
-                                    logger.info(f"Updated WebSocket registration for session {session_id}: {session_conversation_id} → {updated_session_conversation_id}")
-                                    
-                                    # Subscribe to new Redis channel
-                                    await subscribe_to_conversation(session_id, updated_session_conversation_id, websocket)
+                                    # Use the safe update function that creates new listener before destroying old one
+                                    try:
+                                        await update_websocket_conversation(session_id, session_conversation_id, updated_session_conversation_id, websocket)
+                                    except Exception as e:
+                                        logger.error(f"Failed to update WebSocket conversation in main loop: {str(e)}")
+                                        # Continue with the current conversation ID if update fails
                                 
                                 session_conversation_id = updated_session_conversation_id
                         except asyncio.CancelledError:
@@ -2464,6 +2500,16 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     mappings["optimistic_to_real"][client_conversation_id] = real_conversation_id
                     mappings["real_to_optimistic"][real_conversation_id] = client_conversation_id
                     logger.info(f"Mapped optimistic ID {client_conversation_id} → real ID {real_conversation_id}")
+        
+        # CRITICAL FIX: Update WebSocket listener IMMEDIATELY when conversation ID changes
+        # This must happen BEFORE we start broadcasting to the new conversation ID
+        if real_conversation_id and real_conversation_id != session_conversation_id:
+            logger.info(f"Conversation ID changed from {session_conversation_id} to {real_conversation_id}, updating WebSocket listener immediately")
+            try:
+                await update_websocket_conversation(session_id, session_conversation_id, real_conversation_id, websocket)
+            except Exception as e:
+                logger.error(f"Failed to update WebSocket conversation, continuing with original: {str(e)}")
+                # Don't fail the entire message processing if the update fails
         
         # Use real conversation ID for rest of processing
         session_conversation_id = real_conversation_id
