@@ -48,7 +48,7 @@ def set_managers_and_storage(managers, local_storage, locks):
 async def get_chat_messages(session_id: str) -> List[Dict]:
     """Get chat messages for a session from Redis or local storage"""
     if redis_managers:
-        messages = await redis_managers["chat_sessions"].get_messages(session_id)
+        messages = await redis_managers["chat_sessions"].get(session_id)
         return messages if messages else []
     else:
         async with chat_sessions_lock:
@@ -150,7 +150,7 @@ async def get_session_timestamp(session_id: str) -> Optional[float]:
 async def remove_session_timestamp(session_id: str):
     """Remove session timestamp"""
     if redis_managers:
-        await redis_managers["session_timestamps"].remove(session_id)
+        await redis_managers["session_timestamps"].delete(session_id)
     else:
         async with session_timestamps_lock:
             if session_id in session_timestamps:

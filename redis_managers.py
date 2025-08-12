@@ -40,6 +40,10 @@ class ChatSessionManager:
         """Alias for set() method - for backward compatibility"""
         await self.set(session_id, messages)
     
+    async def get_messages(self, session_id: str) -> List[Dict]:
+        """Alias for get() method - for backward compatibility"""
+        return await self.get(session_id)
+    
     async def append(self, session_id: str, message: Dict):
         """Append a message to chat history"""
         # Get existing messages
@@ -131,6 +135,10 @@ class SessionTimestampManager:
     async def delete(self, session_id: str):
         """Delete timestamp"""
         await self.redis.delete(f"session_timestamp:{session_id}")
+    
+    async def remove(self, session_id: str):
+        """Alias for delete() method - for backward compatibility"""
+        await self.delete(session_id)
     
     async def get_all(self) -> Dict[str, float]:
         """Get all timestamps (for cleanup)"""
