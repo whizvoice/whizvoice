@@ -149,6 +149,15 @@ class SessionTimestampManager:
             if cursor == 0:
                 break
         return timestamps
+    
+    async def get_stale_sessions(self, cutoff_time: float) -> List[str]:
+        """Get session IDs with timestamps older than cutoff time"""
+        stale_sessions = []
+        all_timestamps = await self.get_all()
+        for session_id, timestamp in all_timestamps.items():
+            if timestamp < cutoff_time:
+                stale_sessions.append(session_id)
+        return stale_sessions
 
 
 class ActiveRequestManager:

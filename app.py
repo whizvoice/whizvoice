@@ -283,7 +283,7 @@ async def migrate_local_to_redis():
     try:
         # Migrate chat sessions
         for session_id, messages in chat_sessions.items():
-            await redis_managers["chat_sessions"].set_messages(session_id, messages)
+            await redis_managers["chat_sessions"].set(session_id, messages)
         
         # Migrate user sessions
         for user_id, session_ids in user_sessions.items():

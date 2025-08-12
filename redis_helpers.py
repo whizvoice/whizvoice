@@ -69,7 +69,7 @@ async def add_chat_message(session_id: str, message: Dict):
 async def set_chat_messages(session_id: str, messages: List[Dict]):
     """Set all chat messages for a session in Redis or local storage"""
     if redis_managers:
-        await redis_managers["chat_sessions"].set_messages(session_id, messages)
+        await redis_managers["chat_sessions"].set(session_id, messages)
     else:
         async with chat_sessions_lock:
             chat_sessions[session_id] = messages
