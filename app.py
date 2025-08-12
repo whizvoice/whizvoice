@@ -2468,7 +2468,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
             # If not the specific Asana auth error, proceed as before with Claude:
             async with chat_sessions_lock:
-                await add_chat_message(session_id, {"role": "assistant", "content": [tool_block]})
+                # Convert tool_block to a serializable dict
+                tool_block_dict = {
+                    "type": "tool_use",
+                    "id": tool_block.id,
+                    "name": tool_block.name,
+                    "input": tool_block.input
+                }
+                await add_chat_message(session_id, {"role": "assistant", "content": [tool_block_dict]})
                 await add_chat_message(session_id, {"role": "user", "content": [{
                     "type": "tool_result",
                     "tool_use_id": tool_block.id,
@@ -2487,7 +2494,19 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Add assistant final response to session history (if not an intercepted error)
         async with chat_sessions_lock:
-            await add_chat_message(session_id, {"role": "assistant", "content": response.content})
+            # Convert response.content to serializable format
+            content_list = []
+            for block in response.content:
+                if block.type == 'text':
+                    content_list.append({"type": "text", "text": block.text})
+                elif block.type == 'tool_use':
+                    content_list.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input
+                    })
+            await add_chat_message(session_id, {"role": "assistant", "content": content_list})
         
         # Extract and save assistant response to database
         assistant_response_text = ""

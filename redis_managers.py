@@ -192,6 +192,10 @@ class ActiveRequestManager:
         requests = await self.redis.smembers(f"active_requests:{session_id}")
         return set(requests) if requests else set()
     
+    async def get(self, session_id: str) -> Set[str]:
+        """Alias for get_all() method - for backward compatibility"""
+        return await self.get_all(session_id)
+    
     async def clear(self, session_id: str):
         """Clear all active requests for a session"""
         await self.redis.delete(f"active_requests:{session_id}")
