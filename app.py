@@ -2574,7 +2574,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
                 "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
-                "client_message_id": client_message_id  # Echo back optimistic message ID
+                "client_message_id": client_message_id,  # Echo back optimistic message ID
+                "type": "response"  # Indicate this is a direct response (vs broadcast)
             }
             try:
                 await websocket.send_text(json.dumps(response_payload))
