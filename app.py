@@ -268,8 +268,6 @@ redis_managers = None  # Will be initialized after Redis connection
 # Store WebSocket connections by conversation ID for broadcasting
 # conversation_id -> list of (session_id, websocket) tuples
 conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}
-# Active tasks tracking
-active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
 
 # Legacy local dictionaries - to be replaced by Redis managers
 # Keeping temporarily for backwards compatibility during migration
@@ -288,7 +286,6 @@ user_sessions_lock = asyncio.Lock()
 session_timestamps_lock = asyncio.Lock()
 conversation_websockets_lock = asyncio.Lock()
 active_requests_lock = asyncio.Lock()
-active_tasks_lock = asyncio.Lock()
 session_mappings_lock = asyncio.Lock()
 anthropic_clients_cache_lock = asyncio.Lock()
 
@@ -1143,11 +1140,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Handle cancellation requests
                     if message_type == "cancel":
                         cancel_request_id = message_data.get("cancel_request_id")
-                        async with active_tasks_lock:
-                            if cancel_request_id and cancel_request_id in active_tasks:
+                        if cancel_request_id and redis_managers and "local_objects" in redis_managers:
+                            task = await redis_managers["local_objects"].get_and_cancel_task(cancel_request_id)
+                            if task:
                                 logger.info(f"Cancelling request {cancel_request_id}")
-                                active_tasks[cancel_request_id].cancel()
-                                del active_tasks[cancel_request_id]
                         
                         # Remove from active requests tracking
                         async with active_requests_lock:
@@ -1187,11 +1183,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             
                             logger.info(f"Interrupt detected. Cancelling {len(active_request_ids)} active requests")
                             # Cancel all active requests for this session
-                            async with active_tasks_lock:
-                                for active_request_id in active_request_ids:
-                                    if active_request_id in active_tasks:
-                                        active_tasks[active_request_id].cancel()
-                                        del active_tasks[active_request_id]
+                            if redis_managers and "local_objects" in redis_managers:
+                                cancelled_count = await redis_managers["local_objects"].cancel_tasks_by_ids(list(active_request_ids))
+                                logger.info(f"Cancelled {cancelled_count} tasks")
                             
                             # Send interrupt notification with client context
                             interrupt_response = {
@@ -1217,9 +1211,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         
                         # Track the task
-                        if request_id:
-                            async with active_tasks_lock:
-                                active_tasks[request_id] = task
+                        if request_id and redis_managers and "local_objects" in redis_managers:
+                            await redis_managers["local_objects"].add_task(request_id, task)
                             async with active_requests_lock:
                                 if session_id not in active_requests:
                                     active_requests[session_id] = set()
@@ -1242,18 +1235,16 @@ async def websocket_endpoint(websocket: WebSocket):
                         except asyncio.CancelledError:
                             logger.info(f"Request {request_id} was cancelled")
                             # Clean up tracking
-                            if request_id:
-                                async with active_tasks_lock:
-                                    active_tasks.pop(request_id, None)
+                            if request_id and redis_managers and "local_objects" in redis_managers:
+                                await redis_managers["local_objects"].remove_task(request_id)
                                 async with active_requests_lock:
                                     if session_id in active_requests:
                                         active_requests[session_id].discard(request_id)
                         except Exception as e:
                             logger.error(f"Error processing message: {e}")
                             # Clean up tracking
-                            if request_id:
-                                async with active_tasks_lock:
-                                    active_tasks.pop(request_id, None)
+                            if request_id and redis_managers and "local_objects" in redis_managers:
+                                await redis_managers["local_objects"].remove_task(request_id)
                                 async with active_requests_lock:
                                     if session_id in active_requests:
                                         active_requests[session_id].discard(request_id)
@@ -2688,9 +2679,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
     finally:
         # Clean up tracking
-        if request_id:
-            async with active_tasks_lock:
-                active_tasks.pop(request_id, None)
+        if request_id and redis_managers and "local_objects" in redis_managers:
+            await redis_managers["local_objects"].remove_task(request_id)
             # 🔧 CRITICAL FIX: Use the actual session_id, not a reconstructed one
             # The session_id is consistent throughout the connection
             async with active_requests_lock:

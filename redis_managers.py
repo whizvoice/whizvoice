@@ -415,6 +415,18 @@ class LocalObjectManager:
                 return task
         return None
     
+    async def cancel_tasks_by_ids(self, request_ids: List[str]) -> int:
+        """Cancel multiple tasks by their IDs"""
+        cancelled_count = 0
+        async with self.tasks_lock:
+            for request_id in request_ids:
+                task = self.active_tasks.get(request_id)
+                if task:
+                    task.cancel()
+                    del self.active_tasks[request_id]
+                    cancelled_count += 1
+        return cancelled_count
+    
     # Anthropic client caching
     async def get_anthropic_client(self, api_key: str):
         async with self.clients_lock:
