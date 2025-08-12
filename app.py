@@ -1049,20 +1049,38 @@ async def websocket_endpoint(websocket: WebSocket):
                         message = message_data.get("message", "")
                         request_id = message_data.get("request_id")
                         message_type = message_data.get("type", "message")  # Support message types
+                        
+                        # Get conversation_id from message (if provided)
+                        message_conversation_id = message_data.get("conversation_id")
                         client_conversation_id = message_data.get("client_conversation_id")
                         client_message_id = message_data.get("client_message_id")
-                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, client_conversation_id: {client_conversation_id}")
+                        
+                        # If message includes a conversation_id, update the session's conversation_id
+                        if message_conversation_id is not None and message_conversation_id > 0:
+                            logger.info(f"Message includes conversation_id {message_conversation_id}, updating session")
+                            session_conversation_id = message_conversation_id
+                        
+                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}")
                         
                         # Validate client_conversation_id immediately
-                        if client_conversation_id is not None and client_conversation_id > 0:
-                            error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. Use the conversation_id URL parameter for server-assigned IDs."
-                            logger.error(error_msg)
-                            await websocket.send_json({
-                                "error": error_msg,
-                                "type": "error",
-                                "request_id": request_id
-                            })
-                            continue  # Skip processing this message
+                        # Convert to int if it's a string number, and check if positive
+                        if client_conversation_id is not None:
+                            try:
+                                client_conv_id_int = int(client_conversation_id) if isinstance(client_conversation_id, str) else client_conversation_id
+                                if client_conv_id_int > 0:
+                                    error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. Use the conversation_id URL parameter for server-assigned IDs."
+                                    logger.error(error_msg)
+                                    await websocket.send_json({
+                                        "error": error_msg,
+                                        "type": "error",
+                                        "request_id": request_id
+                                    })
+                                    continue  # Skip processing this message
+                                # Update client_conversation_id to be the integer version for consistency
+                                client_conversation_id = client_conv_id_int
+                            except (ValueError, TypeError):
+                                # If it's not a valid number, log and continue with original value
+                                logger.warning(f"client_conversation_id is not a valid number: {client_conversation_id} (type: {type(client_conversation_id)})")
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -1520,8 +1538,6 @@ async def cleanup_stale_sessions():
                     stale_timestamp = await get_session_timestamp(session_id) or 0
                     logger.info(f"Cleaning up stale session: {session_id} (inactive for {int(current_time - stale_timestamp)} seconds)")
                     await cleanup_session(session_id, user_id, conversation_id)
-            else:
-                logger.debug(f"No stale sessions found during cleanup check")
                 
         except Exception as e:
             logger.error(f"Error during stale session cleanup: {str(e)}")
@@ -1608,10 +1624,18 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 conversation_id = None
         
         # Validate client_conversation_id - it should ONLY be negative (optimistic) values
-        if client_conversation_id is not None and client_conversation_id > 0:
-            error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. The client should use the conversation_id parameter for server-assigned IDs."
-            logger.error(error_msg)
-            return {"error": error_msg, "status": 400}
+        # Convert to int if it's a string number for validation
+        if client_conversation_id is not None:
+            try:
+                client_conv_id_int = int(client_conversation_id) if isinstance(client_conversation_id, str) else client_conversation_id
+                if client_conv_id_int > 0:
+                    error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. The client should use the conversation_id parameter for server-assigned IDs."
+                    logger.error(error_msg)
+                    return {"error": error_msg, "status": 400}
+                # Use the integer version for all subsequent operations
+                client_conversation_id = client_conv_id_int
+            except (ValueError, TypeError):
+                logger.warning(f"client_conversation_id is not a valid number in save_message_to_db: {client_conversation_id} (type: {type(client_conversation_id)})")
         
         # If no conversation_id provided, check if we can find one by optimistic client_conversation_id
         if conversation_id is None and client_conversation_id is not None:
