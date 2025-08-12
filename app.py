@@ -2533,11 +2533,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Response was still saved to database, so user will see it on reconnect
             
             # Broadcast to other WebSocket sessions for the same conversation
+            # Use same format as regular response so clients can process it correctly
             broadcast_payload = {
-                "type": "broadcast",
                 "response": assistant_response_text,
+                "request_id": request_id,  # Include request_id so clients can track the message
                 "conversation_id": session_conversation_id,
-                "message_type": "ASSISTANT"
+                "client_conversation_id": client_conversation_id,  # Include for client validation
+                "client_message_id": client_message_id,  # Include for completeness
+                "type": "broadcast"  # Keep type to indicate it's a broadcast
             }
             await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=session_id)
             logger.info(f"Broadcasted assistant message to other sessions for conversation {session_conversation_id}")
