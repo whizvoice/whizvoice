@@ -366,11 +366,13 @@ class LocalObjectManager:
         # These stay local - no Redis
         self.websocket_pubsubs: Dict[str, Any] = {}  # PubSub objects
         self.active_tasks: Dict[str, asyncio.Task] = {}  # Task objects
+        self.redis_listener_tasks: Dict[str, asyncio.Task] = {}  # Redis listener tasks
         self.anthropic_clients: Dict[str, Any] = {}  # Client objects
         
         # Locks for local objects
         self.pubsub_lock = asyncio.Lock()
         self.tasks_lock = asyncio.Lock()
+        self.listener_tasks_lock = asyncio.Lock()
         self.clients_lock = asyncio.Lock()
     
     # WebSocket PubSub management
@@ -417,6 +419,40 @@ class LocalObjectManager:
     async def set_anthropic_client(self, api_key: str, client):
         async with self.clients_lock:
             self.anthropic_clients[api_key] = client
+    
+    # Redis listener task management
+    async def add_listener_task(self, session_id: str, task: asyncio.Task):
+        """Add a Redis listener task for a session"""
+        async with self.listener_tasks_lock:
+            self.redis_listener_tasks[session_id] = task
+            logger.info(f"Added Redis listener task for session {session_id}")
+    
+    async def get_listener_task(self, session_id: str) -> Optional[asyncio.Task]:
+        """Get the Redis listener task for a session"""
+        async with self.listener_tasks_lock:
+            return self.redis_listener_tasks.get(session_id)
+    
+    async def cancel_listener_task(self, session_id: str) -> bool:
+        """Cancel and remove the Redis listener task for a session"""
+        async with self.listener_tasks_lock:
+            task = self.redis_listener_tasks.get(session_id)
+            if task:
+                task.cancel()
+                del self.redis_listener_tasks[session_id]
+                logger.info(f"Cancelled Redis listener task for session {session_id}")
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass  # Expected when task is cancelled
+                except Exception as e:
+                    logger.warning(f"Error while cancelling listener task for {session_id}: {e}")
+                return True
+            return False
+    
+    async def get_all_listener_tasks(self) -> Dict[str, asyncio.Task]:
+        """Get all Redis listener tasks (for monitoring/cleanup)"""
+        async with self.listener_tasks_lock:
+            return dict(self.redis_listener_tasks)
 
 
 # Singleton instances (initialize these in your app startup)

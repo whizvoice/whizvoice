@@ -67,6 +67,27 @@ async def startup_event():
     asyncio.create_task(cleanup_stale_sessions())
     logger.info(f"Started stale session cleanup task (checking every {CLEANUP_INTERVAL_SECONDS} seconds for sessions older than {SESSION_TIMEOUT_SECONDS} seconds)")
 
+# Clean up on app shutdown
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on app shutdown"""
+    logger.info("Starting server shutdown cleanup...")
+    
+    # Cancel all Redis listener tasks
+    if redis_managers and "local_objects" in redis_managers:
+        listener_tasks = await redis_managers["local_objects"].get_all_listener_tasks()
+        if listener_tasks:
+            logger.info(f"Cancelling {len(listener_tasks)} Redis listener tasks...")
+            for session_id in list(listener_tasks.keys()):
+                await redis_managers["local_objects"].cancel_listener_task(session_id)
+    
+    # Close Redis connection
+    if redis_client:
+        await redis_client.close()
+        logger.info("Closed Redis connection")
+    
+    logger.info("Server shutdown cleanup completed")
+
 # Add Request Logging Middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -372,8 +393,13 @@ async def subscribe_to_conversation(session_id: str, conversation_id: int, webso
         
         logger.info(f"Session {session_id} subscribed to Redis channel {channel_name}")
         
-        # Start listening for messages in the background
-        asyncio.create_task(redis_message_listener(session_id, pubsub, websocket))
+        # Start listening for messages in the background and track the task
+        listener_task = asyncio.create_task(redis_message_listener(session_id, pubsub, websocket))
+        if redis_managers and "local_objects" in redis_managers:
+            await redis_managers["local_objects"].add_listener_task(session_id, listener_task)
+        else:
+            # Fallback if managers not initialized (shouldn't happen in practice)
+            logger.warning(f"Redis managers not available, listener task for {session_id} not tracked")
         
     except Exception as e:
         logger.error(f"Failed to subscribe session {session_id} to conversation {conversation_id}: {str(e)}")
@@ -425,6 +451,7 @@ async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: Web
                         break
     except asyncio.CancelledError:
         logger.info(f"Redis listener cancelled for session {session_id}")
+        raise  # Re-raise to properly propagate cancellation
     except Exception as e:
         logger.error(f"Redis listener error for session {session_id}: {str(e)}")
         # Close WebSocket on Redis failure
@@ -1313,8 +1340,14 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
     await remove_session_timestamp(session_id)
     logger.info(f"Cleaned up session timestamp: {session_id}")
     
-    # Clean up Redis subscriptions
-    asyncio.create_task(unsubscribe_from_conversation(session_id))
+    # Cancel Redis listener task first (before closing pubsub)
+    if redis_managers and "local_objects" in redis_managers:
+        cancelled = await redis_managers["local_objects"].cancel_listener_task(session_id)
+        if cancelled:
+            logger.info(f"Cancelled Redis listener task for session {session_id}")
+    
+    # Clean up Redis subscriptions (after cancelling the listener)
+    await unsubscribe_from_conversation(session_id)
     
     # Clean up session mappings
     await clear_session_mappings(session_id)
