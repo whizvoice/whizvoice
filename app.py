@@ -1373,12 +1373,16 @@ async def register_websocket_for_conversation(session_id: str, conversation_id: 
         if conversation_id not in conversation_websockets:
             conversation_websockets[conversation_id] = []
         
-        # Check if not already registered
-        if (session_id, websocket) not in conversation_websockets[conversation_id]:
-            conversation_websockets[conversation_id].append((session_id, websocket))
-            logger.info(f"Registered WebSocket session {session_id} for conversation {conversation_id}")
-        else:
-            logger.debug(f"WebSocket session {session_id} already registered for conversation {conversation_id}")
+        # Remove any existing registration with the same session_id (old WebSocket)
+        # This handles reconnection with the same session ID
+        existing_entries = [(sid, ws) for sid, ws in conversation_websockets[conversation_id] if sid == session_id]
+        for old_entry in existing_entries:
+            conversation_websockets[conversation_id].remove(old_entry)
+            logger.info(f"Replaced old WebSocket registration for session {session_id} in conversation {conversation_id}")
+        
+        # Add the new WebSocket registration
+        conversation_websockets[conversation_id].append((session_id, websocket))
+        logger.info(f"Registered WebSocket session {session_id} for conversation {conversation_id}")
 
 async def update_session_activity(session_id: str) -> None:
     """Helper function to update session activity timestamp - wrapper for Redis version"""

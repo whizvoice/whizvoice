@@ -416,6 +416,14 @@ class LocalObjectManager:
     # WebSocket PubSub management
     async def add_pubsub(self, session_id: str, pubsub):
         async with self.pubsub_lock:
+            # Close old pubsub if exists (handles reconnection with same session ID)
+            if session_id in self.websocket_pubsubs:
+                old_pubsub = self.websocket_pubsubs[session_id]
+                try:
+                    await old_pubsub.close()
+                    logger.info(f"Closed old pubsub for session {session_id} before replacing")
+                except Exception as e:
+                    logger.warning(f"Error closing old pubsub for {session_id}: {e}")
             self.websocket_pubsubs[session_id] = pubsub
     
     async def get_pubsub(self, session_id: str):
@@ -478,6 +486,17 @@ class LocalObjectManager:
     async def add_listener_task(self, session_id: str, task: asyncio.Task):
         """Add a Redis listener task for a session"""
         async with self.listener_tasks_lock:
+            # Cancel old listener task if exists (handles reconnection with same session ID)
+            if session_id in self.redis_listener_tasks:
+                old_task = self.redis_listener_tasks[session_id]
+                old_task.cancel()
+                logger.info(f"Cancelled old Redis listener task for session {session_id} before replacing")
+                try:
+                    await old_task
+                except asyncio.CancelledError:
+                    pass  # Expected when task is cancelled
+                except Exception as e:
+                    logger.warning(f"Error while cancelling old listener task for {session_id}: {e}")
             self.redis_listener_tasks[session_id] = task
             logger.info(f"Added Redis listener task for session {session_id}")
     
