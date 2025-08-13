@@ -1016,11 +1016,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 # Register WebSocket with conversation for broadcasting
                 if conversation_id is not None:
-                    async with conversation_websockets_lock:
-                        if conversation_id not in conversation_websockets:
-                            conversation_websockets[conversation_id] = []
-                        conversation_websockets[conversation_id].append((session_id, websocket))
-                    logger.info(f"Registered WebSocket for session {session_id} with conversation {conversation_id}")
+                    await register_websocket_for_conversation(session_id, conversation_id, websocket)
+                    
+                    # If this is a positive (real) conversation ID, also check if we have
+                    # any optimistic mappings that point to it and register those too
+                    if conversation_id > 0:
+                        # Check if any optimistic IDs map to this real ID
+                        async with session_mappings_lock:
+                            if session_id in session_mappings:
+                                for opt_id, real_id in session_mappings[session_id].get("optimistic_to_real", {}).items():
+                                    if real_id == conversation_id:
+                                        # Also register under the optimistic ID
+                                        await register_websocket_for_conversation(session_id, opt_id, websocket)
+                                        logger.info(f"Also registered WebSocket under optimistic ID {opt_id} for real conversation {conversation_id}")
                     
                     # Subscribe to Redis channel for this conversation
                     await subscribe_to_conversation(session_id, conversation_id, websocket)
@@ -1278,10 +1286,55 @@ async def websocket_endpoint(websocket: WebSocket):
                         logger.warning(f"Unhandled StopIteration: {str(si)}. Re-raising.")
                         raise # Re-raise other StopIterations if any
                 except WebSocketDisconnect:
+                    logger.info(f"WebSocket disconnected for session {session_id}, allowing active tasks to complete")
+                    # Wait for any active tasks to complete (with timeout)
+                    active_reqs = await get_active_requests(session_id)
+                    if active_reqs:
+                        logger.info(f"Waiting for {len(active_reqs)} active requests to complete for session {session_id}")
+                        # Give tasks up to 65 seconds to complete (5 seconds more than API timeout)
+                        wait_start = time.time()
+                        max_wait = 65.0
+                        
+                        while time.time() - wait_start < max_wait:
+                            active_reqs = await get_active_requests(session_id)
+                            if not active_reqs:
+                                logger.info(f"All tasks completed for session {session_id}")
+                                break
+                            await asyncio.sleep(0.5)
+                        
+                        if active_reqs:
+                            logger.warning(f"Timed out waiting for {len(active_reqs)} tasks for session {session_id}")
+                    
                     await cleanup_session(session_id, user_id, session_conversation_id)
-                    logger.info(f"WebSocket disconnected for session {session_id}")
+                    logger.info(f"WebSocket cleanup completed for session {session_id}")
                     break
                 except Exception as e:
+                    # Check if this is a WebSocket disconnection error FIRST
+                    if "WebSocket is not connected" in str(e) or "close message has been sent" in str(e) or "Need to call" in str(e):
+                        logger.info(f"WebSocket connection lost for session {session_id}, allowing active tasks to complete")
+                        # Wait for any active tasks to complete (with timeout)
+                        active_reqs = await get_active_requests(session_id)
+                        if active_reqs:
+                            logger.info(f"Waiting for {len(active_reqs)} active requests to complete for session {session_id}")
+                            # Give tasks up to 65 seconds to complete (5 seconds more than API timeout)
+                            wait_start = time.time()
+                            max_wait = 65.0
+                            
+                            while time.time() - wait_start < max_wait:
+                                active_reqs = await get_active_requests(session_id)
+                                if not active_reqs:
+                                    logger.info(f"All tasks completed for session {session_id}")
+                                    break
+                                await asyncio.sleep(0.5)
+                            
+                            if active_reqs:
+                                logger.warning(f"Timed out waiting for {len(active_reqs)} tasks for session {session_id}")
+                        
+                        await cleanup_session(session_id, user_id, session_conversation_id)
+                        logger.info(f"WebSocket cleanup completed for session {session_id}")
+                        break
+                    
+                    # For other errors, log and try to send error to client
                     logger.error(f"Error during WebSocket message processing for session {session_id}: {str(e)}", exc_info=True)
                     logger.error(traceback.format_exc())
                     try:
@@ -1295,12 +1348,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         await websocket.send_text(json.dumps(error_payload))
                     except Exception as send_exc:
                         logger.error(f"Failed to send error to client for session {session_id}: {str(send_exc)}")
-                    # CRITICAL FIX: Break from loop instead of continue when WebSocket errors occur
-                    # to prevent infinite error loops when connection is lost
-                    if "WebSocket is not connected" in str(e) or "close message has been sent" in str(e):
-                        await cleanup_session(session_id, user_id, session_conversation_id)
-                        logger.info(f"WebSocket connection lost for session {session_id}, breaking from loop")
-                        break
                     continue # Only continue for recoverable errors
                     
         except Exception as e:
@@ -1319,6 +1366,19 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close(code=1011)
         except:
             pass
+
+async def register_websocket_for_conversation(session_id: str, conversation_id: int, websocket: WebSocket):
+    """Register a WebSocket for a conversation, handling both real and optimistic IDs"""
+    async with conversation_websockets_lock:
+        if conversation_id not in conversation_websockets:
+            conversation_websockets[conversation_id] = []
+        
+        # Check if not already registered
+        if (session_id, websocket) not in conversation_websockets[conversation_id]:
+            conversation_websockets[conversation_id].append((session_id, websocket))
+            logger.info(f"Registered WebSocket session {session_id} for conversation {conversation_id}")
+        else:
+            logger.debug(f"WebSocket session {session_id} already registered for conversation {conversation_id}")
 
 async def update_session_activity(session_id: str) -> None:
     """Helper function to update session activity timestamp - wrapper for Redis version"""
@@ -1343,12 +1403,32 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
     
     # Also use local broadcasting for WebSockets in this process
     async with conversation_websockets_lock:
-        if conversation_id not in conversation_websockets:
-            logger.info(f"No local WebSocket sessions registered for conversation {conversation_id}")
+        connections = []
+        
+        # Check for the real conversation ID
+        if conversation_id in conversation_websockets:
+            connections.extend(conversation_websockets[conversation_id])
+        
+        # ALSO check for any optimistic conversation IDs that map to this real ID
+        # Look through session_mappings to find optimistic IDs
+        optimistic_ids = set()
+        for session_id, mappings in session_mappings.items():
+            for opt_id, real_id in mappings.get("optimistic_to_real", {}).items():
+                if real_id == conversation_id:
+                    optimistic_ids.add(opt_id)
+        
+        # Check for WebSockets registered under optimistic IDs
+        for opt_id in optimistic_ids:
+            if opt_id in conversation_websockets:
+                logger.info(f"Found WebSockets registered under optimistic ID {opt_id} for real conversation {conversation_id}")
+                connections.extend(conversation_websockets[opt_id])
+        
+        if not connections:
+            logger.info(f"No local WebSocket sessions registered for conversation {conversation_id} (checked real and optimistic IDs)")
             return
         
         # Create a copy of the list to avoid modification during iteration
-        connections = list(conversation_websockets[conversation_id])
+        connections = list(set(connections))  # Remove duplicates
     
     logger.info(f"Broadcasting locally to conversation {conversation_id} with {len(connections)} registered sessions: {[sid for sid, _ in connections]}")
     disconnected_sessions = []
@@ -1387,7 +1467,7 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
     # Don't delete chat_sessions immediately - let any active message processing tasks complete
     # They need the session history to generate responses
     # The session will be cleaned up when the task completes or after a timeout
-    logger.info(f"WebSocket disconnected for session {session_id}, but keeping chat history for active tasks")
+    logger.info(f"Cleaning up session {session_id}, but keeping chat history for active tasks")
     
     # Clean up session timestamp
     await remove_session_timestamp(session_id)
@@ -1406,25 +1486,34 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
     await clear_session_mappings(session_id)
     logger.info(f"Cleaned up session mappings: {session_id}")
     
-    # Clean up conversation websockets
+    # Clean up conversation websockets (check all conversations, not just the provided one)
     async with conversation_websockets_lock:
-        if conversation_id and conversation_id in conversation_websockets:
-            # Remove this session's WebSocket from the conversation
-            conversation_websockets[conversation_id] = [
-                (sid, ws) for sid, ws in conversation_websockets[conversation_id] 
+        conversations_to_clean = []
+        
+        # Find all conversations this session might be registered with
+        for conv_id, sessions in conversation_websockets.items():
+            for sid, ws in sessions:
+                if sid == session_id:
+                    conversations_to_clean.append(conv_id)
+                    break
+        
+        # Clean up from all found conversations
+        for conv_id in conversations_to_clean:
+            conversation_websockets[conv_id] = [
+                (sid, ws) for sid, ws in conversation_websockets[conv_id] 
                 if sid != session_id
             ]
             # Remove empty conversation entries
-            if not conversation_websockets[conversation_id]:
-                del conversation_websockets[conversation_id]
-            logger.info(f"Removed WebSocket for session {session_id} from conversation {conversation_id}")
+            if not conversation_websockets[conv_id]:
+                del conversation_websockets[conv_id]
+            logger.info(f"Removed WebSocket for session {session_id} from conversation {conv_id}")
     
-    # Clean up active requests tracking (but let tasks continue running to save responses)
+    # DON'T clean up active requests immediately - we need to track them to know when tasks complete
+    # The tasks themselves will remove their entries when they finish
     active_reqs = await get_active_requests(session_id)
     num_requests = len(active_reqs)
     if num_requests > 0:
-        await clear_active_requests(session_id)
-        logger.info(f"Removed active_requests entry for disconnected session {session_id} ({num_requests} requests will continue processing)")
+        logger.info(f"Keeping {num_requests} active requests for session {session_id} - they will clean up when complete")
     
     if user_id:
         await remove_user_session(user_id, session_id)
@@ -2521,6 +2610,16 @@ async def catch_all(path: str, request: Request):
 
 async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None):
     """Process a single message in a cancellable task"""
+    # Helper function to safely send to WebSocket
+    async def safe_websocket_send(payload):
+        """Send payload to WebSocket, handling disconnection gracefully"""
+        try:
+            await websocket.send_text(json.dumps(payload))
+            return True
+        except Exception as e:
+            logger.warning(f"WebSocket send failed for session {session_id}: {str(e)} - Response will be available on reconnect")
+            return False
+    
     try:
         # Track request state as pending
         await set_request_state(request_id, "pending", {
@@ -2547,10 +2646,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "client_conversation_id": client_conversation_id
             }
-            try:
-                await websocket.send_text(json.dumps(error_payload))
-            except Exception as e:
-                logger.warning(f"Failed to send database error to disconnected session {session_id}: {str(e)}")
+            await safe_websocket_send(error_payload)
             return real_conversation_id
         
         # Update optimistic → real mapping if client provided optimistic ID
@@ -2568,6 +2664,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.info(f"Conversation ID changed from {session_conversation_id} to {real_conversation_id}, updating WebSocket listener immediately")
             try:
                 await update_websocket_conversation(session_id, session_conversation_id, real_conversation_id, websocket)
+                
+                # ALSO register the WebSocket under the REAL conversation ID
+                # This ensures broadcasts to the real ID will reach this WebSocket
+                await register_websocket_for_conversation(session_id, real_conversation_id, websocket)
+                
+                # Keep the optimistic registration too for backwards compatibility
+                if session_conversation_id < 0:  # It's an optimistic ID
+                    await register_websocket_for_conversation(session_id, session_conversation_id, websocket)
             except Exception as e:
                 logger.error(f"Failed to update WebSocket conversation, continuing with original: {str(e)}")
                 # Don't fail the entire message processing if the update fails
@@ -2588,10 +2692,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "conversation_id": session_conversation_id,  # Include conversation_id for client sync
                 "client_conversation_id": client_conversation_id
             }
-            try:
-                await websocket.send_text(json.dumps(error_payload_key))
-            except Exception as e:
-                logger.warning(f"Failed to send API key error to disconnected session {session_id}: {str(e)}")
+            await safe_websocket_send(error_payload_key)
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
             return session_conversation_id
 
@@ -2640,10 +2741,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "conversation_id": session_conversation_id
             }
-            try:
-                await websocket.send_text(json.dumps(error_payload))
-            except Exception as e:
-                logger.warning(f"Failed to send timeout error to session {session_id}: {str(e)}")
+            await safe_websocket_send(error_payload)
             return session_conversation_id
         except Exception as api_error:
             logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
@@ -2674,10 +2772,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "request_id": request_id,
                     "client_conversation_id": client_conversation_id
                 }
-                try:
-                    await websocket.send_text(json.dumps(error_payload))
-                except Exception as e:
-                    logger.warning(f"Failed to send tool error to disconnected session {session_id}: {str(e)}")
+                await safe_websocket_send(error_payload)
                 raise StopIteration("ToolBlockMissingError")
 
             logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
@@ -2691,10 +2786,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Add request_id and client context to Asana error response
                 tool_execution_result["request_id"] = request_id
                 tool_execution_result["client_conversation_id"] = client_conversation_id
-                try:
-                    await websocket.send_text(json.dumps(tool_execution_result))
-                except Exception as e:
-                    logger.warning(f"Failed to send Asana auth error to disconnected session {session_id}: {str(e)}")
+                await safe_websocket_send(tool_execution_result)
                 raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
 
             # If not the specific Asana auth error, proceed as before with Claude:
@@ -2770,12 +2862,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "client_message_id": client_message_id,  # Echo back optimistic message ID
                 "type": "response"  # Indicate this is a direct response (vs broadcast)
             }
-            try:
-                await websocket.send_text(json.dumps(response_payload))
+            if await safe_websocket_send(response_payload):
                 logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
-            except Exception as e:
-                logger.warning(f"Failed to send response to disconnected session {session_id}: {str(e)}")
-                # Response was still saved to database, so user will see it on reconnect
+            else:
+                logger.info(f"Response saved to database for request {request_id}, will be available on reconnect")
             
             # Mark request as completed successfully
             await set_request_state(request_id, "completed", {
@@ -2808,10 +2898,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "client_conversation_id": client_conversation_id
             }
-            try:
-                await websocket.send_text(json.dumps(error_payload))
-            except Exception as e:
-                logger.warning(f"Failed to send empty response error to disconnected session {session_id}: {str(e)}")
+            await safe_websocket_send(error_payload)
 
         return session_conversation_id
     
@@ -2838,13 +2925,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
     finally:
         # Clean up tracking
-        if request_id and redis_managers and "local_objects" in redis_managers:
-            await redis_managers["local_objects"].remove_task(request_id)
-            # 🔧 CRITICAL FIX: Use the actual session_id, not a reconstructed one
-            # The session_id is consistent throughout the connection
-            async with active_requests_lock:
-                if session_id in active_requests:
-                    active_requests[session_id].discard(request_id)
+        if request_id:
+            # Remove from local task tracking
+            if redis_managers and "local_objects" in redis_managers:
+                await redis_managers["local_objects"].remove_task(request_id)
+            
+            # Remove from active requests (both local and Redis)
+            await remove_active_request(session_id, request_id)
+            logger.debug(f"Removed request {request_id} from active requests for session {session_id}")
         
         # Clean up chat session if WebSocket is disconnected and no more active tasks
         # This ensures we don't leak memory from disconnected sessions
