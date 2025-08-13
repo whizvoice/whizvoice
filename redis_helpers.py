@@ -15,20 +15,22 @@ user_sessions = {}
 session_timestamps = {}
 active_requests = {}
 session_mappings = {}
+request_states = {}  # New: track request states
 # Locks
 chat_sessions_lock = asyncio.Lock()
 user_sessions_lock = asyncio.Lock()
 session_timestamps_lock = asyncio.Lock()
 active_requests_lock = asyncio.Lock()
 session_mappings_lock = asyncio.Lock()
+request_states_lock = asyncio.Lock()  # New: lock for request states
 
 
 def set_managers_and_storage(managers, local_storage, locks):
     """Initialize the module with Redis managers and local storage references"""
     global redis_managers, chat_sessions, user_sessions, session_timestamps
-    global active_requests, session_mappings
+    global active_requests, session_mappings, request_states
     global chat_sessions_lock, user_sessions_lock, session_timestamps_lock
-    global active_requests_lock, session_mappings_lock
+    global active_requests_lock, session_mappings_lock, request_states_lock
     
     redis_managers = managers
     chat_sessions = local_storage.get("chat_sessions", {})
@@ -36,12 +38,14 @@ def set_managers_and_storage(managers, local_storage, locks):
     session_timestamps = local_storage.get("session_timestamps", {})
     active_requests = local_storage.get("active_requests", {})
     session_mappings = local_storage.get("session_mappings", {})
+    request_states = local_storage.get("request_states", {})
     
     chat_sessions_lock = locks.get("chat_sessions_lock")
     user_sessions_lock = locks.get("user_sessions_lock")
     session_timestamps_lock = locks.get("session_timestamps_lock")
     active_requests_lock = locks.get("active_requests_lock")
     session_mappings_lock = locks.get("session_mappings_lock")
+    request_states_lock = locks.get("request_states_lock")
 
 
 # Chat Session Management
@@ -219,6 +223,41 @@ async def clear_active_requests(session_id: str):
         async with active_requests_lock:
             if session_id in active_requests:
                 del active_requests[session_id]
+
+
+# Request State Tracking
+async def set_request_state(request_id: str, state: str, metadata: Optional[Dict[str, Any]] = None):
+    """Set the state of a request (pending, completed, failed, timeout)"""
+    state_data = {
+        "state": state,
+        "timestamp": asyncio.get_event_loop().time(),
+        "metadata": metadata or {}
+    }
+    
+    if redis_managers and "request_states" in redis_managers:
+        await redis_managers["request_states"].set(request_id, state_data)
+    else:
+        async with request_states_lock:
+            request_states[request_id] = state_data
+
+
+async def get_request_state(request_id: str) -> Optional[Dict[str, Any]]:
+    """Get the state of a request"""
+    if redis_managers and "request_states" in redis_managers:
+        return await redis_managers["request_states"].get(request_id)
+    else:
+        async with request_states_lock:
+            return request_states.get(request_id)
+
+
+async def get_all_request_states(request_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Get states for multiple requests"""
+    result = {}
+    for request_id in request_ids:
+        state = await get_request_state(request_id)
+        if state:
+            result[request_id] = state
+    return result
 
 
 # Session Mapping Management (for optimistic IDs)

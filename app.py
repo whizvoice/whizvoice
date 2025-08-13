@@ -16,7 +16,7 @@ from pathlib import Path
 import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
-from anthropic import Anthropic, AuthenticationError
+from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
 from about_me_tool import about_me_tools, get_app_info
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
@@ -34,6 +34,8 @@ from redis_helpers import (
     get_stale_sessions, get_all_session_timestamps,
     # Active request functions
     add_active_request, remove_active_request, get_active_requests, clear_active_requests,
+    # Request state tracking functions
+    set_request_state, get_request_state, get_all_request_states,
     # Session mapping functions
     set_session_mapping, get_real_id, get_optimistic_id, clear_session_mappings,
     init_session_mappings,
@@ -137,9 +139,9 @@ def get_current_claude_api_key(user_id: Optional[str]) -> Optional[str]:
         return None
 
 # This dictionary will cache Anthropic clients per API key
-_anthropic_clients_cache: Dict[str, Anthropic] = {}
+_anthropic_clients_cache: Dict[str, AsyncAnthropic] = {}
 
-async def get_anthropic_client(user_id: Optional[str]) -> Optional[Anthropic]:
+async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropic]:
     api_key = get_current_claude_api_key(user_id)
     if not api_key:
         return None
@@ -148,8 +150,8 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[Anthropic]:
         if api_key in _anthropic_clients_cache:
             return _anthropic_clients_cache[api_key]
         
-        logger.info(f"Creating new Anthropic client for user {user_id} (key ending with ...{api_key[-4:] if len(api_key) > 4 else ''}).")
-        new_client = Anthropic(api_key=api_key)
+        logger.info(f"Creating new AsyncAnthropic client for user {user_id} (key ending with ...{api_key[-4:] if len(api_key) > 4 else ''}).")
+        new_client = AsyncAnthropic(api_key=api_key)
         _anthropic_clients_cache[api_key] = new_client
         return new_client
 
@@ -276,6 +278,7 @@ user_sessions = {}  # DEPRECATED - use redis_managers["user_sessions"]
 session_timestamps: Dict[str, float] = {}  # DEPRECATED - use redis_managers["session_timestamps"]
 active_requests: Dict[str, Set[str]] = {}  # DEPRECATED - use redis_managers["active_requests"]
 session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # DEPRECATED - use redis_managers["session_mappings"]
+request_states: Dict[str, Dict[str, Any]] = {}  # Track request states locally as fallback
 
 # Define the response model for the new GET endpoint
 ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
@@ -288,6 +291,7 @@ conversation_websockets_lock = asyncio.Lock()
 active_requests_lock = asyncio.Lock()
 session_mappings_lock = asyncio.Lock()
 anthropic_clients_cache_lock = asyncio.Lock()
+request_states_lock = asyncio.Lock()
 
 
 async def migrate_local_to_redis():
@@ -350,14 +354,16 @@ async def init_redis():
             "user_sessions": user_sessions,
             "session_timestamps": session_timestamps,
             "active_requests": active_requests,
-            "session_mappings": session_mappings
+            "session_mappings": session_mappings,
+            "request_states": request_states
         }
         locks = {
             "chat_sessions_lock": chat_sessions_lock,
             "user_sessions_lock": user_sessions_lock,
             "session_timestamps_lock": session_timestamps_lock,
             "active_requests_lock": active_requests_lock,
-            "session_mappings_lock": session_mappings_lock
+            "session_mappings_lock": session_mappings_lock,
+            "request_states_lock": request_states_lock
         }
         set_managers_and_storage(redis_managers, local_storage, locks)
         
@@ -2455,6 +2461,59 @@ async def get_message_count(
         logger.error(f"Error getting message count for conversation {conversation_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get message count")
 
+@app.get("/requests/{request_id}/state")
+async def get_request_state_endpoint(
+    request_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get the state of a specific request"""
+    state = await get_request_state(request_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Request state not found")
+    
+    # Verify the request belongs to the current user
+    if state.get("metadata", {}).get("user_id") != current_user.get("sub"):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return state
+
+@app.post("/conversations/{conversation_id}/sync")
+async def sync_missed_messages(
+    conversation_id: Union[int, str],
+    since_timestamp: Optional[float] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Sync any messages that may have been missed during disconnection"""
+    try:
+        user_id = current_user.get("sub")
+        
+        # Resolve conversation ID
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Get messages from database
+        query = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id)
+        
+        if since_timestamp:
+            # Convert timestamp to ISO format for Supabase
+            from datetime import datetime
+            since_datetime = datetime.fromtimestamp(since_timestamp).isoformat()
+            query = query.gt("created_at", since_datetime)
+        
+        result = query.order("created_at", desc=False).execute()
+        
+        return {
+            "conversation_id": actual_conversation_id,
+            "messages": result.data,
+            "count": len(result.data)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error syncing messages for conversation {conversation_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to sync messages")
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
@@ -2463,6 +2522,15 @@ async def catch_all(path: str, request: Request):
 async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None):
     """Process a single message in a cancellable task"""
     try:
+        # Track request state as pending
+        await set_request_state(request_id, "pending", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "user_id": user_id,
+            "message": message[:100],  # Store first 100 chars for debugging
+            "start_time": time.time()
+        })
+        
         messages = await get_chat_messages(session_id)
         logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(messages)}")
         
@@ -2529,20 +2597,69 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # Check for cancellation before making API call
         if asyncio.current_task().cancelled():
+            await set_request_state(request_id, "cancelled", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id
+            })
             return session_conversation_id
 
-        response = current_anthropic_client.beta.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=await get_chat_messages(session_id),
-            system=CLAUDE_SYSTEM_PROMPT,
-            tools=tools,
-            tool_choice={"type": "auto"},
-            betas=["token-efficient-tools-2025-02-19"]
-        )
+        # Update state to processing
+        await set_request_state(request_id, "processing", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "api_call_start": time.time()
+        })
+
+        try:
+            # Use async API call with timeout
+            response = await asyncio.wait_for(
+                current_anthropic_client.beta.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=1000,
+                    messages=await get_chat_messages(session_id),
+                    system=CLAUDE_SYSTEM_PROMPT,
+                    tools=tools,
+                    tool_choice={"type": "auto"},
+                    betas=["token-efficient-tools-2025-02-19"]
+                ),
+                timeout=60.0  # 60 second timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Claude API timeout for request {request_id} after 60 seconds")
+            await set_request_state(request_id, "timeout", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "error": "Claude API call timed out after 60 seconds"
+            })
+            
+            # Send timeout error to client
+            error_payload = {
+                "type": "error",
+                "code": "CLAUDE_TIMEOUT",
+                "message": "Claude API request timed out. Please try again.",
+                "request_id": request_id,
+                "conversation_id": session_conversation_id
+            }
+            try:
+                await websocket.send_text(json.dumps(error_payload))
+            except Exception as e:
+                logger.warning(f"Failed to send timeout error to session {session_id}: {str(e)}")
+            return session_conversation_id
+        except Exception as api_error:
+            logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
+            await set_request_state(request_id, "failed", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "error": str(api_error)
+            })
+            raise
 
         # Check for cancellation after API call
         if asyncio.current_task().cancelled():
+            await set_request_state(request_id, "cancelled", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id
+            })
             return session_conversation_id
 
         # Handle tool calls
@@ -2596,15 +2713,28 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "content": json.dumps(tool_execution_result) 
                 }]})
             
-            response = current_anthropic_client.beta.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=1000,
-                messages=await get_chat_messages(session_id),
-                system=CLAUDE_SYSTEM_PROMPT,
-                tools=tools,
-                tool_choice={"type": "auto"},
-                betas=["token-efficient-tools-2025-02-19"]
-            )
+            # Use async API call for tool response
+            try:
+                response = await asyncio.wait_for(
+                    current_anthropic_client.beta.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=1000,
+                        messages=await get_chat_messages(session_id),
+                        system=CLAUDE_SYSTEM_PROMPT,
+                        tools=tools,
+                        tool_choice={"type": "auto"},
+                        betas=["token-efficient-tools-2025-02-19"]
+                    ),
+                    timeout=60.0  # 60 second timeout for tool responses too
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Claude API timeout during tool use for request {request_id}")
+                await set_request_state(request_id, "timeout", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "error": "Claude API timed out during tool use"
+                })
+                raise
         
         # Add assistant final response to session history (if not an intercepted error)
         async with chat_sessions_lock:
@@ -2647,6 +2777,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.warning(f"Failed to send response to disconnected session {session_id}: {str(e)}")
                 # Response was still saved to database, so user will see it on reconnect
             
+            # Mark request as completed successfully
+            await set_request_state(request_id, "completed", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "response_sent": True,
+                "completion_time": time.time()
+            })
+            
             # Broadcast to other WebSocket sessions for the same conversation
             # Use same format as regular response so clients can process it correctly
             broadcast_payload = {
@@ -2676,6 +2814,27 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.warning(f"Failed to send empty response error to disconnected session {session_id}: {str(e)}")
 
         return session_conversation_id
+    
+    except asyncio.CancelledError:
+        # Handle task cancellation
+        logger.info(f"Request {request_id} was cancelled")
+        await set_request_state(request_id, "cancelled", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "cancelled_at": time.time()
+        })
+        raise
+    
+    except Exception as e:
+        # Track any other errors
+        logger.error(f"Error processing request {request_id}: {str(e)}")
+        await set_request_state(request_id, "failed", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "error": str(e),
+            "error_time": time.time()
+        })
+        raise
         
     finally:
         # Clean up tracking

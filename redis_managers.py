@@ -356,6 +356,44 @@ class ConnectionTracker:
         self.local_conversations[new_conv_id].append((session_id, websocket))
 
 
+class RequestStateManager:
+    """Manages request state tracking in Redis"""
+    
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+        self.ttl = 3600  # 1 hour TTL for request states
+    
+    async def set(self, request_id: str, state_data: Dict[str, Any]):
+        """Set the state of a request"""
+        await self.redis.set(
+            f"request_state:{request_id}",
+            json.dumps(state_data),
+            ex=self.ttl
+        )
+    
+    async def get(self, request_id: str) -> Optional[Dict[str, Any]]:
+        """Get the state of a request"""
+        data = await self.redis.get(f"request_state:{request_id}")
+        return json.loads(data) if data else None
+    
+    async def delete(self, request_id: str):
+        """Delete a request state"""
+        await self.redis.delete(f"request_state:{request_id}")
+    
+    async def exists(self, request_id: str) -> bool:
+        """Check if a request state exists"""
+        return await self.redis.exists(f"request_state:{request_id}")
+    
+    async def get_multiple(self, request_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Get states for multiple requests"""
+        result = {}
+        for request_id in request_ids:
+            state = await self.get(request_id)
+            if state:
+                result[request_id] = state
+        return result
+
+
 class LocalObjectManager:
     """
     Manages objects that must stay local (can't be serialized to Redis).
@@ -480,6 +518,7 @@ def create_managers(redis_client: redis.Redis) -> Dict[str, Any]:
         "session_timestamps": SessionTimestampManager(redis_client),
         "active_requests": ActiveRequestManager(redis_client),
         "session_mappings": SessionMappingManager(redis_client),
+        "request_states": RequestStateManager(redis_client),
         "connection_tracker": ConnectionTracker(redis_client),
         "local_objects": LocalObjectManager()
     }
