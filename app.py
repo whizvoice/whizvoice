@@ -2885,8 +2885,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "client_message_id": client_message_id,  # Include for completeness
                 "type": "broadcast"  # Keep type to indicate it's a broadcast
             }
-            await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=session_id)
-            logger.info(f"Broadcasted assistant message to other sessions for conversation {session_conversation_id}")
+            # Bot responses should go to ALL sessions - they originate from the server, not from any client session
+            await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
+            logger.info(f"Broadcasted assistant message to all sessions for conversation {session_conversation_id}")
             
             # Opportunistically clean up expired cache entries after successful response
         elif response.content: 
