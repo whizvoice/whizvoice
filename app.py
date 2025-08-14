@@ -1398,6 +1398,7 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
     # First, try Redis pub/sub for cross-process broadcasting
     if redis_client:
         try:
+            # Publish to the real conversation ID channel
             channel_name = f"conversation:{conversation_id}"
             message_data = {
                 "payload": message_payload,
@@ -1405,6 +1406,22 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             }
             await redis_client.publish(channel_name, json.dumps(message_data))
             logger.info(f"Published message to Redis channel {channel_name} (excluding session: {exclude_session})")
+            
+            # ALSO publish to any optimistic conversation ID channels
+            # Look up if this real ID has an associated optimistic ID
+            try:
+                opt_result = supabase.table("conversations")\
+                    .select("optimistic_chat_id")\
+                    .eq("id", conversation_id)\
+                    .execute()
+                
+                if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
+                    optimistic_id = opt_result.data[0]["optimistic_chat_id"]
+                    opt_channel_name = f"conversation:{optimistic_id}"
+                    await redis_client.publish(opt_channel_name, json.dumps(message_data))
+                    logger.info(f"Also published message to optimistic Redis channel {opt_channel_name}")
+            except Exception as opt_e:
+                logger.warning(f"Could not check for optimistic ID for conversation {conversation_id}: {str(opt_e)}")
         except Exception as e:
             logger.error(f"Failed to publish to Redis: {str(e)}")
     
@@ -1417,17 +1434,32 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             connections.extend(conversation_websockets[conversation_id])
         
         # ALSO check for any optimistic conversation IDs that map to this real ID
-        # Look through session_mappings to find optimistic IDs
+        # First check the database for the optimistic ID
+        try:
+            opt_result = supabase.table("conversations")\
+                .select("optimistic_chat_id")\
+                .eq("id", conversation_id)\
+                .execute()
+            
+            if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
+                optimistic_id = int(opt_result.data[0]["optimistic_chat_id"])
+                if optimistic_id in conversation_websockets:
+                    logger.info(f"Found WebSockets registered under optimistic ID {optimistic_id} for real conversation {conversation_id}")
+                    connections.extend(conversation_websockets[optimistic_id])
+        except Exception as e:
+            logger.warning(f"Could not check for optimistic ID in database: {str(e)}")
+        
+        # Also check session_mappings as a fallback
         optimistic_ids = set()
         for session_id, mappings in session_mappings.items():
             for opt_id, real_id in mappings.get("optimistic_to_real", {}).items():
                 if real_id == conversation_id:
                     optimistic_ids.add(opt_id)
         
-        # Check for WebSockets registered under optimistic IDs
+        # Check for WebSockets registered under optimistic IDs from mappings
         for opt_id in optimistic_ids:
-            if opt_id in conversation_websockets:
-                logger.info(f"Found WebSockets registered under optimistic ID {opt_id} for real conversation {conversation_id}")
+            if opt_id in conversation_websockets and opt_id not in connections:
+                logger.info(f"Found WebSockets registered under optimistic ID {opt_id} (from mappings) for real conversation {conversation_id}")
                 connections.extend(conversation_websockets[opt_id])
         
         if not connections:
