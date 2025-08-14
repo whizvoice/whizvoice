@@ -1817,6 +1817,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
         # Save the message
+        logger.info(f"Attempting to save {message_type} message to conversation_id={conversation_id}, request_id={request_id}")
         result = supabase.table("messages").insert({
             "conversation_id": conversation_id,
             "content": content,
@@ -1825,16 +1826,26 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         }).execute()
         
         if not result.data:
-            logger.error(f"Failed to save message to conversation {conversation_id}")
+            logger.error(f"Failed to save {message_type} message to conversation {conversation_id} - no data returned from insert")
             return None
         
+        # Extract the saved message ID
+        saved_message = result.data[0]
+        message_id = saved_message.get("id")
+        saved_conv_id = saved_message.get("conversation_id")
+        logger.info(f"Successfully saved {message_type} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}")
+        
         # Update conversation last_message_time and updated_at for incremental sync
-        supabase.table("conversations").update({
+        update_result = supabase.table("conversations").update({
             "last_message_time": "now()",
             "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
         }).eq("id", conversation_id).execute()
         
-        logger.info(f"Successfully saved {message_type} message to conversation {conversation_id}")
+        if update_result.data:
+            logger.info(f"Updated conversation {conversation_id} timestamps for {message_type} message")
+        else:
+            logger.warning(f"Failed to update conversation {conversation_id} timestamps")
+        
         return conversation_id
         
     except Exception as e:
@@ -2857,8 +2868,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             assistant_response_text = response.content[0].text
             
             # Save assistant message to database
-            logger.info(f"About to save assistant message to conversation {session_conversation_id}")
-            save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
+            logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, content_preview='{assistant_response_text[:50]}...'")
+            saved_conversation_id = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
+            if saved_conversation_id:
+                logger.info(f"ASSISTANT message saved successfully to conversation_id={saved_conversation_id} (original session_conversation_id={session_conversation_id})")
+            else:
+                logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
             
             # Send structured response with request_id and conversation_id
             response_payload = {
@@ -2872,7 +2887,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             if await safe_websocket_send(response_payload):
                 logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
             else:
-                logger.info(f"Response saved to database for request {request_id}, will be available on reconnect")
+                logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
             
             # Mark request as completed successfully
             await set_request_state(request_id, "completed", {
