@@ -13,34 +13,30 @@ redis_managers = None
 chat_sessions = {}
 user_sessions = {}
 session_timestamps = {}
-session_mappings = {}
 request_states = {}  # New: track request states
 # Locks
 chat_sessions_lock = asyncio.Lock()
 user_sessions_lock = asyncio.Lock()
 session_timestamps_lock = asyncio.Lock()
-session_mappings_lock = asyncio.Lock()
 request_states_lock = asyncio.Lock()  # New: lock for request states
 
 
 def set_managers_and_storage(managers, local_storage, locks):
     """Initialize the module with Redis managers and local storage references"""
     global redis_managers, chat_sessions, user_sessions, session_timestamps
-    global session_mappings, request_states
+    global request_states
     global chat_sessions_lock, user_sessions_lock, session_timestamps_lock
-    global session_mappings_lock, request_states_lock
+    global request_states_lock
     
     redis_managers = managers
     chat_sessions = local_storage.get("chat_sessions", {})
     user_sessions = local_storage.get("user_sessions", {})
     session_timestamps = local_storage.get("session_timestamps", {})
-    session_mappings = local_storage.get("session_mappings", {})
     request_states = local_storage.get("request_states", {})
     
     chat_sessions_lock = locks.get("chat_sessions_lock")
     user_sessions_lock = locks.get("user_sessions_lock")
     session_timestamps_lock = locks.get("session_timestamps_lock")
-    session_mappings_lock = locks.get("session_mappings_lock")
     request_states_lock = locks.get("request_states_lock")
 
 
@@ -248,53 +244,28 @@ async def set_session_mapping(session_id: str, client_id: int, real_id: int):
     """Set optimistic ID mapping for a session"""
     if redis_managers:
         await redis_managers["session_mappings"].set_mapping(session_id, client_id, real_id)
-    else:
-        async with session_mappings_lock:
-            if session_id not in session_mappings:
-                session_mappings[session_id] = {"optimistic_to_real": {}, "real_to_optimistic": {}}
-            session_mappings[session_id]["optimistic_to_real"][client_id] = real_id
-            session_mappings[session_id]["real_to_optimistic"][real_id] = client_id
 
 
 async def get_real_id(session_id: str, client_id: int) -> Optional[int]:
     """Get real ID from optimistic client ID"""
     if redis_managers:
         return await redis_managers["session_mappings"].get_real_id(session_id, client_id)
-    else:
-        async with session_mappings_lock:
-            mappings = session_mappings.get(session_id, {})
-            return mappings.get("optimistic_to_real", {}).get(client_id)
+    return None
 
 
 async def get_optimistic_id(session_id: str, real_id: int) -> Optional[int]:
     """Get optimistic client ID from real ID"""
     if redis_managers:
         return await redis_managers["session_mappings"].get_optimistic_id(session_id, real_id)
-    else:
-        async with session_mappings_lock:
-            mappings = session_mappings.get(session_id, {})
-            return mappings.get("real_to_optimistic", {}).get(real_id)
+    return None
 
 
 async def clear_session_mappings(session_id: str):
     """Clear all mappings for a session"""
     if redis_managers:
         await redis_managers["session_mappings"].clear(session_id)
-    else:
-        async with session_mappings_lock:
-            if session_id in session_mappings:
-                del session_mappings[session_id]
 
 
-async def init_session_mappings(session_id: str):
-    """Initialize empty mappings for a new session"""
-    if not redis_managers:
-        # Only needed for local storage
-        async with session_mappings_lock:
-            session_mappings[session_id] = {
-                "optimistic_to_real": {},
-                "real_to_optimistic": {}
-            }
 
 
 # Session count helpers

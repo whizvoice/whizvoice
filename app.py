@@ -38,7 +38,6 @@ from redis_helpers import (
     set_request_state, get_request_state, get_all_request_states,
     # Session mapping functions
     set_session_mapping, get_real_id, get_optimistic_id, clear_session_mappings,
-    init_session_mappings,
     # Utility functions
     get_total_session_count, get_user_session_count,
     # Module initialization
@@ -273,7 +272,6 @@ redis_managers = None  # Will be initialized after Redis connection
 chat_sessions = {}  # DEPRECATED - use redis_managers["chat_sessions"]
 user_sessions = {}  # DEPRECATED - use redis_managers["user_sessions"]
 session_timestamps: Dict[str, float] = {}  # DEPRECATED - use redis_managers["session_timestamps"]
-session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # DEPRECATED - use redis_managers["session_mappings"]
 request_states: Dict[str, Dict[str, Any]] = {}  # Track request states locally as fallback
 
 # Define the response model for the new GET endpoint
@@ -283,7 +281,6 @@ ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
 chat_sessions_lock = asyncio.Lock()
 user_sessions_lock = asyncio.Lock()
 session_timestamps_lock = asyncio.Lock()
-session_mappings_lock = asyncio.Lock()
 anthropic_clients_cache_lock = asyncio.Lock()
 request_states_lock = asyncio.Lock()
 
@@ -309,10 +306,7 @@ async def migrate_local_to_redis():
         
         # Active requests are now fully managed by Redis - no migration needed
         
-        # Migrate session mappings
-        for session_id, mappings in session_mappings.items():
-            for client_id, real_id in mappings.get("optimistic_to_real", {}).items():
-                await redis_managers["session_mappings"].set_mapping(session_id, client_id, real_id)
+        # Session mappings migration no longer needed - removed deprecated local storage
         
         if chat_sessions or user_sessions or session_timestamps:
             logger.info(f"Migrated local data to Redis: {len(chat_sessions)} chat sessions, "
@@ -344,14 +338,12 @@ async def init_redis():
             "chat_sessions": chat_sessions,
             "user_sessions": user_sessions,
             "session_timestamps": session_timestamps,
-            "session_mappings": session_mappings,
             "request_states": request_states
         }
         locks = {
             "chat_sessions_lock": chat_sessions_lock,
             "user_sessions_lock": user_sessions_lock,
             "session_timestamps_lock": session_timestamps_lock,
-            "session_mappings_lock": session_mappings_lock,
             "request_states_lock": request_states_lock
         }
         set_managers_and_storage(redis_managers, local_storage, locks)
@@ -1081,9 +1073,6 @@ async def websocket_endpoint(websocket: WebSocket):
         # IMPORTANT: Must happen AFTER adding new session to get accurate count
         await evict_user_sessions_if_needed(user_id, session_id)
         
-        # Initialize session mappings for optimistic ID tracking
-        await init_session_mappings(session_id)
-        
         try:
             while True:
                 try:
@@ -1188,10 +1177,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         if has_active_requests:
                             # Validate interrupt context if optimistic ID provided
-                            if client_conversation_id and session_id in session_mappings:
-                                async with session_mappings_lock:
-                                    mappings = session_mappings.get(session_id, {})
-                                    real_id = mappings.get("optimistic_to_real", {}).get(client_conversation_id)
+                            if client_conversation_id and redis_managers and "session_mappings" in redis_managers:
+                                real_id = await redis_managers["session_mappings"].get_real_id(
+                                    session_id, client_conversation_id
+                                )
                                 
                                 if real_id and real_id != session_conversation_id:
                                     logger.warning(f"Interrupt attempt with mismatched conversation context: "
@@ -1439,19 +1428,13 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
         except Exception as e:
             logger.warning(f"Could not check for optimistic ID in database: {str(e)}")
         
-        # Also check session_mappings as a fallback
-        optimistic_ids = set()
-        for session_id, mappings in session_mappings.items():
-            for opt_id, real_id in mappings.get("optimistic_to_real", {}).items():
-                if real_id == conversation_id:
-                    optimistic_ids.add(opt_id)
-        
-        # Check for WebSockets registered under optimistic IDs from mappings
-        for opt_id in optimistic_ids:
-            opt_connections = await redis_managers["local_objects"].get_conversation_websockets(opt_id)
-            if opt_connections:
-                logger.info(f"Found WebSockets registered under optimistic ID {opt_id} (from mappings) for real conversation {conversation_id}")
-                connections.extend(opt_connections)
+        # Also check Redis session_mappings as a fallback
+        # Note: This requires iterating through all sessions since Redis doesn't have reverse mapping lookup
+        # In practice, this fallback should rarely be needed since the database stores optimistic IDs
+        if redis_managers and "session_mappings" in redis_managers:
+            # For now, log that we're skipping this check since it would be inefficient
+            # The database check above should handle most cases
+            logger.debug(f"Skipping exhaustive session_mappings check for conversation {conversation_id}")
     
     if not connections:
         logger.info(f"No local WebSocket sessions registered for conversation {conversation_id} (checked real and optimistic IDs)")
@@ -2668,25 +2651,35 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Update optimistic → real mapping if client provided optimistic ID
         if client_conversation_id and client_conversation_id < 0 and real_conversation_id:
-            async with session_mappings_lock:
-                if session_id in session_mappings:
-                    mappings = session_mappings[session_id]
-                    mappings["optimistic_to_real"][client_conversation_id] = real_conversation_id
-                    mappings["real_to_optimistic"][real_conversation_id] = client_conversation_id
+            if redis_managers and "session_mappings" in redis_managers:
+                try:
+                    await redis_managers["session_mappings"].set_mapping(
+                        session_id, client_conversation_id, real_conversation_id
+                    )
                     logger.info(f"Mapped optimistic ID {client_conversation_id} → real ID {real_conversation_id}")
+                except ValueError as e:
+                    # This shouldn't happen in normal operation, but if it does, log it and continue
+                    logger.error(f"Failed to set optimistic mapping: {str(e)}")
+                    # Send error to client so they know something went wrong
+                    error_payload = {
+                        "type": "error",
+                        "code": "MAPPING_CONFLICT",
+                        "message": "Conversation mapping conflict detected. Please refresh the page.",
+                        "request_id": request_id,
+                        "conversation_id": real_conversation_id
+                    }
+                    await safe_websocket_send(error_payload)
         
         # CRITICAL FIX: Update WebSocket listener IMMEDIATELY when conversation ID changes
         # This must happen BEFORE we start broadcasting to the new conversation ID
         if real_conversation_id and real_conversation_id != session_conversation_id:
             logger.info(f"Conversation ID changed from {session_conversation_id} to {real_conversation_id}, updating WebSocket listener immediately")
             try:
+                # This moves the WebSocket registration from old to new conversation ID
                 await update_websocket_conversation(session_id, session_conversation_id, real_conversation_id, websocket)
                 
-                # ALSO register the WebSocket under the REAL conversation ID
-                # This ensures broadcasts to the real ID will reach this WebSocket
-                await register_websocket_for_conversation(session_id, real_conversation_id, websocket)
-                
                 # Keep the optimistic registration too for backwards compatibility
+                # This allows broadcasts to either the optimistic or real ID to reach this WebSocket
                 if session_conversation_id is not None and session_conversation_id < 0:  # It's an optimistic ID
                     await register_websocket_for_conversation(session_id, session_conversation_id, websocket)
             except Exception as e:

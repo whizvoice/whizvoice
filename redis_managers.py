@@ -214,6 +214,16 @@ class SessionMappingManager:
         
     async def set_mapping(self, session_id: str, client_id: int, real_id: int):
         """Set optimistic to real ID mapping"""
+        # CRITICAL VALIDATION: Check if this real_id already has a different optimistic mapping
+        existing_optimistic = await self.get_optimistic_id(session_id, real_id)
+        if existing_optimistic is not None and existing_optimistic != client_id:
+            logger.error(f"CRITICAL: Multiple optimistic IDs mapping to same real ID! "
+                        f"Session {session_id}: existing optimistic {existing_optimistic} "
+                        f"conflicts with new optimistic {client_id} for real ID {real_id}")
+            # Raise an exception to prevent data corruption
+            raise ValueError(f"Real conversation {real_id} already mapped to optimistic ID {existing_optimistic}, "
+                           f"cannot map to {client_id}")
+        
         # Store both directions
         await self.redis.hset(
             f"session_mapping:{session_id}:opt_to_real",
