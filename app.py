@@ -1139,6 +1139,15 @@ async def websocket_endpoint(websocket: WebSocket):
                             except (ValueError, TypeError):
                                 # If it's not a valid number, log and continue with original value
                                 logger.warning(f"client_conversation_id is not a valid number: {client_conversation_id} (type: {type(client_conversation_id)})")
+                        
+                        # If session_conversation_id is None (new conversation) and we have an optimistic ID, use it
+                        if session_conversation_id is None and client_conversation_id is not None and client_conversation_id < 0:
+                            logger.info(f"Setting session_conversation_id to optimistic ID {client_conversation_id} for new conversation")
+                            session_conversation_id = client_conversation_id
+                            # Register and subscribe to this optimistic conversation ID
+                            # This ensures the WebSocket can receive broadcasts immediately
+                            await register_websocket_for_conversation(session_id, client_conversation_id, websocket)
+                            await subscribe_to_conversation(session_id, client_conversation_id, websocket)
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -2668,7 +2677,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 await register_websocket_for_conversation(session_id, real_conversation_id, websocket)
                 
                 # Keep the optimistic registration too for backwards compatibility
-                if session_conversation_id < 0:  # It's an optimistic ID
+                if session_conversation_id is not None and session_conversation_id < 0:  # It's an optimistic ID
                     await register_websocket_for_conversation(session_id, session_conversation_id, websocket)
             except Exception as e:
                 logger.error(f"Failed to update WebSocket conversation, continuing with original: {str(e)}")
