@@ -987,8 +987,28 @@ async def websocket_endpoint(websocket: WebSocket):
                     capacity_percent = (total_sessions / MAX_TOTAL_SESSIONS) * 100
                     logger.warning(f"Session count high: {total_sessions}/{MAX_TOTAL_SESSIONS} ({capacity_percent:.1f}% capacity)")
                 
+                # CRITICAL FIX: Resolve optimistic conversation IDs to real IDs before setting up the session
+                # This ensures we subscribe to the correct Redis channel and track the correct conversation
+                actual_conversation_id = conversation_id
+                if conversation_id is not None and conversation_id < 0:
+                    # This is an optimistic ID, check if it has a real ID in the database
+                    logger.info(f"Checking if optimistic conversation ID {conversation_id} has been migrated to a real ID")
+                    opt_result = supabase.table("conversations")\
+                        .select("id")\
+                        .eq("user_id", user_id)\
+                        .eq("optimistic_chat_id", str(conversation_id))\
+                        .execute()
+                    
+                    if opt_result.data and len(opt_result.data) > 0:
+                        actual_conversation_id = opt_result.data[0]["id"]
+                        logger.info(f"Optimistic ID {conversation_id} has been migrated to real ID {actual_conversation_id}, will use real ID for session")
+                    else:
+                        logger.info(f"Optimistic ID {conversation_id} has not been migrated yet, will use optimistic ID")
+                
                 # Load conversation history and initialize session
                 # Create a unique session ID per conversation, not just per user
+                # Note: We keep the original conversation_id in the session_id for consistency,
+                # but use actual_conversation_id for all operations
                 if conversation_id is not None:
                     session_id = f"ws_{user_id}_conv_{conversation_id}"
                 else:
@@ -998,37 +1018,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 # IMPORTANT: Track session immediately to ensure cleanup even if errors occur
                 await update_session_activity_redis(session_id)
                 
-                conversation_history = load_conversation_history(user_id, conversation_id)
+                # Use actual_conversation_id for loading history (it already handles optimistic IDs internally,
+                # but we've already resolved it so we can pass the real ID directly)
+                conversation_history = load_conversation_history(user_id, actual_conversation_id)
                 
                 await set_chat_messages(session_id, conversation_history)
                 
                 logger.info(f"Created session {session_id} with {len(conversation_history)} messages")
                 
-                # Track the current conversation_id for this session
-                session_conversation_id = conversation_id
+                # Track the actual conversation_id for this session (not the optimistic one)
+                session_conversation_id = actual_conversation_id
                 
-                # Register WebSocket with conversation for broadcasting
-                if conversation_id is not None:
-                    await register_websocket_for_conversation(session_id, conversation_id, websocket)
+                # Register WebSocket with the actual conversation for broadcasting
+                if actual_conversation_id is not None:
+                    await register_websocket_for_conversation(session_id, actual_conversation_id, websocket)
                     
-                    # If this is a positive (real) conversation ID, also check if we have
-                    # any optimistic mappings that point to it and register those too
-                    if conversation_id > 0:
-                        # Check if any optimistic IDs map to this real ID
-                        async with session_mappings_lock:
-                            if session_id in session_mappings:
-                                for opt_id, real_id in session_mappings[session_id].get("optimistic_to_real", {}).items():
-                                    if real_id == conversation_id:
-                                        # Also register under the optimistic ID
-                                        await register_websocket_for_conversation(session_id, opt_id, websocket)
-                                        logger.info(f"Also registered WebSocket under optimistic ID {opt_id} for real conversation {conversation_id}")
-                    
-                    # Subscribe to Redis channel for this conversation
-                    await subscribe_to_conversation(session_id, conversation_id, websocket)
+                    # Subscribe to Redis channel for the actual conversation (not the optimistic ID)
+                    await subscribe_to_conversation(session_id, actual_conversation_id, websocket)
                 
                 # FIXED: Don't automatically load existing conversation when conversation_id is None
                 # This allows new chats to create fresh conversations instead of reusing old ones
-                if conversation_id is None:
+                if actual_conversation_id is None:
                     # For new chats, keep session_conversation_id as None until first message creates it
                     logger.info(f"New chat session - will create conversation on first message")
                 
@@ -1041,6 +1051,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.info(f"Loaded {len(conversation_history)} messages from conversation history for user {user_id}")
                 else:
                     logger.info(f"New chat session - no conversation history, UI will show placeholder text")
+                
+                # Log the resolution if it happened
+                if conversation_id != actual_conversation_id:
+                    logger.info(f"WebSocket connected with optimistic ID {conversation_id}, resolved to real ID {actual_conversation_id}")
                     
             except JWTError as e:
                 logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
