@@ -276,7 +276,6 @@ conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}
 chat_sessions = {}  # DEPRECATED - use redis_managers["chat_sessions"]
 user_sessions = {}  # DEPRECATED - use redis_managers["user_sessions"]
 session_timestamps: Dict[str, float] = {}  # DEPRECATED - use redis_managers["session_timestamps"]
-active_requests: Dict[str, Set[str]] = {}  # DEPRECATED - use redis_managers["active_requests"]
 session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # DEPRECATED - use redis_managers["session_mappings"]
 request_states: Dict[str, Dict[str, Any]] = {}  # Track request states locally as fallback
 
@@ -288,7 +287,6 @@ chat_sessions_lock = asyncio.Lock()
 user_sessions_lock = asyncio.Lock()
 session_timestamps_lock = asyncio.Lock()
 conversation_websockets_lock = asyncio.Lock()
-active_requests_lock = asyncio.Lock()
 session_mappings_lock = asyncio.Lock()
 anthropic_clients_cache_lock = asyncio.Lock()
 request_states_lock = asyncio.Lock()
@@ -313,10 +311,7 @@ async def migrate_local_to_redis():
         for session_id, timestamp in session_timestamps.items():
             await redis_managers["session_timestamps"].update(session_id, timestamp)
         
-        # Migrate active requests
-        for session_id, request_ids in active_requests.items():
-            for request_id in request_ids:
-                await redis_managers["active_requests"].add(session_id, request_id)
+        # Active requests are now fully managed by Redis - no migration needed
         
         # Migrate session mappings
         for session_id, mappings in session_mappings.items():
@@ -353,7 +348,6 @@ async def init_redis():
             "chat_sessions": chat_sessions,
             "user_sessions": user_sessions,
             "session_timestamps": session_timestamps,
-            "active_requests": active_requests,
             "session_mappings": session_mappings,
             "request_states": request_states
         }
@@ -361,7 +355,6 @@ async def init_redis():
             "chat_sessions_lock": chat_sessions_lock,
             "user_sessions_lock": user_sessions_lock,
             "session_timestamps_lock": session_timestamps_lock,
-            "active_requests_lock": active_requests_lock,
             "session_mappings_lock": session_mappings_lock,
             "request_states_lock": request_states_lock
         }
@@ -1159,28 +1152,30 @@ async def websocket_endpoint(websocket: WebSocket):
                             if task:
                                 logger.info(f"Cancelling request {cancel_request_id}")
                         
-                        # Remove from active requests tracking
-                        async with active_requests_lock:
-                            if session_id in active_requests:
-                                active_requests[session_id].discard(cancel_request_id)
-                            
-                            # Send cancellation confirmation
-                            cancel_response = {
-                                "type": "cancelled",
-                                "cancelled_request_id": cancel_request_id,
-                                "request_id": request_id
-                            }
-                            await websocket.send_text(json.dumps(cancel_response))
+                        # Remove from active requests tracking in Redis
+                        if redis_managers and "active_requests" in redis_managers:
+                            await redis_managers["active_requests"].remove(session_id, cancel_request_id)
+                        
+                        # Send cancellation confirmation
+                        cancel_response = {
+                            "type": "cancelled",
+                            "cancelled_request_id": cancel_request_id,
+                            "request_id": request_id
+                        }
+                        await websocket.send_text(json.dumps(cancel_response))
                         continue
                     
                     # Handle regular messages
                     if message_type == "message" and message:
                         # Check for active requests and handle interrupts
-                        async with active_requests_lock:
-                            has_active_requests = session_id in active_requests and active_requests[session_id]
+                        has_active_requests = False
+                        active_request_ids = []
+                        if redis_managers and "active_requests" in redis_managers:
+                            active_request_ids = list(await redis_managers["active_requests"].get_all(session_id))
+                            has_active_requests = len(active_request_ids) > 0
                             if has_active_requests:
-                                active_request_ids = list(active_requests[session_id])
-                                active_requests[session_id].clear()
+                                # Clear all active requests for this session in Redis
+                                await redis_managers["active_requests"].clear(session_id)
                         
                         if has_active_requests:
                             # Validate interrupt context if optimistic ID provided
@@ -1225,12 +1220,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         
                         # Track the task
-                        if request_id and redis_managers and "local_objects" in redis_managers:
-                            await redis_managers["local_objects"].add_task(request_id, task)
-                            async with active_requests_lock:
-                                if session_id not in active_requests:
-                                    active_requests[session_id] = set()
-                                active_requests[session_id].add(request_id)
+                        if request_id and redis_managers:
+                            if "local_objects" in redis_managers:
+                                await redis_managers["local_objects"].add_task(request_id, task)
+                            if "active_requests" in redis_managers:
+                                await redis_managers["active_requests"].add(session_id, request_id)
                         
                         # Wait for task completion and update session_conversation_id
                         try:
@@ -1249,19 +1243,19 @@ async def websocket_endpoint(websocket: WebSocket):
                         except asyncio.CancelledError:
                             logger.info(f"Request {request_id} was cancelled")
                             # Clean up tracking
-                            if request_id and redis_managers and "local_objects" in redis_managers:
-                                await redis_managers["local_objects"].remove_task(request_id)
-                                async with active_requests_lock:
-                                    if session_id in active_requests:
-                                        active_requests[session_id].discard(request_id)
+                            if request_id and redis_managers:
+                                if "local_objects" in redis_managers:
+                                    await redis_managers["local_objects"].remove_task(request_id)
+                                if "active_requests" in redis_managers:
+                                    await redis_managers["active_requests"].remove(session_id, request_id)
                         except Exception as e:
                             logger.error(f"Error processing message: {e}")
                             # Clean up tracking
-                            if request_id and redis_managers and "local_objects" in redis_managers:
-                                await redis_managers["local_objects"].remove_task(request_id)
-                                async with active_requests_lock:
-                                    if session_id in active_requests:
-                                        active_requests[session_id].discard(request_id)
+                            if request_id and redis_managers:
+                                if "local_objects" in redis_managers:
+                                    await redis_managers["local_objects"].remove_task(request_id)
+                                if "active_requests" in redis_managers:
+                                    await redis_managers["active_requests"].remove(session_id, request_id)
                             raise
 
                 except AuthenticationError as claude_auth_exc: # MODIFIED: Use AuthenticationError directly

@@ -13,14 +13,12 @@ redis_managers = None
 chat_sessions = {}
 user_sessions = {}
 session_timestamps = {}
-active_requests = {}
 session_mappings = {}
 request_states = {}  # New: track request states
 # Locks
 chat_sessions_lock = asyncio.Lock()
 user_sessions_lock = asyncio.Lock()
 session_timestamps_lock = asyncio.Lock()
-active_requests_lock = asyncio.Lock()
 session_mappings_lock = asyncio.Lock()
 request_states_lock = asyncio.Lock()  # New: lock for request states
 
@@ -28,22 +26,20 @@ request_states_lock = asyncio.Lock()  # New: lock for request states
 def set_managers_and_storage(managers, local_storage, locks):
     """Initialize the module with Redis managers and local storage references"""
     global redis_managers, chat_sessions, user_sessions, session_timestamps
-    global active_requests, session_mappings, request_states
+    global session_mappings, request_states
     global chat_sessions_lock, user_sessions_lock, session_timestamps_lock
-    global active_requests_lock, session_mappings_lock, request_states_lock
+    global session_mappings_lock, request_states_lock
     
     redis_managers = managers
     chat_sessions = local_storage.get("chat_sessions", {})
     user_sessions = local_storage.get("user_sessions", {})
     session_timestamps = local_storage.get("session_timestamps", {})
-    active_requests = local_storage.get("active_requests", {})
     session_mappings = local_storage.get("session_mappings", {})
     request_states = local_storage.get("request_states", {})
     
     chat_sessions_lock = locks.get("chat_sessions_lock")
     user_sessions_lock = locks.get("user_sessions_lock")
     session_timestamps_lock = locks.get("session_timestamps_lock")
-    active_requests_lock = locks.get("active_requests_lock")
     session_mappings_lock = locks.get("session_mappings_lock")
     request_states_lock = locks.get("request_states_lock")
 
@@ -185,44 +181,31 @@ async def get_all_session_timestamps() -> Dict[str, float]:
 # Active Request Management
 async def add_active_request(session_id: str, request_id: str):
     """Add an active request for a session"""
-    if redis_managers:
+    if redis_managers and "active_requests" in redis_managers:
         await redis_managers["active_requests"].add(session_id, request_id)
-    else:
-        async with active_requests_lock:
-            if session_id not in active_requests:
-                active_requests[session_id] = set()
-            active_requests[session_id].add(request_id)
+    # No local fallback - active requests are Redis-only
 
 
 async def remove_active_request(session_id: str, request_id: str):
     """Remove an active request from a session"""
-    if redis_managers:
+    if redis_managers and "active_requests" in redis_managers:
         await redis_managers["active_requests"].remove(session_id, request_id)
-    else:
-        async with active_requests_lock:
-            if session_id in active_requests:
-                active_requests[session_id].discard(request_id)
-                if not active_requests[session_id]:
-                    del active_requests[session_id]
+    # No local fallback - active requests are Redis-only
 
 
 async def get_active_requests(session_id: str) -> Set[str]:
     """Get all active requests for a session"""
-    if redis_managers:
+    if redis_managers and "active_requests" in redis_managers:
         return await redis_managers["active_requests"].get(session_id)
     else:
-        async with active_requests_lock:
-            return set(active_requests.get(session_id, set()))
+        return set()  # No local fallback - active requests are Redis-only
 
 
 async def clear_active_requests(session_id: str):
     """Clear all active requests for a session"""
-    if redis_managers:
+    if redis_managers and "active_requests" in redis_managers:
         await redis_managers["active_requests"].clear(session_id)
-    else:
-        async with active_requests_lock:
-            if session_id in active_requests:
-                del active_requests[session_id]
+    # No local fallback - active requests are Redis-only
 
 
 # Request State Tracking
