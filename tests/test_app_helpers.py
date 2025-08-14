@@ -54,7 +54,7 @@ class TestAppHelpers(unittest.TestCase):
         
         self.assertIsNone(result)
 
-    @patch('app.Anthropic')
+    @patch('app.AsyncAnthropic')
     @patch('app.get_current_claude_api_key')
     def test_get_anthropic_client_success(self, mock_get_key, mock_anthropic):
         """Test successful creation of Anthropic client"""
@@ -82,7 +82,7 @@ class TestAppHelpers(unittest.TestCase):
         self.assertIsNone(result)
         mock_get_key.assert_called_once_with(self.test_user_id)
 
-    @patch('app.Anthropic')
+    @patch('app.AsyncAnthropic')
     @patch('app.get_current_claude_api_key')
     def test_get_anthropic_client_cache_hit(self, mock_get_key, mock_anthropic):
         """Test that cached client is returned on subsequent calls"""
@@ -105,7 +105,7 @@ class TestAppHelpers(unittest.TestCase):
         
         self.assertIsNone(result)
 
-    @patch('app.Anthropic')
+    @patch('app.AsyncAnthropic')
     @patch('app.get_current_claude_api_key')
     def test_get_anthropic_client_multiple_users(self, mock_get_key, mock_anthropic):
         """Test caching works correctly for multiple users with different API keys"""
@@ -157,7 +157,7 @@ class TestAppHelpers(unittest.TestCase):
         self.assertEqual(result1_cached, mock_client1)
         mock_anthropic.assert_not_called()  # Should not create new client
 
-    @patch('app.Anthropic')
+    @patch('app.AsyncAnthropic')
     @patch('app.get_current_claude_api_key')
     def test_get_anthropic_client_same_key_different_users(self, mock_get_key, mock_anthropic):
         """Test that same API key shared by different users uses same cached client"""
