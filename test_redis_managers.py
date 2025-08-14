@@ -119,12 +119,8 @@ async def test_redis_managers():
     assert retrieved_client == client_id, "Client ID mapping failed"
     print("  ✅ ID mappings working correctly")
     
-    # Test ConnectionTracker (metadata only, no real WebSocket)
-    print("\n🌐 Testing ConnectionTracker...")
-    
-    # Check connection tracking
-    all_sessions = await managers["connection_tracker"].get_conversation_sessions(123)
-    print(f"  ✅ Can query connections (found {len(all_sessions)} for conversation)")
+    # ConnectionTracker removed - functionality moved to LocalObjectManager
+    print("\n🌐 ConnectionTracker removed - WebSocket tracking now in LocalObjectManager")
     
     # Clean up test data
     print("\n🧹 Cleaning up test data...")

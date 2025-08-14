@@ -255,106 +255,6 @@ class SessionMappingManager:
         await self.delete(session_id)
 
 
-class ConnectionTracker:
-    """
-    Tracks WebSocket connections for multi-server support.
-    WebSocket objects stay local, but metadata goes to Redis.
-    """
-    
-    def __init__(self, redis_client: redis.Redis):
-        self.redis = redis_client
-        # Local WebSocket storage (can't serialize WebSocket objects)
-        self.local_websockets: Dict[str, WebSocket] = {}
-        self.local_conversations: Dict[int, List[Tuple[str, WebSocket]]] = {}
-        
-    async def register(self, session_id: str, user_id: str, 
-                      conversation_id: Optional[int], websocket: WebSocket):
-        """Register a new WebSocket connection"""
-        # Store metadata in Redis
-        data = {
-            "server_id": SERVER_ID,
-            "user_id": user_id,
-            "connected_at": time.time()
-        }
-        if conversation_id is not None:
-            data["conversation_id"] = str(conversation_id)
-        
-        await self.redis.hset(
-            f"connection:{session_id}",
-            mapping=data
-        )
-        await self.redis.expire(f"connection:{session_id}", 900)
-        
-        # Store WebSocket locally
-        self.local_websockets[session_id] = websocket
-        if conversation_id is not None:
-            if conversation_id not in self.local_conversations:
-                self.local_conversations[conversation_id] = []
-            self.local_conversations[conversation_id].append((session_id, websocket))
-    
-    async def unregister(self, session_id: str):
-        """Unregister a WebSocket connection"""
-        # Get metadata first
-        data = await self.redis.hgetall(f"connection:{session_id}")
-        
-        # Remove from Redis
-        await self.redis.delete(f"connection:{session_id}")
-        
-        # Remove from local storage
-        if session_id in self.local_websockets:
-            del self.local_websockets[session_id]
-        
-        # Remove from conversation tracking
-        if data and "conversation_id" in data:
-            conv_id = int(data["conversation_id"])
-            if conv_id in self.local_conversations:
-                self.local_conversations[conv_id] = [
-                    (sid, ws) for sid, ws in self.local_conversations[conv_id]
-                    if sid != session_id
-                ]
-                if not self.local_conversations[conv_id]:
-                    del self.local_conversations[conv_id]
-    
-    async def get_conversation_sessions(self, conversation_id: int) -> List[str]:
-        """Get all sessions connected to a conversation (across all servers)"""
-        sessions = []
-        cursor = 0
-        while True:
-            cursor, keys = await self.redis.scan(
-                cursor, match="connection:*", count=100
-            )
-            for key in keys:
-                data = await self.redis.hget(key, "conversation_id")
-                if data and int(data) == conversation_id:
-                    session_id = key.replace("connection:", "")
-                    sessions.append(session_id)
-            if cursor == 0:
-                break
-        return sessions
-    
-    def get_local_websockets(self, conversation_id: int) -> List[Tuple[str, WebSocket]]:
-        """Get local WebSocket connections for a conversation"""
-        return self.local_conversations.get(conversation_id, [])
-    
-    async def update_conversation(self, session_id: str, old_conv_id: Optional[int], 
-                                 new_conv_id: int, websocket: WebSocket):
-        """Update conversation ID for a session"""
-        # Update Redis
-        await self.redis.hset(f"connection:{session_id}", "conversation_id", str(new_conv_id))
-        
-        # Update local tracking
-        if old_conv_id and old_conv_id in self.local_conversations:
-            self.local_conversations[old_conv_id] = [
-                (sid, ws) for sid, ws in self.local_conversations[old_conv_id]
-                if sid != session_id
-            ]
-            if not self.local_conversations[old_conv_id]:
-                del self.local_conversations[old_conv_id]
-        
-        if new_conv_id not in self.local_conversations:
-            self.local_conversations[new_conv_id] = []
-        self.local_conversations[new_conv_id].append((session_id, websocket))
-
 
 class RequestStateManager:
     """Manages request state tracking in Redis"""
@@ -406,12 +306,14 @@ class LocalObjectManager:
         self.active_tasks: Dict[str, asyncio.Task] = {}  # Task objects
         self.redis_listener_tasks: Dict[str, asyncio.Task] = {}  # Redis listener tasks
         self.anthropic_clients: Dict[str, Any] = {}  # Client objects
+        self.conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}  # Conversation WebSockets
         
         # Locks for local objects
         self.pubsub_lock = asyncio.Lock()
         self.tasks_lock = asyncio.Lock()
         self.listener_tasks_lock = asyncio.Lock()
         self.clients_lock = asyncio.Lock()
+        self.conversation_websockets_lock = asyncio.Lock()
     
     # WebSocket PubSub management
     async def add_pubsub(self, session_id: str, pubsub):
@@ -526,6 +428,106 @@ class LocalObjectManager:
         """Get all Redis listener tasks (for monitoring/cleanup)"""
         async with self.listener_tasks_lock:
             return dict(self.redis_listener_tasks)
+    
+    # Conversation WebSocket management
+    async def register_conversation_websocket(self, session_id: str, conversation_id: int, 
+                                             websocket: WebSocket):
+        """Register a WebSocket for a conversation"""
+        async with self.conversation_websockets_lock:
+            if conversation_id not in self.conversation_websockets:
+                self.conversation_websockets[conversation_id] = []
+            
+            # Remove any existing entry for this session (handles reconnection)
+            existing_entries = [(sid, ws) for sid, ws in self.conversation_websockets[conversation_id] 
+                              if sid == session_id]
+            for old_entry in existing_entries:
+                self.conversation_websockets[conversation_id].remove(old_entry)
+                logger.info(f"Replaced old WebSocket registration for session {session_id} in conversation {conversation_id}")
+            
+            # Add the new WebSocket registration
+            self.conversation_websockets[conversation_id].append((session_id, websocket))
+            logger.info(f"Registered WebSocket session {session_id} for conversation {conversation_id}")
+    
+    async def unregister_conversation_websocket(self, session_id: str, conversation_id: Optional[int] = None):
+        """Unregister a WebSocket from conversations"""
+        async with self.conversation_websockets_lock:
+            conversations_cleaned = []
+            
+            if conversation_id is not None:
+                # Remove from specific conversation
+                if conversation_id in self.conversation_websockets:
+                    self.conversation_websockets[conversation_id] = [
+                        (sid, ws) for sid, ws in self.conversation_websockets[conversation_id]
+                        if sid != session_id
+                    ]
+                    if not self.conversation_websockets[conversation_id]:
+                        del self.conversation_websockets[conversation_id]
+                    conversations_cleaned.append(conversation_id)
+            else:
+                # Remove from all conversations (cleanup on disconnect)
+                for conv_id in list(self.conversation_websockets.keys()):
+                    original_count = len(self.conversation_websockets[conv_id])
+                    self.conversation_websockets[conv_id] = [
+                        (sid, ws) for sid, ws in self.conversation_websockets[conv_id]
+                        if sid != session_id
+                    ]
+                    if len(self.conversation_websockets[conv_id]) < original_count:
+                        conversations_cleaned.append(conv_id)
+                    if not self.conversation_websockets[conv_id]:
+                        del self.conversation_websockets[conv_id]
+            
+            for conv_id in conversations_cleaned:
+                logger.info(f"Removed WebSocket for session {session_id} from conversation {conv_id}")
+    
+    async def get_conversation_websockets(self, conversation_id: int) -> List[Tuple[str, WebSocket]]:
+        """Get all WebSocket connections for a conversation"""
+        async with self.conversation_websockets_lock:
+            return list(self.conversation_websockets.get(conversation_id, []))
+    
+    async def update_conversation_websocket(self, session_id: str, old_conversation_id: Optional[int],
+                                           new_conversation_id: int, websocket: WebSocket):
+        """Update the conversation mapping for a WebSocket"""
+        async with self.conversation_websockets_lock:
+            # Remove from old conversation
+            if old_conversation_id and old_conversation_id in self.conversation_websockets:
+                self.conversation_websockets[old_conversation_id] = [
+                    (sid, ws) for sid, ws in self.conversation_websockets[old_conversation_id]
+                    if sid != session_id
+                ]
+                if not self.conversation_websockets[old_conversation_id]:
+                    del self.conversation_websockets[old_conversation_id]
+            
+            # Add to new conversation
+            if new_conversation_id not in self.conversation_websockets:
+                self.conversation_websockets[new_conversation_id] = []
+            
+            # Remove any existing entry for this session in the new conversation
+            self.conversation_websockets[new_conversation_id] = [
+                (sid, ws) for sid, ws in self.conversation_websockets[new_conversation_id]
+                if sid != session_id
+            ]
+            
+            self.conversation_websockets[new_conversation_id].append((session_id, websocket))
+            logger.info(f"Updated WebSocket conversation for session {session_id}: {old_conversation_id} → {new_conversation_id}")
+    
+    async def get_all_conversation_websockets(self) -> Dict[int, List[Tuple[str, WebSocket]]]:
+        """Get all conversation WebSocket mappings (for monitoring/debugging)"""
+        async with self.conversation_websockets_lock:
+            return dict(self.conversation_websockets)
+    
+    async def remove_websocket_from_conversation(self, conversation_id: int, session_id: str, 
+                                                websocket: WebSocket):
+        """Remove a specific WebSocket from a conversation (for cleanup after send errors)"""
+        async with self.conversation_websockets_lock:
+            if conversation_id in self.conversation_websockets:
+                try:
+                    self.conversation_websockets[conversation_id].remove((session_id, websocket))
+                    if not self.conversation_websockets[conversation_id]:
+                        del self.conversation_websockets[conversation_id]
+                    return True
+                except ValueError:
+                    return False
+        return False
 
 
 # Singleton instances (initialize these in your app startup)
@@ -538,6 +540,5 @@ def create_managers(redis_client: redis.Redis) -> Dict[str, Any]:
         "active_requests": ActiveRequestManager(redis_client),
         "session_mappings": SessionMappingManager(redis_client),
         "request_states": RequestStateManager(redis_client),
-        "connection_tracker": ConnectionTracker(redis_client),
         "local_objects": LocalObjectManager()
     }

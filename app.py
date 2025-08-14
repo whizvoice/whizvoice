@@ -266,10 +266,7 @@ SESSION_WARNING_THRESHOLD = 0.8  # Warn when at 80% capacity
 redis_client: Optional[redis.Redis] = None
 redis_managers = None  # Will be initialized after Redis connection
 
-# Local-only data structures (can't be serialized to Redis)
-# Store WebSocket connections by conversation ID for broadcasting
-# conversation_id -> list of (session_id, websocket) tuples
-conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}
+# Local-only data structures moved to LocalObjectManager in redis_managers
 
 # Legacy local dictionaries - to be replaced by Redis managers
 # Keeping temporarily for backwards compatibility during migration
@@ -286,7 +283,6 @@ ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
 chat_sessions_lock = asyncio.Lock()
 user_sessions_lock = asyncio.Lock()
 session_timestamps_lock = asyncio.Lock()
-conversation_websockets_lock = asyncio.Lock()
 session_mappings_lock = asyncio.Lock()
 anthropic_clients_cache_lock = asyncio.Lock()
 request_states_lock = asyncio.Lock()
@@ -435,21 +431,11 @@ async def update_websocket_conversation(session_id: str, old_conversation_id: Op
         # STEP 1: Subscribe to new Redis channel FIRST (before unsubscribing from old)
         await subscribe_to_conversation(session_id, new_conversation_id, websocket)
         
-        # STEP 2: Update the conversation_websockets mapping
-        async with conversation_websockets_lock:
-            # Remove from old conversation mapping
-            if old_conversation_id and old_conversation_id in conversation_websockets:
-                conversation_websockets[old_conversation_id] = [
-                    (sid, ws) for sid, ws in conversation_websockets[old_conversation_id]
-                    if sid != session_id
-                ]
-                if not conversation_websockets[old_conversation_id]:
-                    del conversation_websockets[old_conversation_id]
-            
-            # Add to new conversation mapping
-            if new_conversation_id not in conversation_websockets:
-                conversation_websockets[new_conversation_id] = []
-            conversation_websockets[new_conversation_id].append((session_id, websocket))
+        # STEP 2: Update the conversation_websockets mapping using LocalObjectManager
+        if redis_managers and "local_objects" in redis_managers:
+            await redis_managers["local_objects"].update_conversation_websocket(
+                session_id, old_conversation_id, new_conversation_id, websocket
+            )
         
         # STEP 3: NOW unsubscribe from old channel (after new one is active)
         if old_conversation_id:
@@ -1386,20 +1372,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def register_websocket_for_conversation(session_id: str, conversation_id: int, websocket: WebSocket):
     """Register a WebSocket for a conversation, handling both real and optimistic IDs"""
-    async with conversation_websockets_lock:
-        if conversation_id not in conversation_websockets:
-            conversation_websockets[conversation_id] = []
-        
-        # Remove any existing registration with the same session_id (old WebSocket)
-        # This handles reconnection with the same session ID
-        existing_entries = [(sid, ws) for sid, ws in conversation_websockets[conversation_id] if sid == session_id]
-        for old_entry in existing_entries:
-            conversation_websockets[conversation_id].remove(old_entry)
-            logger.info(f"Replaced old WebSocket registration for session {session_id} in conversation {conversation_id}")
-        
-        # Add the new WebSocket registration
-        conversation_websockets[conversation_id].append((session_id, websocket))
-        logger.info(f"Registered WebSocket session {session_id} for conversation {conversation_id}")
+    if redis_managers and "local_objects" in redis_managers:
+        await redis_managers["local_objects"].register_conversation_websocket(
+            session_id, conversation_id, websocket
+        )
 
 async def update_session_activity(session_id: str) -> None:
     """Helper function to update session activity timestamp - wrapper for Redis version"""
@@ -1440,12 +1416,11 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             logger.error(f"Failed to publish to Redis: {str(e)}")
     
     # Also use local broadcasting for WebSockets in this process
-    async with conversation_websockets_lock:
-        connections = []
-        
-        # Check for the real conversation ID
-        if conversation_id in conversation_websockets:
-            connections.extend(conversation_websockets[conversation_id])
+    connections = []
+    
+    if redis_managers and "local_objects" in redis_managers:
+        # Get connections for the real conversation ID
+        connections.extend(await redis_managers["local_objects"].get_conversation_websockets(conversation_id))
         
         # ALSO check for any optimistic conversation IDs that map to this real ID
         # First check the database for the optimistic ID
@@ -1457,9 +1432,10 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             
             if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
                 optimistic_id = int(opt_result.data[0]["optimistic_chat_id"])
-                if optimistic_id in conversation_websockets:
+                opt_connections = await redis_managers["local_objects"].get_conversation_websockets(optimistic_id)
+                if opt_connections:
                     logger.info(f"Found WebSockets registered under optimistic ID {optimistic_id} for real conversation {conversation_id}")
-                    connections.extend(conversation_websockets[optimistic_id])
+                    connections.extend(opt_connections)
         except Exception as e:
             logger.warning(f"Could not check for optimistic ID in database: {str(e)}")
         
@@ -1472,16 +1448,17 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
         
         # Check for WebSockets registered under optimistic IDs from mappings
         for opt_id in optimistic_ids:
-            if opt_id in conversation_websockets and opt_id not in connections:
+            opt_connections = await redis_managers["local_objects"].get_conversation_websockets(opt_id)
+            if opt_connections:
                 logger.info(f"Found WebSockets registered under optimistic ID {opt_id} (from mappings) for real conversation {conversation_id}")
-                connections.extend(conversation_websockets[opt_id])
-        
-        if not connections:
-            logger.info(f"No local WebSocket sessions registered for conversation {conversation_id} (checked real and optimistic IDs)")
-            return
-        
-        # Create a copy of the list to avoid modification during iteration
-        connections = list(set(connections))  # Remove duplicates
+                connections.extend(opt_connections)
+    
+    if not connections:
+        logger.info(f"No local WebSocket sessions registered for conversation {conversation_id} (checked real and optimistic IDs)")
+        return
+    
+    # Create a copy of the list to avoid modification during iteration
+    connections = list(set(connections))  # Remove duplicates
     
     logger.info(f"Broadcasting locally to conversation {conversation_id} with {len(connections)} registered sessions: {[sid for sid, _ in connections]}")
     disconnected_sessions = []
@@ -1502,18 +1479,11 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             disconnected_sessions.append((session_id, websocket))
     
     # Clean up disconnected sessions
-    if disconnected_sessions:
-        async with conversation_websockets_lock:
-            for session_id, websocket in disconnected_sessions:
-                if conversation_id in conversation_websockets:
-                    try:
-                        conversation_websockets[conversation_id].remove((session_id, websocket))
-                    except ValueError:
-                        pass  # Already removed
-            
-            # Remove empty conversation entries
-            if conversation_id in conversation_websockets and not conversation_websockets[conversation_id]:
-                del conversation_websockets[conversation_id]
+    if disconnected_sessions and redis_managers and "local_objects" in redis_managers:
+        for session_id, websocket in disconnected_sessions:
+            await redis_managers["local_objects"].remove_websocket_from_conversation(
+                conversation_id, session_id, websocket
+            )
 
 async def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation_id: Optional[int] = None):
     """Clean up a session when a WebSocket disconnects"""
@@ -1540,26 +1510,8 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
     logger.info(f"Cleaned up session mappings: {session_id}")
     
     # Clean up conversation websockets (check all conversations, not just the provided one)
-    async with conversation_websockets_lock:
-        conversations_to_clean = []
-        
-        # Find all conversations this session might be registered with
-        for conv_id, sessions in conversation_websockets.items():
-            for sid, ws in sessions:
-                if sid == session_id:
-                    conversations_to_clean.append(conv_id)
-                    break
-        
-        # Clean up from all found conversations
-        for conv_id in conversations_to_clean:
-            conversation_websockets[conv_id] = [
-                (sid, ws) for sid, ws in conversation_websockets[conv_id] 
-                if sid != session_id
-            ]
-            # Remove empty conversation entries
-            if not conversation_websockets[conv_id]:
-                del conversation_websockets[conv_id]
-            logger.info(f"Removed WebSocket for session {session_id} from conversation {conv_id}")
+    if redis_managers and "local_objects" in redis_managers:
+        await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
     
     # DON'T clean up active requests immediately - we need to track them to know when tasks complete
     # The tasks themselves will remove their entries when they finish
@@ -1660,9 +1612,10 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
         
         # Find and notify the websocket for the evicted session
         ws_to_notify = None
-        async with conversation_websockets_lock:
-            if evicted_conversation_id and evicted_conversation_id in conversation_websockets:
-                for sid, ws in conversation_websockets[evicted_conversation_id]:
+        if redis_managers and "local_objects" in redis_managers:
+            if evicted_conversation_id:
+                connections = await redis_managers["local_objects"].get_conversation_websockets(evicted_conversation_id)
+                for sid, ws in connections:
                     if sid == eviction_candidate:
                         ws_to_notify = ws
                         break
