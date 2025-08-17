@@ -1800,12 +1800,39 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         
         # Save the message
         logger.info(f"Attempting to save {message_type} message to conversation_id={conversation_id}, request_id={request_id}")
-        result = supabase.table("messages").insert({
+        
+        # Prepare message data
+        message_data = {
             "conversation_id": conversation_id,
             "content": content,
             "message_type": message_type,
             "request_id": request_id
-        }).execute()
+        }
+        
+        # For ASSISTANT messages with request_id, set timestamp to be right after the USER message
+        # This ensures the response appears immediately after the user message it's responding to
+        if message_type == "ASSISTANT" and request_id:
+            # Find the USER message with this request_id
+            user_msg_result = supabase.table("messages")\
+                .select("timestamp")\
+                .eq("conversation_id", conversation_id)\
+                .eq("request_id", request_id)\
+                .eq("message_type", "USER")\
+                .execute()
+            
+            if user_msg_result.data:
+                user_timestamp = user_msg_result.data[0]["timestamp"]
+                # Parse the timestamp and add 1ms
+                from datetime import datetime, timedelta
+                user_dt = datetime.fromisoformat(user_timestamp.replace('Z', '+00:00'))
+                assistant_dt = user_dt + timedelta(milliseconds=1)
+                # Format as ISO string with timezone
+                message_data["timestamp"] = assistant_dt.isoformat().replace('+00:00', 'Z')
+                logger.info(f"Setting ASSISTANT message timestamp to {message_data['timestamp']} (1ms after USER message at {user_timestamp})")
+            else:
+                logger.warning(f"No USER message found with request_id {request_id}, using default timestamp")
+        
+        result = supabase.table("messages").insert(message_data).execute()
         
         if not result.data:
             logger.error(f"Failed to save {message_type} message to conversation {conversation_id} - no data returned from insert")
