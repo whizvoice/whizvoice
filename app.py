@@ -2703,12 +2703,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.info(f"Conversation ID changed from {session_conversation_id} to {real_conversation_id}, updating WebSocket listener immediately")
             try:
                 # This moves the WebSocket registration from old to new conversation ID
+                # The updated register_conversation_websocket method now automatically removes
+                # the optimistic registration when registering with a real ID, preventing duplicates
                 await update_websocket_conversation(session_id, session_conversation_id, real_conversation_id, websocket)
-                
-                # Keep the optimistic registration too for backwards compatibility
-                # This allows broadcasts to either the optimistic or real ID to reach this WebSocket
-                if session_conversation_id is not None and session_conversation_id < 0:  # It's an optimistic ID
-                    await register_websocket_for_conversation(session_id, session_conversation_id, websocket)
             except Exception as e:
                 logger.error(f"Failed to update WebSocket conversation, continuing with original: {str(e)}")
                 # Don't fail the entire message processing if the update fails
