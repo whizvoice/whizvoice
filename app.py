@@ -1824,7 +1824,29 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 user_timestamp = user_msg_result.data[0]["timestamp"]
                 # Parse the timestamp and add 1ms
                 from datetime import datetime, timedelta
-                user_dt = datetime.fromisoformat(user_timestamp.replace('Z', '+00:00'))
+                
+                # Fix: Normalize timestamp format from Supabase
+                # Supabase sometimes returns timestamps with varying microsecond precision (4-6 digits)
+                # Python's fromisoformat expects exactly 6 digits for microseconds
+                timestamp_str = user_timestamp.replace('Z', '+00:00')
+                
+                # Check if timestamp has microseconds and normalize to 6 digits
+                if '.' in timestamp_str:
+                    # Split into main part and fractional seconds + timezone
+                    parts = timestamp_str.split('.')
+                    if len(parts) == 2:
+                        # Further split fractional part from timezone
+                        if '+' in parts[1]:
+                            frac, tz = parts[1].split('+')
+                            # Pad or truncate fractional seconds to exactly 6 digits
+                            frac = frac.ljust(6, '0')[:6]
+                            timestamp_str = f"{parts[0]}.{frac}+{tz}"
+                        elif '-' in parts[1]:
+                            frac, tz = parts[1].split('-')
+                            frac = frac.ljust(6, '0')[:6]
+                            timestamp_str = f"{parts[0]}.{frac}-{tz}"
+                
+                user_dt = datetime.fromisoformat(timestamp_str)
                 assistant_dt = user_dt + timedelta(milliseconds=1)
                 # Format as ISO string with timezone
                 message_data["timestamp"] = assistant_dt.isoformat().replace('+00:00', 'Z')
