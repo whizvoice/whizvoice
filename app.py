@@ -2489,6 +2489,8 @@ async def get_messages(
         # This ensures clients always receive messages with positive server-backed IDs
         for message in messages:
             message['conversation_id'] = actual_conversation_id
+            # Debug logging to diagnose message_type issue
+            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, request_id={message.get('request_id')}")
         
         # Return with server timestamp for next incremental sync
         result = {
