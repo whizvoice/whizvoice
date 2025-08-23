@@ -1089,6 +1089,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     message_type = "message"  # default type
                     client_conversation_id = None
                     client_message_id = None
+                    client_timestamp = None
                     try:
                         message_data = json.loads(message_text)
                         message = message_data.get("message", "")
@@ -1099,6 +1100,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         message_conversation_id = message_data.get("conversation_id")
                         client_conversation_id = message_data.get("client_conversation_id")
                         client_message_id = message_data.get("client_message_id")
+                        # Get timestamp from client for preserving message order
+                        client_timestamp = message_data.get("timestamp")
                         
                         # If message includes a conversation_id, update the session's conversation_id only if it changed
                         if message_conversation_id is not None and message_conversation_id > 0:
@@ -1213,7 +1216,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 message=message,
                                 request_id=request_id,
                                 client_conversation_id=client_conversation_id,
-                                client_message_id=client_message_id
+                                client_message_id=client_message_id,
+                                client_timestamp=client_timestamp
                             )
                         )
                         
@@ -1711,7 +1715,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         logger.error(f"Error loading conversation history for user {user_id}, conversation {conversation_id}: {str(e)}")
         return []
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None) -> Optional[int]:
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None) -> Optional[int]:
     """Save a message to the database and return the conversation_id"""
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, client_conversation_id={client_conversation_id}, content='{content[:50]}...'")
@@ -1808,6 +1812,12 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             "message_type": message_type,
             "request_id": request_id
         }
+        
+        # For USER messages with client_timestamp, use the provided timestamp to preserve message order
+        if message_type == "USER" and client_timestamp:
+            # Client timestamp is already in ISO format from Android client
+            message_data["timestamp"] = client_timestamp
+            logger.info(f"Using client-provided timestamp for USER message: {client_timestamp}")
         
         # For ASSISTANT messages with request_id, set timestamp to be right after the USER message
         # This ensures the response appears immediately after the user message it's responding to
@@ -2659,7 +2669,7 @@ async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None):
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None):
     """Process a single message in a cancellable task"""
     # Helper function to safely send to WebSocket
     async def safe_websocket_send(payload):
@@ -2686,7 +2696,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id)
+        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp)
         logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}")
         if real_conversation_id is None:
             logger.error("Failed to save user message to database")
