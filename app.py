@@ -210,6 +210,7 @@ class MessageCreate(BaseModel):
     content: str
     message_type: str  # 'USER' or 'ASSISTANT'
     request_id: Optional[str] = None  # Client-generated UUID for request tracking
+    timestamp: Optional[str] = None  # Optional ISO format timestamp for preserving message order
 
 class MessageResponse(BaseModel):
     id: int
@@ -2554,12 +2555,19 @@ async def create_message(
                 raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Create the message with the actual conversation ID
-        result = supabase.table("messages").insert({
+        message_data = {
             "conversation_id": actual_conversation_id,
             "content": message.content,
             "message_type": message.message_type,
             "request_id": message.request_id
-        }).execute()
+        }
+        
+        # Include timestamp if provided to preserve message order
+        if message.timestamp:
+            message_data["timestamp"] = message.timestamp
+            logger.info(f"Using client-provided timestamp for message: {message.timestamp}")
+        
+        result = supabase.table("messages").insert(message_data).execute()
         
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create message")
