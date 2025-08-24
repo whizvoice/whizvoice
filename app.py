@@ -1865,6 +1865,12 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             else:
                 logger.warning(f"No USER message found with request_id {request_id}, using default timestamp")
         
+        # Debug: Log exactly what we're sending to Supabase
+        if "timestamp" in message_data:
+            logger.info(f"DEBUG: Inserting message with timestamp field: {message_data['timestamp']}")
+        else:
+            logger.info(f"DEBUG: Inserting message WITHOUT timestamp field (will use DB default)")
+        
         result = supabase.table("messages").insert(message_data).execute()
         
         if not result.data:
@@ -1874,6 +1880,10 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         # Extract the saved message ID
         saved_message = result.data[0]
         message_id = saved_message.get("id")
+        
+        # Debug: Log what timestamp was actually saved
+        actual_timestamp = saved_message.get("timestamp")
+        logger.info(f"DEBUG: Message {message_id} saved with timestamp: {actual_timestamp}")
         saved_conv_id = saved_message.get("conversation_id")
         logger.info(f"Successfully saved {message_type} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}")
         
@@ -2500,8 +2510,8 @@ async def get_messages(
         # This ensures clients always receive messages with positive server-backed IDs
         for message in messages:
             message['conversation_id'] = actual_conversation_id
-            # Debug logging to diagnose message_type issue
-            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, request_id={message.get('request_id')}")
+            # Debug logging to diagnose message_type issue and timestamp
+            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, request_id={message.get('request_id')}, timestamp={message.get('timestamp')}")
         
         # Return with server timestamp for next incremental sync
         result = {
