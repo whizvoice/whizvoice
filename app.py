@@ -2666,6 +2666,8 @@ async def get_messages(
     current_user: Dict = Depends(get_current_user)
 ):
     """Get messages for a conversation with optional incremental sync"""
+    from datetime import datetime
+    
     try:
         user_id = current_user.get("sub")
         if not user_id:
@@ -2689,7 +2691,6 @@ async def get_messages(
         # Add incremental sync filter if provided
         if since_timestamp:
             # Convert Unix timestamp to ISO format for Supabase
-            from datetime import datetime
             since_datetime = datetime.fromtimestamp(since_timestamp).isoformat()
             # Use OR to catch both new messages and updates (like cancellations)
             query = query.or_(f"timestamp.gt.{since_datetime},updated_at.gt.{since_datetime}")
