@@ -1823,12 +1823,13 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         logger.error(f"Error getting bot message IDs for conversation {conversation_id}: {e}")
         return []
 
-async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int]) -> List[str]:
+async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int], websocket=None, session_id=None) -> List[str]:
     """
     Detect requests that are subsets of the new message set and cancel them.
     Returns list of cancelled request IDs.
     """
     cancelled_requests = []
+    cancelled_bot_messages = []  # Track bot messages that need delete notifications
     
     if not redis_managers or "request_messages" not in redis_managers:
         return cancelled_requests
@@ -1849,6 +1850,30 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
             if old_message_ids and old_message_ids.issubset(new_message_ids_set) and old_message_ids != new_message_ids_set:
                 logger.info(f"Request {request_id} (messages {old_message_ids}) is subset of new request (messages {new_message_ids_set})")
                 
+                # Check if this request has already sent a bot response
+                # Query the database for bot messages with this request_id
+                try:
+                    bot_msg_result = supabase.table("messages")\
+                        .select("id")\
+                        .eq("request_id", request_id)\
+                        .eq("message_type", "ASSISTANT")\
+                        .is_("cancelled", "null")\
+                        .execute()
+                    
+                    if bot_msg_result.data:
+                        for bot_msg in bot_msg_result.data:
+                            bot_message_id = bot_msg["id"]
+                            cancelled_bot_messages.append(bot_message_id)
+                            
+                            # Mark the bot message as cancelled in the database
+                            supabase.table("messages")\
+                                .update({"cancelled": "now()"})\
+                                .eq("id", bot_message_id)\
+                                .execute()
+                            logger.info(f"Marked bot message {bot_message_id} as cancelled for request {request_id}")
+                except Exception as e:
+                    logger.error(f"Error checking/cancelling bot messages for request {request_id}: {e}")
+                
                 # Cancel the Claude stream if it exists
                 if redis_managers and "local_objects" in redis_managers:
                     stream_cancelled = await redis_managers["local_objects"].cancel_stream(request_id)
@@ -1865,6 +1890,21 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
         
         if cancelled_requests:
             logger.info(f"Cancelled {len(cancelled_requests)} subset requests: {cancelled_requests}")
+        
+        # Send delete notifications for cancelled bot messages
+        if cancelled_bot_messages and websocket and session_id:
+            for bot_message_id in cancelled_bot_messages:
+                delete_notification = {
+                    "type": "delete_message",
+                    "message_id": bot_message_id,
+                    "conversation_id": conversation_id,
+                    "reason": "superseded_by_new_request"
+                }
+                try:
+                    await websocket.send_text(json.dumps(delete_notification))
+                    logger.info(f"Sent delete notification for bot message {bot_message_id} to session {session_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to send delete notification for message {bot_message_id}: {e}")
             
     except Exception as e:
         logger.error(f"Error detecting subset requests: {e}")
@@ -2944,7 +2984,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.info(f"Tracking request {request_id} responding to message IDs: {user_message_ids}")
         
         # Detect and cancel subset requests
-        cancelled_requests = await detect_and_cancel_subset_requests(session_conversation_id, user_message_ids)
+        cancelled_requests = await detect_and_cancel_subset_requests(
+            session_conversation_id, user_message_ids, websocket, session_id
+        )
         if cancelled_requests:
             logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {session_conversation_id}")
 
@@ -3035,6 +3077,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # Handle tool calls
         while response.stop_reason == 'tool_use':
+            # Check for cancellation before each tool iteration
+            if asyncio.current_task().cancelled():
+                logger.info(f"Request {request_id} cancelled during tool use")
+                await set_request_state(request_id, "cancelled", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id
+                })
+                return session_conversation_id
+            
             tool_block = next((block for block in response.content if block.type == 'tool_use'), None)
             if not tool_block:
                 logger.error("Stop reason is tool_use but no tool_use block found.")
@@ -3135,19 +3186,39 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
                 saved_conversation_id = session_conversation_id  # Fallback to current conversation ID
             
-            # Send structured response with request_id and conversation_id
-            response_payload = {
-                "response": assistant_response_text,
-                "request_id": request_id,
-                "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
-                "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
-                "client_message_id": client_message_id,  # Echo back optimistic message ID
-                "type": "response"  # Indicate this is a direct response (vs broadcast)
-            }
-            if await safe_websocket_send(response_payload):
-                logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
+            # Check if request was cancelled before sending response
+            request_cancelled = False
+            if redis_managers and "request_messages" in redis_managers:
+                request_data = await redis_managers["request_messages"].get_messages(request_id)
+                if request_data and request_data.get("status") == "cancelled":
+                    request_cancelled = True
+                    logger.info(f"Request {request_id} was cancelled, not sending response to client")
+            
+            if not request_cancelled:
+                # Send structured response with request_id and conversation_id
+                response_payload = {
+                    "response": assistant_response_text,
+                    "request_id": request_id,
+                    "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
+                    "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
+                    "client_message_id": client_message_id,  # Echo back optimistic message ID
+                    "type": "response"  # Indicate this is a direct response (vs broadcast)
+                }
+                if await safe_websocket_send(response_payload):
+                    logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
+                else:
+                    logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
             else:
-                logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
+                # Mark the bot message as cancelled in the database
+                if save_result:
+                    try:
+                        supabase.table("messages")\
+                            .update({"cancelled": "now()"})\
+                            .eq("id", bot_message_id)\
+                            .execute()
+                        logger.info(f"Marked bot message {bot_message_id} as cancelled in database")
+                    except Exception as e:
+                        logger.error(f"Failed to mark bot message {bot_message_id} as cancelled: {e}")
             
             # Clean up old request tracking data
             # Do this after saving the bot response to ensure we have the latest message IDs
