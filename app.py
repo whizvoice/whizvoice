@@ -1052,7 +1052,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await remove_session_timestamp(session_id)
                     
                     # Clean up chat messages if they were loaded
-                    await delete_chat_messages(session_id)
+                    await clear_chat_session(session_id)
                     
                     # Clean up any Redis subscriptions
                     await unsubscribe_from_conversation(session_id)
@@ -1088,7 +1088,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await remove_session_timestamp(session_id)
                     
                     # Clean up chat messages if they were loaded
-                    await delete_chat_messages(session_id)
+                    await clear_chat_session(session_id)
                     
                     # Clean up any Redis subscriptions
                     await unsubscribe_from_conversation(session_id)

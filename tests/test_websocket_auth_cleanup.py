@@ -19,7 +19,7 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         self.mock_websocket.query_params = {}
         
     @patch('app.remove_session_timestamp')
-    @patch('app.delete_chat_messages')
+    @patch('app.clear_chat_session')
     @patch('app.unsubscribe_from_conversation')
     @patch('app.clear_session_mappings')
     @patch('app.remove_user_session')
@@ -38,7 +38,7 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         mock_remove_user_session,
         mock_clear_mappings,
         mock_unsubscribe,
-        mock_delete_messages,
+        mock_clear_session,
         mock_remove_timestamp
     ):
         """Test that resources are cleaned up when JWT authentication fails"""
@@ -77,13 +77,13 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         # Verify NO cleanup was called since resources_allocated should be False
         # (JWT fails before resources are allocated)
         mock_remove_timestamp.assert_not_called()
-        mock_delete_messages.assert_not_called()
+        mock_clear_session.assert_not_called()
         mock_unsubscribe.assert_not_called()
         mock_clear_mappings.assert_not_called()
         mock_remove_user_session.assert_not_called()
     
     @patch('app.remove_session_timestamp')
-    @patch('app.delete_chat_messages')
+    @patch('app.clear_chat_session')
     @patch('app.unsubscribe_from_conversation')
     @patch('app.clear_session_mappings')
     @patch('app.remove_user_session')
@@ -104,7 +104,7 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         mock_remove_user_session,
         mock_clear_mappings,
         mock_unsubscribe,
-        mock_delete_messages,
+        mock_clear_session,
         mock_remove_timestamp
     ):
         """Test cleanup when exception occurs after resources are allocated"""
@@ -150,7 +150,7 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         # Verify cleanup WAS called since resources_allocated should be True
         # (Session activity was updated before the failure)
         mock_remove_timestamp.assert_called_once()
-        mock_delete_messages.assert_called_once()
+        mock_clear_session.assert_called_once()
         mock_unsubscribe.assert_called_once()
         mock_clear_mappings.assert_called_once()
         mock_remove_user_session.assert_called_once()
