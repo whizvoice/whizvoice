@@ -76,10 +76,13 @@ sudo service nginx reload
 ```
 
 set up cron job to autorenew ssl cert
+
 ```
 crontab -e
 ```
+
 add this to your crontab
+
 ```
 0 12 * * * /usr/bin/certbot renew --quiet && /usr/bin/systemctl reload nginx
 ```
@@ -167,3 +170,21 @@ The tests cover:
 - Tool registry system (dynamic tool routing, validation, authentication requirements)
 - Authentication and client caching
 - Error handling and edge cases
+
+## troubleshooting
+
+### websockets
+
+Count all established connections to your WebSocket port (e.g., 8000)
+
+```
+netstat -an | grep :8000 | grep ESTABLISHED | wc -l
+```
+
+See detailed connections
+
+```
+netstat -an | grep :8000 | grep ESTABLISHED
+```
+
+*** NOTE THAT WE HAVE A GLOBAL CONNECTIONS LIMIT OF 500 AND A LIMIT OF 5 PER USER ***

@@ -1,14 +1,15 @@
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import sys
 import os
+import asyncio
 
 # Add the parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import get_current_claude_api_key, get_anthropic_client, _anthropic_clients_cache
 
-class TestAppHelpers(unittest.TestCase):
+class TestAppHelpers(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.test_user_id = "test_user_123"
         self.test_api_key = "sk-ant-api03-test-key-123"
@@ -54,15 +55,15 @@ class TestAppHelpers(unittest.TestCase):
         
         self.assertIsNone(result)
 
-    @patch('app.Anthropic')
+    @patch('app.AsyncAnthropic')
     @patch('app.get_current_claude_api_key')
-    def test_get_anthropic_client_success(self, mock_get_key, mock_anthropic):
+    async def test_get_anthropic_client_success(self, mock_get_key, mock_anthropic):
         """Test successful creation of Anthropic client"""
         mock_get_key.return_value = self.test_api_key
         mock_client = MagicMock()
         mock_anthropic.return_value = mock_client
         
-        result = get_anthropic_client(self.test_user_id)
+        result = await get_anthropic_client(self.test_user_id)
         
         self.assertEqual(result, mock_client)
         mock_get_key.assert_called_once_with(self.test_user_id)
@@ -73,18 +74,18 @@ class TestAppHelpers(unittest.TestCase):
         self.assertEqual(_anthropic_clients_cache[self.test_api_key], mock_client)
 
     @patch('app.get_current_claude_api_key')
-    def test_get_anthropic_client_no_api_key(self, mock_get_key):
+    async def test_get_anthropic_client_no_api_key(self, mock_get_key):
         """Test when no API key is available"""
         mock_get_key.return_value = None
         
-        result = get_anthropic_client(self.test_user_id)
+        result = await get_anthropic_client(self.test_user_id)
         
         self.assertIsNone(result)
         mock_get_key.assert_called_once_with(self.test_user_id)
 
-    @patch('app.Anthropic')
+    @patch('app.AsyncAnthropic')
     @patch('app.get_current_claude_api_key')
-    def test_get_anthropic_client_cache_hit(self, mock_get_key, mock_anthropic):
+    async def test_get_anthropic_client_cache_hit(self, mock_get_key, mock_anthropic):
         """Test that cached client is returned on subsequent calls"""
         mock_get_key.return_value = self.test_api_key
         mock_client = MagicMock()
@@ -92,22 +93,22 @@ class TestAppHelpers(unittest.TestCase):
         # Manually add to cache
         _anthropic_clients_cache[self.test_api_key] = mock_client
         
-        result = get_anthropic_client(self.test_user_id)
+        result = await get_anthropic_client(self.test_user_id)
         
         self.assertEqual(result, mock_client)
         mock_get_key.assert_called_once_with(self.test_user_id)
         # Anthropic should not be called since we have cached client
         mock_anthropic.assert_not_called()
 
-    def test_get_anthropic_client_no_user_id(self):
+    async def test_get_anthropic_client_no_user_id(self):
         """Test when no user_id is provided"""
-        result = get_anthropic_client(None)
+        result = await get_anthropic_client(None)
         
         self.assertIsNone(result)
 
-    @patch('app.Anthropic')
+    @patch('app.AsyncAnthropic')
     @patch('app.get_current_claude_api_key')
-    def test_get_anthropic_client_multiple_users(self, mock_get_key, mock_anthropic):
+    async def test_get_anthropic_client_multiple_users(self, mock_get_key, mock_anthropic):
         """Test caching works correctly for multiple users with different API keys"""
         user1_id = "user1"
         user2_id = "user2"
@@ -138,11 +139,11 @@ class TestAppHelpers(unittest.TestCase):
         mock_anthropic.side_effect = anthropic_side_effect
         
         # Get client for user1
-        result1 = get_anthropic_client(user1_id)
+        result1 = await get_anthropic_client(user1_id)
         self.assertEqual(result1, mock_client1)
         
         # Get client for user2
-        result2 = get_anthropic_client(user2_id)
+        result2 = await get_anthropic_client(user2_id)
         self.assertEqual(result2, mock_client2)
         
         # Verify both are cached
@@ -153,13 +154,13 @@ class TestAppHelpers(unittest.TestCase):
         
         # Get client for user1 again (should use cache)
         mock_anthropic.reset_mock()
-        result1_cached = get_anthropic_client(user1_id)
+        result1_cached = await get_anthropic_client(user1_id)
         self.assertEqual(result1_cached, mock_client1)
         mock_anthropic.assert_not_called()  # Should not create new client
 
-    @patch('app.Anthropic')
+    @patch('app.AsyncAnthropic')
     @patch('app.get_current_claude_api_key')
-    def test_get_anthropic_client_same_key_different_users(self, mock_get_key, mock_anthropic):
+    async def test_get_anthropic_client_same_key_different_users(self, mock_get_key, mock_anthropic):
         """Test that same API key shared by different users uses same cached client"""
         user1_id = "user1"
         user2_id = "user2"
@@ -170,12 +171,12 @@ class TestAppHelpers(unittest.TestCase):
         mock_anthropic.return_value = mock_client
         
         # Get client for user1
-        result1 = get_anthropic_client(user1_id)
+        result1 = await get_anthropic_client(user1_id)
         self.assertEqual(result1, mock_client)
         
         # Get client for user2 (should use cached client)
         mock_anthropic.reset_mock()
-        result2 = get_anthropic_client(user2_id)
+        result2 = await get_anthropic_client(user2_id)
         self.assertEqual(result2, mock_client)
         
         # Should not create new client since key is cached

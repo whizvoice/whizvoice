@@ -16,12 +16,33 @@ from pathlib import Path
 import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
-from anthropic import Anthropic, AuthenticationError
+from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
 from about_me_tool import about_me_tools, get_app_info
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 from supabase_client import supabase
+from redis_managers import create_managers
+from redis_helpers import (
+    # Chat session functions
+    get_chat_messages, add_chat_message, set_chat_messages, clear_chat_session,
+    # User session functions  
+    get_user_sessions, add_user_session, remove_user_session, get_all_user_sessions,
+    # Session timestamp functions
+    update_session_activity as update_session_activity_redis, 
+    get_session_timestamp, remove_session_timestamp,
+    get_stale_sessions, get_all_session_timestamps,
+    # Active request functions
+    add_active_request, remove_active_request, get_active_requests, clear_active_requests,
+    # Request state tracking functions
+    set_request_state, get_request_state, get_all_request_states,
+    # Session mapping functions
+    set_session_mapping, get_real_id, get_optimistic_id, clear_session_mappings,
+    # Utility functions
+    get_total_session_count, get_user_session_count,
+    # Module initialization
+    set_managers_and_storage
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -43,6 +64,30 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup_event():
     await init_redis()
+    # Start the background task for cleaning up stale sessions
+    asyncio.create_task(cleanup_stale_sessions())
+    logger.info(f"Started stale session cleanup task (checking every {CLEANUP_INTERVAL_SECONDS} seconds for sessions older than {SESSION_TIMEOUT_SECONDS} seconds)")
+
+# Clean up on app shutdown
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on app shutdown"""
+    logger.info("Starting server shutdown cleanup...")
+    
+    # Cancel all Redis listener tasks
+    if redis_managers and "local_objects" in redis_managers:
+        listener_tasks = await redis_managers["local_objects"].get_all_listener_tasks()
+        if listener_tasks:
+            logger.info(f"Cancelling {len(listener_tasks)} Redis listener tasks...")
+            for session_id in list(listener_tasks.keys()):
+                await redis_managers["local_objects"].cancel_listener_task(session_id)
+    
+    # Close Redis connection
+    if redis_client:
+        await redis_client.close()
+        logger.info("Closed Redis connection")
+    
+    logger.info("Server shutdown cleanup completed")
 
 # Add Request Logging Middleware
 @app.middleware("http")
@@ -93,20 +138,21 @@ def get_current_claude_api_key(user_id: Optional[str]) -> Optional[str]:
         return None
 
 # This dictionary will cache Anthropic clients per API key
-_anthropic_clients_cache: Dict[str, Anthropic] = {}
+_anthropic_clients_cache: Dict[str, AsyncAnthropic] = {}
 
-def get_anthropic_client(user_id: Optional[str]) -> Optional[Anthropic]:
+async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropic]:
     api_key = get_current_claude_api_key(user_id)
     if not api_key:
         return None
 
-    if api_key in _anthropic_clients_cache:
-        return _anthropic_clients_cache[api_key]
-    
-    logger.info(f"Creating new Anthropic client for user {user_id} (key ending with ...{api_key[-4:] if len(api_key) > 4 else ''}).")
-    new_client = Anthropic(api_key=api_key)
-    _anthropic_clients_cache[api_key] = new_client
-    return new_client
+    async with anthropic_clients_cache_lock:
+        if api_key in _anthropic_clients_cache:
+            return _anthropic_clients_cache[api_key]
+        
+        logger.info(f"Creating new AsyncAnthropic client for user {user_id} (key ending with ...{api_key[-4:] if len(api_key) > 4 else ''}).")
+        new_client = AsyncAnthropic(api_key=api_key)
+        _anthropic_clients_cache[api_key] = new_client
+        return new_client
 
 class ChatMessage(BaseModel):
     content: str
@@ -164,6 +210,7 @@ class MessageCreate(BaseModel):
     content: str
     message_type: str  # 'USER' or 'ASSISTANT'
     request_id: Optional[str] = None  # Client-generated UUID for request tracking
+    timestamp: Optional[str] = None  # Optional ISO format timestamp for preserving message order
 
 class MessageResponse(BaseModel):
     id: int
@@ -208,35 +255,70 @@ ALLOWED_PREFERENCE_KEYS = {
     # Add other preference keys here as needed
 }
 
-# Store active chat sessions
-chat_sessions = {}
+# Configuration for session management
+SESSION_TIMEOUT_SECONDS = 900  # 15 minutes timeout for inactive sessions
+CLEANUP_INTERVAL_SECONDS = 300  # Run cleanup every 5 minutes
+MAX_SESSIONS_PER_USER = int(os.getenv("MAX_SESSIONS_PER_USER", "5"))  # Max concurrent sessions per user
+MAX_TOTAL_SESSIONS = int(os.getenv("MAX_TOTAL_SESSIONS", "500"))  # Max total concurrent sessions
+SESSION_WARNING_THRESHOLD = 0.8  # Warn when at 80% capacity
 
-# User sessions mapping - maps user IDs to their chat sessions
-user_sessions = {}
-
-# Store WebSocket connections by conversation ID for broadcasting
-# conversation_id -> list of (session_id, websocket) tuples
-conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}
-
-# Redis connection for pub/sub
+# Redis connection and managers
 redis_client: Optional[redis.Redis] = None
-# Store pubsub instances for each WebSocket connection
-websocket_pubsubs: Dict[str, PubSub] = {}  # session_id -> PubSub instance
+redis_managers = None  # Will be initialized after Redis connection
+
+# Local-only data structures moved to LocalObjectManager in redis_managers
+
+# Legacy local dictionaries - to be replaced by Redis managers
+# Keeping temporarily for backwards compatibility during migration
+chat_sessions = {}  # DEPRECATED - use redis_managers["chat_sessions"]
+user_sessions = {}  # DEPRECATED - use redis_managers["user_sessions"]
+session_timestamps: Dict[str, float] = {}  # DEPRECATED - use redis_managers["session_timestamps"]
+request_states: Dict[str, Dict[str, Any]] = {}  # Track request states locally as fallback
 
 # Define the response model for the new GET endpoint
 ASANA_ACCESS_TOKEN_PREF_NAME = "asana_access_token" # Define this constant
 
-# Add global tracking for active requests (session_id -> set of request_ids)
-active_requests: Dict[str, Set[str]] = {}
-active_tasks: Dict[str, asyncio.Task] = {}  # request_id -> task
+# Locks for thread-safe access to shared dictionaries
+chat_sessions_lock = asyncio.Lock()
+user_sessions_lock = asyncio.Lock()
+session_timestamps_lock = asyncio.Lock()
+anthropic_clients_cache_lock = asyncio.Lock()
+request_states_lock = asyncio.Lock()
 
-# Global dictionary to track optimistic ID mappings per session
-session_mappings: Dict[str, Dict[str, Dict[int, int]]] = {}  # session_id -> {"optimistic_to_real": {client_id: real_id}, "real_to_optimistic": {real_id: client_id}}
+
+async def migrate_local_to_redis():
+    """Migrate existing local session data to Redis (one-time during startup)"""
+    if not redis_managers:
+        return
+    
+    try:
+        # Migrate chat sessions
+        for session_id, messages in chat_sessions.items():
+            await redis_managers["chat_sessions"].set(session_id, messages)
+        
+        # Migrate user sessions
+        for user_id, session_ids in user_sessions.items():
+            for session_id in session_ids:
+                await redis_managers["user_sessions"].add_session(user_id, session_id)
+        
+        # Migrate session timestamps
+        for session_id, timestamp in session_timestamps.items():
+            await redis_managers["session_timestamps"].update(session_id, timestamp)
+        
+        # Active requests are now fully managed by Redis - no migration needed
+        
+        # Session mappings migration no longer needed - removed deprecated local storage
+        
+        if chat_sessions or user_sessions or session_timestamps:
+            logger.info(f"Migrated local data to Redis: {len(chat_sessions)} chat sessions, "
+                       f"{len(user_sessions)} user sessions, {len(session_timestamps)} timestamps")
+    except Exception as e:
+        logger.error(f"Failed to migrate local data to Redis: {e}")
 
 
 async def init_redis():
-    """Initialize Redis connection for pub/sub"""
-    global redis_client
+    """Initialize Redis connection for pub/sub and session management"""
+    global redis_client, redis_managers
     try:
         # Connect to local Redis (default port 6379)
         redis_client = await redis.from_url(
@@ -247,9 +329,33 @@ async def init_redis():
         # Test the connection
         await redis_client.ping()
         logger.info("Successfully connected to Redis for pub/sub")
+        
+        # Initialize Redis managers for distributed session state
+        redis_managers = create_managers(redis_client)
+        logger.info("Initialized Redis managers for distributed session management")
+        
+        # Initialize the helper module with managers and local storage
+        local_storage = {
+            "chat_sessions": chat_sessions,
+            "user_sessions": user_sessions,
+            "session_timestamps": session_timestamps,
+            "request_states": request_states
+        }
+        locks = {
+            "chat_sessions_lock": chat_sessions_lock,
+            "user_sessions_lock": user_sessions_lock,
+            "session_timestamps_lock": session_timestamps_lock,
+            "request_states_lock": request_states_lock
+        }
+        set_managers_and_storage(redis_managers, local_storage, locks)
+        
+        # Migrate any existing local data to Redis (for smooth transition)
+        await migrate_local_to_redis()
+        
     except Exception as e:
         logger.warning(f"Failed to connect to Redis: {str(e)}. WebSocket broadcasting will be limited to single process.")
         redis_client = None
+        redis_managers = None
 
 
 async def subscribe_to_conversation(session_id: str, conversation_id: int, websocket: WebSocket):
@@ -264,12 +370,22 @@ async def subscribe_to_conversation(session_id: str, conversation_id: int, webso
         
         # Subscribe to the conversation channel
         await pubsub.subscribe(channel_name)
-        websocket_pubsubs[session_id] = pubsub
+        
+        # Store pubsub in LocalObjectManager
+        if redis_managers and "local_objects" in redis_managers:
+            await redis_managers["local_objects"].add_pubsub(session_id, pubsub)
+        else:
+            logger.warning(f"Redis managers not available, pubsub for {session_id} not stored")
         
         logger.info(f"Session {session_id} subscribed to Redis channel {channel_name}")
         
-        # Start listening for messages in the background
-        asyncio.create_task(redis_message_listener(session_id, pubsub, websocket))
+        # Start listening for messages in the background and track the task
+        listener_task = asyncio.create_task(redis_message_listener(session_id, pubsub, websocket))
+        if redis_managers and "local_objects" in redis_managers:
+            await redis_managers["local_objects"].add_listener_task(session_id, listener_task)
+        else:
+            # Fallback if managers not initialized (shouldn't happen in practice)
+            logger.warning(f"Redis managers not available, listener task for {session_id} not tracked")
         
     except Exception as e:
         logger.error(f"Failed to subscribe session {session_id} to conversation {conversation_id}: {str(e)}")
@@ -277,15 +393,56 @@ async def subscribe_to_conversation(session_id: str, conversation_id: int, webso
 
 async def unsubscribe_from_conversation(session_id: str):
     """Unsubscribe from Redis channels"""
-    if session_id in websocket_pubsubs:
-        try:
-            pubsub = websocket_pubsubs[session_id]
-            await pubsub.unsubscribe()
-            await pubsub.close()
-            del websocket_pubsubs[session_id]
-            logger.info(f"Session {session_id} unsubscribed from Redis channels")
-        except Exception as e:
-            logger.error(f"Error unsubscribing session {session_id}: {str(e)}")
+    # Get and remove pubsub from LocalObjectManager
+    pubsub = None
+    if redis_managers and "local_objects" in redis_managers:
+        pubsub = await redis_managers["local_objects"].remove_pubsub(session_id)
+    
+    if not pubsub:
+        return
+    
+    try:
+        await pubsub.unsubscribe()
+        await pubsub.close()
+        logger.info(f"Session {session_id} unsubscribed from Redis channels")
+    except Exception as e:
+        logger.error(f"Error unsubscribing session {session_id}: {str(e)}")
+
+
+async def update_websocket_conversation(session_id: str, old_conversation_id: Optional[int], new_conversation_id: int, websocket: WebSocket):
+    """Safely update WebSocket conversation mapping and Redis subscriptions.
+    
+    This function ensures there's always an active listener during the transition
+    by creating the new subscription before destroying the old one.
+    """
+    if old_conversation_id == new_conversation_id:
+        return  # No change needed
+    
+    logger.info(f"Updating WebSocket conversation for session {session_id}: {old_conversation_id} → {new_conversation_id}")
+    
+    try:
+        # STEP 1: Subscribe to new Redis channel FIRST (before unsubscribing from old)
+        await subscribe_to_conversation(session_id, new_conversation_id, websocket)
+        
+        # STEP 2: Update the conversation_websockets mapping using LocalObjectManager
+        if redis_managers and "local_objects" in redis_managers:
+            await redis_managers["local_objects"].update_conversation_websocket(
+                session_id, old_conversation_id, new_conversation_id, websocket
+            )
+        
+        # STEP 3: NOW unsubscribe from old channel (after new one is active)
+        if old_conversation_id:
+            # Cancel the old listener task first
+            if redis_managers and "local_objects" in redis_managers:
+                await redis_managers["local_objects"].cancel_listener_task(session_id)
+            await unsubscribe_from_conversation(session_id)
+        
+        logger.info(f"Successfully updated WebSocket registration for session {session_id}")
+        
+    except Exception as e:
+        logger.error(f"Error updating WebSocket conversation for session {session_id}: {str(e)}")
+        # Don't close the WebSocket on error - let it continue with the original setup
+        raise
 
 
 async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: WebSocket):
@@ -302,6 +459,9 @@ async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: Web
                         continue
                     
                     # Forward the message to this WebSocket
+                    # Update activity timestamp before forwarding
+                    await update_session_activity(session_id)
+                    
                     await websocket.send_text(json.dumps(data["payload"]))
                     logger.info(f"Forwarded Redis message to session {session_id}")
                     
@@ -309,11 +469,23 @@ async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: Web
                     logger.error(f"Invalid JSON in Redis message: {message['data']}")
                 except Exception as e:
                     logger.error(f"Error forwarding message to session {session_id}: {str(e)}")
-                    break
+                    # Don't break on transient forwarding errors - let client retry
+                    if "WebSocket" in str(e):
+                        break
     except asyncio.CancelledError:
         logger.info(f"Redis listener cancelled for session {session_id}")
+        raise  # Re-raise to properly propagate cancellation
     except Exception as e:
-        logger.error(f"Redis listener error for session {session_id}: {str(e)}")
+        # Check if this is just a connection close during channel switch (expected)
+        if "Connection closed by server" in str(e):
+            logger.info(f"Redis listener connection closed for session {session_id} (likely during channel switch)")
+        else:
+            logger.error(f"Redis listener error for session {session_id}: {str(e)}")
+            # Only close WebSocket on unexpected Redis failures
+            try:
+                await websocket.close(code=1011, reason="Redis connection lost")
+            except:
+                pass
 
 
 # Tool registry that maps tool names to their configuration
@@ -772,35 +944,80 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 logger.info(f"Authenticated WebSocket connection for user {user_email} ({user_id})")
                 
+                # Check global session limit before creating new session
+                async with chat_sessions_lock:
+                    total_sessions = len(chat_sessions)
+                
+                # Reject if at capacity
+                if total_sessions >= MAX_TOTAL_SESSIONS:
+                    logger.error(f"MAX_TOTAL_SESSIONS reached: {total_sessions}/{MAX_TOTAL_SESSIONS}. Rejecting connection from {user_email}")
+                    error_payload = {
+                        "type": "error",
+                        "code": "SERVICE_AT_CAPACITY",
+                        "message": "Service at capacity. Please try again later."
+                    }
+                    await websocket.send_text(json.dumps(error_payload))
+                    await websocket.close(code=1013, reason="Service at capacity")  # 1013: Try Again Later
+                    return
+                
+                # Warn if approaching capacity
+                warning_threshold = int(MAX_TOTAL_SESSIONS * SESSION_WARNING_THRESHOLD)
+                if total_sessions >= warning_threshold:
+                    capacity_percent = (total_sessions / MAX_TOTAL_SESSIONS) * 100
+                    logger.warning(f"Session count high: {total_sessions}/{MAX_TOTAL_SESSIONS} ({capacity_percent:.1f}% capacity)")
+                
+                # CRITICAL FIX: Resolve optimistic conversation IDs to real IDs before setting up the session
+                # This ensures we subscribe to the correct Redis channel and track the correct conversation
+                actual_conversation_id = conversation_id
+                if conversation_id is not None and conversation_id < 0:
+                    # This is an optimistic ID, check if it has a real ID in the database
+                    logger.info(f"Checking if optimistic conversation ID {conversation_id} has been migrated to a real ID")
+                    opt_result = supabase.table("conversations")\
+                        .select("id")\
+                        .eq("user_id", user_id)\
+                        .eq("optimistic_chat_id", str(conversation_id))\
+                        .execute()
+                    
+                    if opt_result.data and len(opt_result.data) > 0:
+                        actual_conversation_id = opt_result.data[0]["id"]
+                        logger.info(f"Optimistic ID {conversation_id} has been migrated to real ID {actual_conversation_id}, will use real ID for session")
+                    else:
+                        logger.info(f"Optimistic ID {conversation_id} has not been migrated yet, will use optimistic ID")
+                
                 # Load conversation history and initialize session
                 # Create a unique session ID per conversation, not just per user
+                # Note: We keep the original conversation_id in the session_id for consistency,
+                # but use actual_conversation_id for all operations
                 if conversation_id is not None:
                     session_id = f"ws_{user_id}_conv_{conversation_id}"
                 else:
                     # If no specific conversation, create a session for a new conversation
                     session_id = f"ws_{user_id}_new_{int(time.time())}"
                 
-                conversation_history = load_conversation_history(user_id, conversation_id)
-                chat_sessions[session_id] = conversation_history
+                # IMPORTANT: Track session immediately to ensure cleanup even if errors occur
+                await update_session_activity_redis(session_id)
+                
+                # Use actual_conversation_id for loading history (it already handles optimistic IDs internally,
+                # but we've already resolved it so we can pass the real ID directly)
+                conversation_history = load_conversation_history(user_id, actual_conversation_id)
+                
+                await set_chat_messages(session_id, conversation_history)
                 
                 logger.info(f"Created session {session_id} with {len(conversation_history)} messages")
                 
-                # Track the current conversation_id for this session
-                session_conversation_id = conversation_id
+                # Track the actual conversation_id for this session (not the optimistic one)
+                session_conversation_id = actual_conversation_id
                 
-                # Register WebSocket with conversation for broadcasting
-                if conversation_id is not None:
-                    if conversation_id not in conversation_websockets:
-                        conversation_websockets[conversation_id] = []
-                    conversation_websockets[conversation_id].append((session_id, websocket))
-                    logger.info(f"Registered WebSocket for session {session_id} with conversation {conversation_id}")
+                # Register WebSocket with the actual conversation for broadcasting
+                if actual_conversation_id is not None:
+                    await register_websocket_for_conversation(session_id, actual_conversation_id, websocket)
                     
-                    # Subscribe to Redis channel for this conversation
-                    await subscribe_to_conversation(session_id, conversation_id, websocket)
+                    # Subscribe to Redis channel for the actual conversation (not the optimistic ID)
+                    await subscribe_to_conversation(session_id, actual_conversation_id, websocket)
                 
                 # FIXED: Don't automatically load existing conversation when conversation_id is None
                 # This allows new chats to create fresh conversations instead of reusing old ones
-                if conversation_id is None:
+                if actual_conversation_id is None:
                     # For new chats, keep session_conversation_id as None until first message creates it
                     logger.info(f"New chat session - will create conversation on first message")
                 
@@ -813,6 +1030,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.info(f"Loaded {len(conversation_history)} messages from conversation history for user {user_id}")
                 else:
                     logger.info(f"New chat session - no conversation history, UI will show placeholder text")
+                
+                # Log the resolution if it happened
+                if conversation_id != actual_conversation_id:
+                    logger.info(f"WebSocket connected with optimistic ID {conversation_id}, resolved to real ID {actual_conversation_id}")
                     
             except JWTError as e:
                 logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
@@ -847,15 +1068,11 @@ async def websocket_endpoint(websocket: WebSocket):
         # chat_sessions[session_id] = []  # Already initialized above with conversation history
         
         # Associate session with user
-        if user_id not in user_sessions:
-            user_sessions[user_id] = []
-        user_sessions[user_id].append(session_id)
+        await add_user_session(user_id, session_id)
         
-        # Initialize session mappings for optimistic ID tracking
-        session_mappings[session_id] = {
-            "optimistic_to_real": {},
-            "real_to_optimistic": {}
-        }
+        # Check if user has exceeded session limit and evict old sessions if needed
+        # IMPORTANT: Must happen AFTER adding new session to get accurate count
+        await evict_user_sessions_if_needed(user_id, session_id)
         
         try:
             while True:
@@ -863,19 +1080,67 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Receive message from client
                     message_text = await websocket.receive_text()
                     
+                    # Update session timestamp on activity
+                    # Update activity timestamp for receiving a message
+                    await update_session_activity_redis(session_id)
+                    logger.debug(f"Updated activity timestamp for session {session_id} (received message)")
+                    
                     # Parse incoming message - support both structured JSON and legacy plain text
                     request_id = None
                     message_type = "message"  # default type
                     client_conversation_id = None
                     client_message_id = None
+                    client_timestamp = None
                     try:
                         message_data = json.loads(message_text)
                         message = message_data.get("message", "")
                         request_id = message_data.get("request_id")
                         message_type = message_data.get("type", "message")  # Support message types
+                        
+                        # Get conversation_id from message (if provided)
+                        message_conversation_id = message_data.get("conversation_id")
                         client_conversation_id = message_data.get("client_conversation_id")
                         client_message_id = message_data.get("client_message_id")
-                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, client_conversation_id: {client_conversation_id}")
+                        # Get timestamp from client for preserving message order
+                        client_timestamp = message_data.get("timestamp")
+                        
+                        # If message includes a conversation_id, update the session's conversation_id only if it changed
+                        if message_conversation_id is not None and message_conversation_id > 0:
+                            if session_conversation_id != message_conversation_id:
+                                logger.info(f"Updating session conversation_id from {session_conversation_id} to {message_conversation_id}")
+                                session_conversation_id = message_conversation_id
+                            # else: conversation_id matches, no update needed
+                        
+                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}")
+                        
+                        # Validate client_conversation_id immediately
+                        # Convert to int if it's a string number, and check if positive
+                        if client_conversation_id is not None:
+                            try:
+                                client_conv_id_int = int(client_conversation_id) if isinstance(client_conversation_id, str) else client_conversation_id
+                                if client_conv_id_int > 0:
+                                    error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. Use the conversation_id URL parameter for server-assigned IDs."
+                                    logger.error(error_msg)
+                                    await websocket.send_json({
+                                        "error": error_msg,
+                                        "type": "error",
+                                        "request_id": request_id
+                                    })
+                                    continue  # Skip processing this message
+                                # Update client_conversation_id to be the integer version for consistency
+                                client_conversation_id = client_conv_id_int
+                            except (ValueError, TypeError):
+                                # If it's not a valid number, log and continue with original value
+                                logger.warning(f"client_conversation_id is not a valid number: {client_conversation_id} (type: {type(client_conversation_id)})")
+                        
+                        # If session_conversation_id is None (new conversation) and we have an optimistic ID, use it
+                        if session_conversation_id is None and client_conversation_id is not None and client_conversation_id < 0:
+                            logger.info(f"Setting session_conversation_id to optimistic ID {client_conversation_id} for new conversation")
+                            session_conversation_id = client_conversation_id
+                            # Register and subscribe to this optimistic conversation ID
+                            # This ensures the WebSocket can receive broadcasts immediately
+                            await register_websocket_for_conversation(session_id, client_conversation_id, websocket)
+                            await subscribe_to_conversation(session_id, client_conversation_id, websocket)
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -884,32 +1149,42 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Handle cancellation requests
                     if message_type == "cancel":
                         cancel_request_id = message_data.get("cancel_request_id")
-                        if cancel_request_id and cancel_request_id in active_tasks:
-                            logger.info(f"Cancelling request {cancel_request_id}")
-                            active_tasks[cancel_request_id].cancel()
-                            del active_tasks[cancel_request_id]
-                            
-                            # Remove from active requests tracking
-                            if session_id in active_requests:
-                                active_requests[session_id].discard(cancel_request_id)
-                            
-                            # Send cancellation confirmation
-                            cancel_response = {
-                                "type": "cancelled",
-                                "cancelled_request_id": cancel_request_id,
-                                "request_id": request_id
-                            }
-                            await websocket.send_text(json.dumps(cancel_response))
+                        if cancel_request_id and redis_managers and "local_objects" in redis_managers:
+                            task = await redis_managers["local_objects"].get_and_cancel_task(cancel_request_id)
+                            if task:
+                                logger.info(f"Cancelling request {cancel_request_id}")
+                        
+                        # Remove from active requests tracking in Redis
+                        if redis_managers and "active_requests" in redis_managers:
+                            await redis_managers["active_requests"].remove(session_id, cancel_request_id)
+                        
+                        # Send cancellation confirmation
+                        cancel_response = {
+                            "type": "cancelled",
+                            "cancelled_request_id": cancel_request_id,
+                            "request_id": request_id
+                        }
+                        await websocket.send_text(json.dumps(cancel_response))
                         continue
                     
                     # Handle regular messages
                     if message_type == "message" and message:
                         # Check for active requests and handle interrupts
-                        if session_id in active_requests and active_requests[session_id]:
+                        has_active_requests = False
+                        active_request_ids = []
+                        if redis_managers and "active_requests" in redis_managers:
+                            active_request_ids = list(await redis_managers["active_requests"].get_all(session_id))
+                            has_active_requests = len(active_request_ids) > 0
+                            if has_active_requests:
+                                # Clear all active requests for this session in Redis
+                                await redis_managers["active_requests"].clear(session_id)
+                        
+                        if has_active_requests:
                             # Validate interrupt context if optimistic ID provided
-                            if client_conversation_id and session_id in session_mappings:
-                                mappings = session_mappings[session_id]
-                                real_id = mappings["optimistic_to_real"].get(client_conversation_id)
+                            if client_conversation_id and redis_managers and "session_mappings" in redis_managers:
+                                real_id = await redis_managers["session_mappings"].get_real_id(
+                                    session_id, client_conversation_id
+                                )
                                 
                                 if real_id and real_id != session_conversation_id:
                                     logger.warning(f"Interrupt attempt with mismatched conversation context: "
@@ -917,13 +1192,11 @@ async def websocket_endpoint(websocket: WebSocket):
                                     
                                 logger.info(f"Validated interrupt: optimistic {client_conversation_id} → real {real_id}")
                             
-                            logger.info(f"Interrupt detected. Cancelling {len(active_requests[session_id])} active requests")
+                            logger.info(f"Interrupt detected. Cancelling {len(active_request_ids)} active requests")
                             # Cancel all active requests for this session
-                            for active_request_id in list(active_requests[session_id]):
-                                if active_request_id in active_tasks:
-                                    active_tasks[active_request_id].cancel()
-                                    del active_tasks[active_request_id]
-                            active_requests[session_id].clear()
+                            if redis_managers and "local_objects" in redis_managers:
+                                cancelled_count = await redis_managers["local_objects"].cancel_tasks_by_ids(list(active_request_ids))
+                                logger.info(f"Cancelled {cancelled_count} tasks")
                             
                             # Send interrupt notification with client context
                             interrupt_response = {
@@ -943,18 +1216,18 @@ async def websocket_endpoint(websocket: WebSocket):
                                 user_id=user_id,
                                 message=message,
                                 request_id=request_id,
-                                chat_sessions=chat_sessions,
                                 client_conversation_id=client_conversation_id,
-                                client_message_id=client_message_id
+                                client_message_id=client_message_id,
+                                client_timestamp=client_timestamp
                             )
                         )
                         
                         # Track the task
-                        if request_id:
-                            active_tasks[request_id] = task
-                            if session_id not in active_requests:
-                                active_requests[session_id] = set()
-                            active_requests[session_id].add(request_id)
+                        if request_id and redis_managers:
+                            if "local_objects" in redis_managers:
+                                await redis_managers["local_objects"].add_task(request_id, task)
+                            if "active_requests" in redis_managers:
+                                await redis_managers["active_requests"].add(session_id, request_id)
                         
                         # Wait for task completion and update session_conversation_id
                         try:
@@ -962,43 +1235,30 @@ async def websocket_endpoint(websocket: WebSocket):
                             if updated_session_conversation_id is not None:
                                 # Register WebSocket with new conversation ID if it changed
                                 if updated_session_conversation_id != session_conversation_id:
-                                    # Unsubscribe from old Redis channel
-                                    if session_conversation_id:
-                                        await unsubscribe_from_conversation(session_id)
-                                    
-                                    # Remove from old conversation if any
-                                    if session_conversation_id and session_conversation_id in conversation_websockets:
-                                        conversation_websockets[session_conversation_id] = [
-                                            (sid, ws) for sid, ws in conversation_websockets[session_conversation_id]
-                                            if sid != session_id
-                                        ]
-                                        if not conversation_websockets[session_conversation_id]:
-                                            del conversation_websockets[session_conversation_id]
-                                    
-                                    # Add to new conversation
-                                    if updated_session_conversation_id not in conversation_websockets:
-                                        conversation_websockets[updated_session_conversation_id] = []
-                                    conversation_websockets[updated_session_conversation_id].append((session_id, websocket))
-                                    logger.info(f"Updated WebSocket registration for session {session_id}: {session_conversation_id} → {updated_session_conversation_id}")
-                                    
-                                    # Subscribe to new Redis channel
-                                    await subscribe_to_conversation(session_id, updated_session_conversation_id, websocket)
+                                    # Use the safe update function that creates new listener before destroying old one
+                                    try:
+                                        await update_websocket_conversation(session_id, session_conversation_id, updated_session_conversation_id, websocket)
+                                    except Exception as e:
+                                        logger.error(f"Failed to update WebSocket conversation in main loop: {str(e)}")
+                                        # Continue with the current conversation ID if update fails
                                 
                                 session_conversation_id = updated_session_conversation_id
                         except asyncio.CancelledError:
                             logger.info(f"Request {request_id} was cancelled")
                             # Clean up tracking
-                            if request_id:
-                                active_tasks.pop(request_id, None)
-                                if session_id in active_requests:
-                                    active_requests[session_id].discard(request_id)
+                            if request_id and redis_managers:
+                                if "local_objects" in redis_managers:
+                                    await redis_managers["local_objects"].remove_task(request_id)
+                                if "active_requests" in redis_managers:
+                                    await redis_managers["active_requests"].remove(session_id, request_id)
                         except Exception as e:
                             logger.error(f"Error processing message: {e}")
                             # Clean up tracking
-                            if request_id:
-                                active_tasks.pop(request_id, None)
-                                if session_id in active_requests:
-                                    active_requests[session_id].discard(request_id)
+                            if request_id and redis_managers:
+                                if "local_objects" in redis_managers:
+                                    await redis_managers["local_objects"].remove_task(request_id)
+                                if "active_requests" in redis_managers:
+                                    await redis_managers["active_requests"].remove(session_id, request_id)
                             raise
 
                 except AuthenticationError as claude_auth_exc: # MODIFIED: Use AuthenticationError directly
@@ -1023,10 +1283,55 @@ async def websocket_endpoint(websocket: WebSocket):
                         logger.warning(f"Unhandled StopIteration: {str(si)}. Re-raising.")
                         raise # Re-raise other StopIterations if any
                 except WebSocketDisconnect:
-                    cleanup_session(session_id, user_id, session_conversation_id)
-                    logger.info(f"WebSocket disconnected for session {session_id}")
+                    logger.info(f"WebSocket disconnected for session {session_id}, allowing active tasks to complete")
+                    # Wait for any active tasks to complete (with timeout)
+                    active_reqs = await get_active_requests(session_id)
+                    if active_reqs:
+                        logger.info(f"Waiting for {len(active_reqs)} active requests to complete for session {session_id}")
+                        # Give tasks up to 65 seconds to complete (5 seconds more than API timeout)
+                        wait_start = time.time()
+                        max_wait = 65.0
+                        
+                        while time.time() - wait_start < max_wait:
+                            active_reqs = await get_active_requests(session_id)
+                            if not active_reqs:
+                                logger.info(f"All tasks completed for session {session_id}")
+                                break
+                            await asyncio.sleep(0.5)
+                        
+                        if active_reqs:
+                            logger.warning(f"Timed out waiting for {len(active_reqs)} tasks for session {session_id}")
+                    
+                    await cleanup_session(session_id, user_id, session_conversation_id)
+                    logger.info(f"WebSocket cleanup completed for session {session_id}")
                     break
                 except Exception as e:
+                    # Check if this is a WebSocket disconnection error FIRST
+                    if "WebSocket is not connected" in str(e) or "close message has been sent" in str(e) or "Need to call" in str(e):
+                        logger.info(f"WebSocket connection lost for session {session_id}, allowing active tasks to complete")
+                        # Wait for any active tasks to complete (with timeout)
+                        active_reqs = await get_active_requests(session_id)
+                        if active_reqs:
+                            logger.info(f"Waiting for {len(active_reqs)} active requests to complete for session {session_id}")
+                            # Give tasks up to 65 seconds to complete (5 seconds more than API timeout)
+                            wait_start = time.time()
+                            max_wait = 65.0
+                            
+                            while time.time() - wait_start < max_wait:
+                                active_reqs = await get_active_requests(session_id)
+                                if not active_reqs:
+                                    logger.info(f"All tasks completed for session {session_id}")
+                                    break
+                                await asyncio.sleep(0.5)
+                            
+                            if active_reqs:
+                                logger.warning(f"Timed out waiting for {len(active_reqs)} tasks for session {session_id}")
+                        
+                        await cleanup_session(session_id, user_id, session_conversation_id)
+                        logger.info(f"WebSocket cleanup completed for session {session_id}")
+                        break
+                    
+                    # For other errors, log and try to send error to client
                     logger.error(f"Error during WebSocket message processing for session {session_id}: {str(e)}", exc_info=True)
                     logger.error(traceback.format_exc())
                     try:
@@ -1040,17 +1345,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         await websocket.send_text(json.dumps(error_payload))
                     except Exception as send_exc:
                         logger.error(f"Failed to send error to client for session {session_id}: {str(send_exc)}")
-                    # CRITICAL FIX: Break from loop instead of continue when WebSocket errors occur
-                    # to prevent infinite error loops when connection is lost
-                    if "WebSocket is not connected" in str(e) or "close message has been sent" in str(e):
-                        cleanup_session(session_id, user_id, session_conversation_id)
-                        logger.info(f"WebSocket connection lost for session {session_id}, breaking from loop")
-                        break
                     continue # Only continue for recoverable errors
                     
         except Exception as e:
             # Handle any other errors that might occur
-            cleanup_session(session_id, user_id, session_conversation_id)
+            await cleanup_session(session_id, user_id, session_conversation_id)
             logger.error(f"WebSocket error: {str(e)}")
             logger.error(traceback.format_exc())
             raise
@@ -1065,12 +1364,25 @@ async def websocket_endpoint(websocket: WebSocket):
         except:
             pass
 
+async def register_websocket_for_conversation(session_id: str, conversation_id: int, websocket: WebSocket):
+    """Register a WebSocket for a conversation, handling both real and optimistic IDs"""
+    if redis_managers and "local_objects" in redis_managers:
+        await redis_managers["local_objects"].register_conversation_websocket(
+            session_id, conversation_id, websocket
+        )
+
+async def update_session_activity(session_id: str) -> None:
+    """Helper function to update session activity timestamp - wrapper for Redis version"""
+    await update_session_activity_redis(session_id)
+    logger.debug(f"Updated activity for session {session_id}")
+
 async def broadcast_to_conversation(conversation_id: int, message_payload: dict, exclude_session: Optional[str] = None):
     """Broadcast a message to all WebSocket connections for a specific conversation"""
     
     # First, try Redis pub/sub for cross-process broadcasting
     if redis_client:
         try:
+            # Publish to the real conversation ID channel
             channel_name = f"conversation:{conversation_id}"
             message_data = {
                 "payload": message_payload,
@@ -1078,16 +1390,64 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             }
             await redis_client.publish(channel_name, json.dumps(message_data))
             logger.info(f"Published message to Redis channel {channel_name} (excluding session: {exclude_session})")
+            
+            # ALSO publish to any optimistic conversation ID channels
+            # Look up if this real ID has an associated optimistic ID
+            try:
+                opt_result = supabase.table("conversations")\
+                    .select("optimistic_chat_id")\
+                    .eq("id", conversation_id)\
+                    .execute()
+                
+                if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
+                    optimistic_id = opt_result.data[0]["optimistic_chat_id"]
+                    opt_channel_name = f"conversation:{optimistic_id}"
+                    await redis_client.publish(opt_channel_name, json.dumps(message_data))
+                    logger.info(f"Also published message to optimistic Redis channel {opt_channel_name}")
+            except Exception as opt_e:
+                logger.warning(f"Could not check for optimistic ID for conversation {conversation_id}: {str(opt_e)}")
         except Exception as e:
             logger.error(f"Failed to publish to Redis: {str(e)}")
     
     # Also use local broadcasting for WebSockets in this process
-    if conversation_id not in conversation_websockets:
-        logger.info(f"No local WebSocket sessions registered for conversation {conversation_id}")
+    connections = []
+    
+    if redis_managers and "local_objects" in redis_managers:
+        # Get connections for the real conversation ID
+        connections.extend(await redis_managers["local_objects"].get_conversation_websockets(conversation_id))
+        
+        # ALSO check for any optimistic conversation IDs that map to this real ID
+        # First check the database for the optimistic ID
+        try:
+            opt_result = supabase.table("conversations")\
+                .select("optimistic_chat_id")\
+                .eq("id", conversation_id)\
+                .execute()
+            
+            if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
+                optimistic_id = int(opt_result.data[0]["optimistic_chat_id"])
+                opt_connections = await redis_managers["local_objects"].get_conversation_websockets(optimistic_id)
+                if opt_connections:
+                    logger.info(f"Found WebSockets registered under optimistic ID {optimistic_id} for real conversation {conversation_id}")
+                    connections.extend(opt_connections)
+        except Exception as e:
+            logger.warning(f"Could not check for optimistic ID in database: {str(e)}")
+        
+        # Also check Redis session_mappings as a fallback
+        # Note: This requires iterating through all sessions since Redis doesn't have reverse mapping lookup
+        # In practice, this fallback should rarely be needed since the database stores optimistic IDs
+        if redis_managers and "session_mappings" in redis_managers:
+            # For now, log that we're skipping this check since it would be inefficient
+            # The database check above should handle most cases
+            logger.debug(f"Skipping exhaustive session_mappings check for conversation {conversation_id}")
+    
+    if not connections:
+        logger.info(f"No local WebSocket sessions registered for conversation {conversation_id} (checked real and optimistic IDs)")
         return
     
     # Create a copy of the list to avoid modification during iteration
-    connections = list(conversation_websockets[conversation_id])
+    connections = list(set(connections))  # Remove duplicates
+    
     logger.info(f"Broadcasting locally to conversation {conversation_id} with {len(connections)} registered sessions: {[sid for sid, _ in connections]}")
     disconnected_sessions = []
     
@@ -1098,6 +1458,8 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             continue
             
         try:
+            # Update activity for session receiving broadcast
+            await update_session_activity(session_id)
             await websocket.send_text(json.dumps(message_payload))
             logger.info(f"Broadcasted message locally to session {session_id} for conversation {conversation_id}")
         except Exception as e:
@@ -1105,48 +1467,201 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             disconnected_sessions.append((session_id, websocket))
     
     # Clean up disconnected sessions
-    for session_id, websocket in disconnected_sessions:
-        conversation_websockets[conversation_id].remove((session_id, websocket))
-    
-    # Remove empty conversation entries
-    if conversation_id in conversation_websockets and not conversation_websockets[conversation_id]:
-        del conversation_websockets[conversation_id]
+    if disconnected_sessions and redis_managers and "local_objects" in redis_managers:
+        for session_id, websocket in disconnected_sessions:
+            await redis_managers["local_objects"].remove_websocket_from_conversation(
+                conversation_id, session_id, websocket
+            )
 
-def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation_id: Optional[int] = None):
+async def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation_id: Optional[int] = None):
     """Clean up a session when a WebSocket disconnects"""
-    if session_id in chat_sessions:
-        del chat_sessions[session_id]
-        logger.info(f"Cleaned up chat session: {session_id}")
+    # Don't delete chat_sessions immediately - let any active message processing tasks complete
+    # They need the session history to generate responses
+    # The session will be cleaned up when the task completes or after a timeout
+    logger.info(f"Cleaning up session {session_id}, but keeping chat history for active tasks")
     
-    # Clean up Redis subscriptions
-    asyncio.create_task(unsubscribe_from_conversation(session_id))
+    # Clean up session timestamp
+    await remove_session_timestamp(session_id)
+    logger.info(f"Cleaned up session timestamp: {session_id}")
+    
+    # Cancel Redis listener task first (before closing pubsub)
+    if redis_managers and "local_objects" in redis_managers:
+        cancelled = await redis_managers["local_objects"].cancel_listener_task(session_id)
+        if cancelled:
+            logger.info(f"Cancelled Redis listener task for session {session_id}")
+    
+    # Clean up Redis subscriptions (after cancelling the listener)
+    await unsubscribe_from_conversation(session_id)
     
     # Clean up session mappings
-    if session_id in session_mappings:
-        del session_mappings[session_id]
-        logger.info(f"Cleaned up session mappings: {session_id}")
+    await clear_session_mappings(session_id)
+    logger.info(f"Cleaned up session mappings: {session_id}")
     
-    # Clean up conversation websockets
-    if conversation_id and conversation_id in conversation_websockets:
-        # Remove this session's WebSocket from the conversation
-        conversation_websockets[conversation_id] = [
-            (sid, ws) for sid, ws in conversation_websockets[conversation_id] 
-            if sid != session_id
-        ]
-        # Remove empty conversation entries
-        if not conversation_websockets[conversation_id]:
-            del conversation_websockets[conversation_id]
-        logger.info(f"Removed WebSocket for session {session_id} from conversation {conversation_id}")
+    # Clean up conversation websockets (check all conversations, not just the provided one)
+    if redis_managers and "local_objects" in redis_managers:
+        await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
     
-    if user_id and user_id in user_sessions:
-        if session_id in user_sessions[user_id]:
-            user_sessions[user_id].remove(session_id)
-            logger.info(f"Removed session {session_id} from user {user_id} sessions")
-            
-        # Clean up empty user sessions list
-        if not user_sessions[user_id]:
-            del user_sessions[user_id]
+    # DON'T clean up active requests immediately - we need to track them to know when tasks complete
+    # The tasks themselves will remove their entries when they finish
+    active_reqs = await get_active_requests(session_id)
+    num_requests = len(active_reqs)
+    if num_requests > 0:
+        logger.info(f"Keeping {num_requests} active requests for session {session_id} - they will clean up when complete")
+    
+    if user_id:
+        await remove_user_session(user_id, session_id)
+        logger.info(f"Removed session {session_id} from user {user_id} sessions")
+        
+        # Check if user has no more sessions
+        remaining_sessions = await get_user_sessions(user_id)
+        if not remaining_sessions:
             logger.info(f"Cleaned up empty user sessions for user {user_id}")
+
+async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> None:
+    """Evict old sessions if user has reached the session limit
+    
+    Eviction priority (highest to lowest):
+    1. Dead/disconnected sessions (already cleaned up)
+    2. Least recently active session
+    3. Never evict the new session being created
+    """
+    # Get current sessions first
+    current_sessions = await get_user_sessions(user_id)
+    if not current_sessions:
+        return
+    
+    # Check for dead sessions (sessions without chat history)
+    dead_sessions = []
+    for sess in current_sessions:
+        if sess != new_session_id:
+            messages = await get_chat_messages(sess)
+            if not messages:
+                dead_sessions.append(sess)
+    
+    # Remove dead sessions
+    if dead_sessions:
+        for dead_sess in dead_sessions:
+            logger.info(f"Removing dead session {dead_sess} from user_sessions during eviction check")
+            await remove_user_session(user_id, dead_sess)
+        current_sessions = await get_user_sessions(user_id)
+    
+    # If at or under the limit, no eviction needed (new session already added)
+    if len(current_sessions) <= MAX_SESSIONS_PER_USER:
+        return
+    
+    logger.info(f"User {user_id} at session limit ({MAX_SESSIONS_PER_USER}), need to evict a session")
+    
+    # Find the least recently active session
+    current_time = time.time()
+    inactive_threshold = current_time - 120  # Sessions inactive for 2 minutes
+    
+    # Collect sessions with their activity times
+    sessions_with_activity = []
+    
+    current_sessions = await get_user_sessions(user_id)
+    
+    for sess_id in current_sessions:
+        if sess_id == new_session_id:
+            continue  # Don't evict the session we're trying to create
+        
+        # Skip sessions that are already cleaned up (disconnected)
+        messages = await get_chat_messages(sess_id)
+        if not messages:
+            logger.debug(f"Skipping already-disconnected session {sess_id}")
+            continue
+        
+        last_activity = await get_session_timestamp(sess_id) or 0
+            
+        sessions_with_activity.append((sess_id, last_activity))
+    
+    # Sort by activity time (oldest first)
+    sessions_with_activity.sort(key=lambda x: x[1])
+    
+    # Find eviction candidate
+    eviction_candidate = None
+    if sessions_with_activity:
+        # Evict the least recently active session
+        eviction_candidate, oldest_activity = sessions_with_activity[0]
+        inactive_duration = int(current_time - oldest_activity)
+        logger.info(f"Selected session {eviction_candidate} for eviction (inactive for {inactive_duration}s)")
+    
+    if eviction_candidate:
+        evicted_timestamp = await get_session_timestamp(eviction_candidate) or 0
+        logger.info(f"Evicting session {eviction_candidate} (last active: {int(current_time - evicted_timestamp)} seconds ago)")
+        
+        # Extract conversation_id from the evicted session if possible
+        evicted_conversation_id = None
+        parts = eviction_candidate.split('_')
+        if len(parts) >= 4 and parts[2] == 'conv':
+            try:
+                evicted_conversation_id = int(parts[3])
+            except ValueError:
+                pass
+        
+        # Find and notify the websocket for the evicted session
+        ws_to_notify = None
+        if redis_managers and "local_objects" in redis_managers:
+            if evicted_conversation_id:
+                connections = await redis_managers["local_objects"].get_conversation_websockets(evicted_conversation_id)
+                for sid, ws in connections:
+                    if sid == eviction_candidate:
+                        ws_to_notify = ws
+                        break
+        
+        if ws_to_notify:
+            try:
+                eviction_message = {
+                    "type": "session_evicted",
+                    "code": "MAX_SESSIONS_REACHED",
+                    "reason": "New connection from another device"
+                }
+                await ws_to_notify.send_text(json.dumps(eviction_message))
+                await ws_to_notify.close(code=1000, reason="Session evicted: max sessions reached")
+            except Exception as e:
+                logger.warning(f"Failed to notify evicted session: {e}")
+        
+        # Clean up the evicted session
+        await cleanup_session(eviction_candidate, user_id, evicted_conversation_id)
+
+async def cleanup_stale_sessions():
+    """Periodically clean up stale sessions that haven't been active"""
+    while True:
+        try:
+            await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+            
+            current_time = time.time()
+            cutoff_time = current_time - SESSION_TIMEOUT_SECONDS
+            
+            # Find all stale sessions
+            stale_sessions = await get_stale_sessions(cutoff_time)
+            
+            if stale_sessions:
+                logger.info(f"Found {len(stale_sessions)} stale sessions to clean up")
+                
+                for session_id in stale_sessions:
+                    # Extract user_id and conversation_id from session_id if possible
+                    user_id = None
+                    conversation_id = None
+                    
+                    # Session ID format: ws_{user_id}_conv_{conversation_id} or ws_{user_id}_new_{timestamp}
+                    parts = session_id.split('_')
+                    if len(parts) >= 2:
+                        user_id = parts[1]
+                    if len(parts) >= 4 and parts[2] == 'conv':
+                        try:
+                            conversation_id = int(parts[3])
+                        except ValueError:
+                            pass
+                    
+                    stale_timestamp = await get_session_timestamp(session_id) or 0
+                    logger.info(f"Cleaning up stale session: {session_id} (inactive for {int(current_time - stale_timestamp)} seconds)")
+                    await cleanup_session(session_id, user_id, conversation_id)
+                
+        except Exception as e:
+            logger.error(f"Error during stale session cleanup: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Continue running even if an error occurs
+            continue
 
 def load_conversation_history(user_id: str, conversation_id: Optional[int] = None) -> List[Dict]:
     """Load conversation history from database and convert to Claude message format"""
@@ -1201,7 +1716,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         logger.error(f"Error loading conversation history for user {user_id}, conversation {conversation_id}: {str(e)}")
         return []
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None) -> Optional[int]:
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None) -> Optional[int]:
     """Save a message to the database and return the conversation_id"""
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, client_conversation_id={client_conversation_id}, content='{content[:50]}...'")
@@ -1226,9 +1741,24 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 logger.info(f"No existing conversation found for optimistic ID {conversation_id}, will create new one")
                 conversation_id = None
         
-        # If no conversation_id provided, check if we can find one by client_conversation_id
-        if conversation_id is None and client_conversation_id is not None and client_conversation_id < 0:
-            logger.info(f"No conversation_id but have client_conversation_id {client_conversation_id}, checking for existing conversation")
+        # Validate client_conversation_id - it should ONLY be negative (optimistic) values
+        # Convert to int if it's a string number for validation
+        if client_conversation_id is not None:
+            try:
+                client_conv_id_int = int(client_conversation_id) if isinstance(client_conversation_id, str) else client_conversation_id
+                if client_conv_id_int > 0:
+                    error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. The client should use the conversation_id parameter for server-assigned IDs."
+                    logger.error(error_msg)
+                    return {"error": error_msg, "status": 400}
+                # Use the integer version for all subsequent operations
+                client_conversation_id = client_conv_id_int
+            except (ValueError, TypeError):
+                logger.warning(f"client_conversation_id is not a valid number in save_message_to_db: {client_conversation_id} (type: {type(client_conversation_id)})")
+        
+        # If no conversation_id provided, check if we can find one by optimistic client_conversation_id
+        if conversation_id is None and client_conversation_id is not None:
+            # client_conversation_id should always be negative (optimistic) at this point
+            logger.info(f"No conversation_id but have optimistic client_conversation_id {client_conversation_id}, checking for existing conversation")
             # Look up existing conversation by optimistic_chat_id
             conv_result = supabase.table("conversations")\
                 .select("id")\
@@ -1274,24 +1804,100 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
         # Save the message
-        result = supabase.table("messages").insert({
+        logger.info(f"Attempting to save {message_type} message to conversation_id={conversation_id}, request_id={request_id}")
+        
+        # Prepare message data
+        message_data = {
             "conversation_id": conversation_id,
             "content": content,
             "message_type": message_type,
             "request_id": request_id
-        }).execute()
+        }
+        
+        # For USER messages with client_timestamp, use the provided timestamp to preserve message order
+        if message_type == "USER" and client_timestamp:
+            # Client timestamp is already in ISO format from Android client
+            message_data["timestamp"] = client_timestamp
+            logger.info(f"Using client-provided timestamp for USER message: {client_timestamp}")
+        
+        # For ASSISTANT messages with request_id, set timestamp to be right after the USER message
+        # This ensures the response appears immediately after the user message it's responding to
+        if message_type == "ASSISTANT" and request_id:
+            # Find the USER message with this request_id
+            user_msg_result = supabase.table("messages")\
+                .select("timestamp")\
+                .eq("conversation_id", conversation_id)\
+                .eq("request_id", request_id)\
+                .eq("message_type", "USER")\
+                .execute()
+            
+            if user_msg_result.data:
+                user_timestamp = user_msg_result.data[0]["timestamp"]
+                # Parse the timestamp and add 1ms
+                from datetime import datetime, timedelta
+                
+                # Fix: Normalize timestamp format from Supabase
+                # Supabase sometimes returns timestamps with varying microsecond precision (4-6 digits)
+                # Python's fromisoformat expects exactly 6 digits for microseconds
+                timestamp_str = user_timestamp.replace('Z', '+00:00')
+                
+                # Check if timestamp has microseconds and normalize to 6 digits
+                if '.' in timestamp_str:
+                    # Split into main part and fractional seconds + timezone
+                    parts = timestamp_str.split('.')
+                    if len(parts) == 2:
+                        # Further split fractional part from timezone
+                        if '+' in parts[1]:
+                            frac, tz = parts[1].split('+')
+                            # Pad or truncate fractional seconds to exactly 6 digits
+                            frac = frac.ljust(6, '0')[:6]
+                            timestamp_str = f"{parts[0]}.{frac}+{tz}"
+                        elif '-' in parts[1]:
+                            frac, tz = parts[1].split('-')
+                            frac = frac.ljust(6, '0')[:6]
+                            timestamp_str = f"{parts[0]}.{frac}-{tz}"
+                
+                user_dt = datetime.fromisoformat(timestamp_str)
+                assistant_dt = user_dt + timedelta(milliseconds=1)
+                # Format as ISO string with timezone
+                message_data["timestamp"] = assistant_dt.isoformat().replace('+00:00', 'Z')
+                logger.info(f"Setting ASSISTANT message timestamp to {message_data['timestamp']} (1ms after USER message at {user_timestamp})")
+            else:
+                logger.warning(f"No USER message found with request_id {request_id}, using default timestamp")
+        
+        # Debug: Log exactly what we're sending to Supabase
+        if "timestamp" in message_data:
+            logger.info(f"DEBUG: Inserting message with timestamp field: {message_data['timestamp']}")
+        else:
+            logger.info(f"DEBUG: Inserting message WITHOUT timestamp field (will use DB default)")
+        
+        result = supabase.table("messages").insert(message_data).execute()
         
         if not result.data:
-            logger.error(f"Failed to save message to conversation {conversation_id}")
+            logger.error(f"Failed to save {message_type} message to conversation {conversation_id} - no data returned from insert")
             return None
         
+        # Extract the saved message ID
+        saved_message = result.data[0]
+        message_id = saved_message.get("id")
+        
+        # Debug: Log what timestamp was actually saved
+        actual_timestamp = saved_message.get("timestamp")
+        logger.info(f"DEBUG: Message {message_id} saved with timestamp: {actual_timestamp}")
+        saved_conv_id = saved_message.get("conversation_id")
+        logger.info(f"Successfully saved {message_type} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}")
+        
         # Update conversation last_message_time and updated_at for incremental sync
-        supabase.table("conversations").update({
+        update_result = supabase.table("conversations").update({
             "last_message_time": "now()",
             "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
         }).eq("id", conversation_id).execute()
         
-        logger.info(f"Successfully saved {message_type} message to conversation {conversation_id}")
+        if update_result.data:
+            logger.info(f"Updated conversation {conversation_id} timestamps for {message_type} message")
+        else:
+            logger.warning(f"Failed to update conversation {conversation_id} timestamps")
+        
         return conversation_id
         
     except Exception as e:
@@ -1900,10 +2506,15 @@ async def get_messages(
         response = query.execute()
         messages = response.data if response.data else []
         
+        # Log raw messages from database
+        logger.info(f"Fetched {len(messages)} messages from database for conversation {actual_conversation_id}")
+        
         # Update conversation_id in messages to use the actual server-backed ID
         # This ensures clients always receive messages with positive server-backed IDs
         for message in messages:
             message['conversation_id'] = actual_conversation_id
+            # Debug logging to diagnose message_type issue and timestamp
+            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, request_id={message.get('request_id')}, timestamp={message.get('timestamp')}, content_preview={message.get('content', '')[:50]}")
         
         # Return with server timestamp for next incremental sync
         result = {
@@ -1957,12 +2568,29 @@ async def create_message(
                 raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Create the message with the actual conversation ID
-        result = supabase.table("messages").insert({
+        message_data = {
             "conversation_id": actual_conversation_id,
             "content": message.content,
             "message_type": message.message_type,
             "request_id": message.request_id
-        }).execute()
+        }
+        
+        # Include timestamp if provided to preserve message order
+        if message.timestamp:
+            message_data["timestamp"] = message.timestamp
+            logger.info(f"Using client-provided timestamp for message: {message.timestamp}")
+        else:
+            logger.info(f"No timestamp provided for message, will use database default")
+        
+        # Log the data being sent to database
+        logger.info(f"Inserting message to database with data: {json.dumps(message_data, default=str)}")
+        
+        result = supabase.table("messages").insert(message_data).execute()
+        
+        # Log what was actually saved
+        if result.data:
+            saved_msg = result.data[0]
+            logger.info(f"Message saved to database - ID: {saved_msg.get('id')}, timestamp from DB: {saved_msg.get('timestamp')}, request_id: {saved_msg.get('request_id')}")
         
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create message")
@@ -2014,19 +2642,92 @@ async def get_message_count(
         logger.error(f"Error getting message count for conversation {conversation_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get message count")
 
+@app.get("/requests/{request_id}/state")
+async def get_request_state_endpoint(
+    request_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get the state of a specific request"""
+    state = await get_request_state(request_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Request state not found")
+    
+    # Verify the request belongs to the current user
+    if state.get("metadata", {}).get("user_id") != current_user.get("sub"):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return state
+
+@app.post("/conversations/{conversation_id}/sync")
+async def sync_missed_messages(
+    conversation_id: Union[int, str],
+    since_timestamp: Optional[float] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Sync any messages that may have been missed during disconnection"""
+    try:
+        user_id = current_user.get("sub")
+        
+        # Resolve conversation ID
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Get messages from database
+        query = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id)
+        
+        if since_timestamp:
+            # Convert timestamp to ISO format for Supabase
+            from datetime import datetime
+            since_datetime = datetime.fromtimestamp(since_timestamp).isoformat()
+            query = query.gt("created_at", since_datetime)
+        
+        result = query.order("created_at", desc=False).execute()
+        
+        return {
+            "conversation_id": actual_conversation_id,
+            "messages": result.data,
+            "count": len(result.data)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error syncing messages for conversation {conversation_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to sync messages")
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, chat_sessions, client_conversation_id=None, client_message_id=None):
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None):
     """Process a single message in a cancellable task"""
+    # Helper function to safely send to WebSocket
+    async def safe_websocket_send(payload):
+        """Send payload to WebSocket, handling disconnection gracefully"""
+        try:
+            await websocket.send_text(json.dumps(payload))
+            return True
+        except Exception as e:
+            logger.warning(f"WebSocket send failed for session {session_id}: {str(e)} - Response will be available on reconnect")
+            return False
+    
     try:
-        logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(chat_sessions[session_id])}")
+        # Track request state as pending
+        await set_request_state(request_id, "pending", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "user_id": user_id,
+            "message": message[:100],  # Store first 100 chars for debugging
+            "start_time": time.time()
+        })
+        
+        messages = await get_chat_messages(session_id)
+        logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(messages)}")
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id)
+        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp)
         logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}")
         if real_conversation_id is None:
             logger.error("Failed to save user message to database")
@@ -2037,22 +2738,50 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "client_conversation_id": client_conversation_id
             }
-            await websocket.send_text(json.dumps(error_payload))
+            await safe_websocket_send(error_payload)
             return real_conversation_id
         
         # Update optimistic → real mapping if client provided optimistic ID
-        if client_conversation_id and client_conversation_id < 0 and real_conversation_id and session_id in session_mappings:
-            mappings = session_mappings[session_id]
-            mappings["optimistic_to_real"][client_conversation_id] = real_conversation_id
-            mappings["real_to_optimistic"][real_conversation_id] = client_conversation_id
-            logger.info(f"Mapped optimistic ID {client_conversation_id} → real ID {real_conversation_id}")
+        if client_conversation_id and client_conversation_id < 0 and real_conversation_id:
+            if redis_managers and "session_mappings" in redis_managers:
+                try:
+                    await redis_managers["session_mappings"].set_mapping(
+                        session_id, client_conversation_id, real_conversation_id
+                    )
+                    logger.info(f"Mapped optimistic ID {client_conversation_id} → real ID {real_conversation_id}")
+                except ValueError as e:
+                    # This shouldn't happen in normal operation, but if it does, log it and continue
+                    logger.error(f"Failed to set optimistic mapping: {str(e)}")
+                    # Send error to client so they know something went wrong
+                    error_payload = {
+                        "type": "error",
+                        "code": "MAPPING_CONFLICT",
+                        "message": "Conversation mapping conflict detected. Please refresh the page.",
+                        "request_id": request_id,
+                        "conversation_id": real_conversation_id
+                    }
+                    await safe_websocket_send(error_payload)
+        
+        # CRITICAL FIX: Update WebSocket listener IMMEDIATELY when conversation ID changes
+        # This must happen BEFORE we start broadcasting to the new conversation ID
+        if real_conversation_id and real_conversation_id != session_conversation_id:
+            logger.info(f"Conversation ID changed from {session_conversation_id} to {real_conversation_id}, updating WebSocket listener immediately")
+            try:
+                # This moves the WebSocket registration from old to new conversation ID
+                # The updated register_conversation_websocket method now automatically removes
+                # the optimistic registration when registering with a real ID, preventing duplicates
+                await update_websocket_conversation(session_id, session_conversation_id, real_conversation_id, websocket)
+            except Exception as e:
+                logger.error(f"Failed to update WebSocket conversation, continuing with original: {str(e)}")
+                # Don't fail the entire message processing if the update fails
         
         # Use real conversation ID for rest of processing
         session_conversation_id = real_conversation_id
 
-        chat_sessions[session_id].append({"role": "user", "content": message})
+        async with chat_sessions_lock:
+            await add_chat_message(session_id, {"role": "user", "content": message})
 
-        current_anthropic_client = get_anthropic_client(user_id)
+        current_anthropic_client = await get_anthropic_client(user_id)
         if not current_anthropic_client:
             error_payload_key = {
                 "type": "error", 
@@ -2062,26 +2791,72 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "conversation_id": session_conversation_id,  # Include conversation_id for client sync
                 "client_conversation_id": client_conversation_id
             }
-            await websocket.send_text(json.dumps(error_payload_key))
+            await safe_websocket_send(error_payload_key)
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
             return session_conversation_id
 
         # Check for cancellation before making API call
         if asyncio.current_task().cancelled():
+            await set_request_state(request_id, "cancelled", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id
+            })
             return session_conversation_id
 
-        response = current_anthropic_client.beta.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=chat_sessions[session_id],
-            system=CLAUDE_SYSTEM_PROMPT,
-            tools=tools,
-            tool_choice={"type": "auto"},
-            betas=["token-efficient-tools-2025-02-19"]
-        )
+        # Update state to processing
+        await set_request_state(request_id, "processing", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "api_call_start": time.time()
+        })
+
+        try:
+            # Use async API call with timeout
+            response = await asyncio.wait_for(
+                current_anthropic_client.beta.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=1000,
+                    messages=await get_chat_messages(session_id),
+                    system=CLAUDE_SYSTEM_PROMPT,
+                    tools=tools,
+                    tool_choice={"type": "auto"},
+                    betas=["token-efficient-tools-2025-02-19"]
+                ),
+                timeout=60.0  # 60 second timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Claude API timeout for request {request_id} after 60 seconds")
+            await set_request_state(request_id, "timeout", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "error": "Claude API call timed out after 60 seconds"
+            })
+            
+            # Send timeout error to client
+            error_payload = {
+                "type": "error",
+                "code": "CLAUDE_TIMEOUT",
+                "message": "Claude API request timed out. Please try again.",
+                "request_id": request_id,
+                "conversation_id": session_conversation_id
+            }
+            await safe_websocket_send(error_payload)
+            return session_conversation_id
+        except Exception as api_error:
+            logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
+            await set_request_state(request_id, "failed", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "error": str(api_error)
+            })
+            raise
 
         # Check for cancellation after API call
         if asyncio.current_task().cancelled():
+            await set_request_state(request_id, "cancelled", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id
+            })
             return session_conversation_id
 
         # Handle tool calls
@@ -2096,7 +2871,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "request_id": request_id,
                     "client_conversation_id": client_conversation_id
                 }
-                await websocket.send_text(json.dumps(error_payload))
+                await safe_websocket_send(error_payload)
                 raise StopIteration("ToolBlockMissingError")
 
             logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
@@ -2110,31 +2885,63 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Add request_id and client context to Asana error response
                 tool_execution_result["request_id"] = request_id
                 tool_execution_result["client_conversation_id"] = client_conversation_id
-                await websocket.send_text(json.dumps(tool_execution_result))
+                await safe_websocket_send(tool_execution_result)
                 raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
 
             # If not the specific Asana auth error, proceed as before with Claude:
-            chat_sessions[session_id].extend([
-                {"role": "assistant", "content": [tool_block]},
-                {"role": "user", "content": [{
+            async with chat_sessions_lock:
+                # Convert tool_block to a serializable dict
+                tool_block_dict = {
+                    "type": "tool_use",
+                    "id": tool_block.id,
+                    "name": tool_block.name,
+                    "input": tool_block.input
+                }
+                await add_chat_message(session_id, {"role": "assistant", "content": [tool_block_dict]})
+                await add_chat_message(session_id, {"role": "user", "content": [{
                     "type": "tool_result",
                     "tool_use_id": tool_block.id,
                     "content": json.dumps(tool_execution_result) 
-                }]}
-            ])
+                }]})
             
-            response = current_anthropic_client.beta.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=1000,
-                messages=chat_sessions[session_id],
-                system=CLAUDE_SYSTEM_PROMPT,
-                tools=tools,
-                tool_choice={"type": "auto"},
-                betas=["token-efficient-tools-2025-02-19"]
-            )
+            # Use async API call for tool response
+            try:
+                response = await asyncio.wait_for(
+                    current_anthropic_client.beta.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=1000,
+                        messages=await get_chat_messages(session_id),
+                        system=CLAUDE_SYSTEM_PROMPT,
+                        tools=tools,
+                        tool_choice={"type": "auto"},
+                        betas=["token-efficient-tools-2025-02-19"]
+                    ),
+                    timeout=60.0  # 60 second timeout for tool responses too
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Claude API timeout during tool use for request {request_id}")
+                await set_request_state(request_id, "timeout", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "error": "Claude API timed out during tool use"
+                })
+                raise
         
         # Add assistant final response to session history (if not an intercepted error)
-        chat_sessions[session_id].append({"role": "assistant", "content": response.content})
+        async with chat_sessions_lock:
+            # Convert response.content to serializable format
+            content_list = []
+            for block in response.content:
+                if block.type == 'text':
+                    content_list.append({"type": "text", "text": block.text})
+                elif block.type == 'tool_use':
+                    content_list.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input
+                    })
+            await add_chat_message(session_id, {"role": "assistant", "content": content_list})
         
         # Extract and save assistant response to database
         assistant_response_text = ""
@@ -2142,8 +2949,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             assistant_response_text = response.content[0].text
             
             # Save assistant message to database
-            logger.info(f"About to save assistant message to conversation {session_conversation_id}")
-            save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
+            logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, content_preview='{assistant_response_text[:50]}...'")
+            saved_conversation_id = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
+            if saved_conversation_id:
+                logger.info(f"ASSISTANT message saved successfully to conversation_id={saved_conversation_id} (original session_conversation_id={session_conversation_id})")
+            else:
+                logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
             
             # Send structured response with request_id and conversation_id
             response_payload = {
@@ -2151,19 +2962,35 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
                 "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
-                "client_message_id": client_message_id  # Echo back optimistic message ID
+                "client_message_id": client_message_id,  # Echo back optimistic message ID
+                "type": "response"  # Indicate this is a direct response (vs broadcast)
             }
-            await websocket.send_text(json.dumps(response_payload))
+            if await safe_websocket_send(response_payload):
+                logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
+            else:
+                logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
+            
+            # Mark request as completed successfully
+            await set_request_state(request_id, "completed", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "response_sent": True,
+                "completion_time": time.time()
+            })
             
             # Broadcast to other WebSocket sessions for the same conversation
+            # Use same format as regular response so clients can process it correctly
             broadcast_payload = {
-                "type": "broadcast",
                 "response": assistant_response_text,
+                "request_id": request_id,  # Include request_id so clients can track the message
                 "conversation_id": session_conversation_id,
-                "message_type": "ASSISTANT"
+                "client_conversation_id": client_conversation_id,  # Include for client validation
+                "client_message_id": client_message_id,  # Include for completeness
+                "type": "broadcast"  # Keep type to indicate it's a broadcast
             }
-            await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=session_id)
-            logger.info(f"Broadcasted assistant message to other sessions for conversation {session_conversation_id}")
+            # Bot responses should go to ALL sessions - they originate from the server, not from any client session
+            await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
+            logger.info(f"Broadcasted assistant message to all sessions for conversation {session_conversation_id}")
             
             # Opportunistically clean up expired cache entries after successful response
         elif response.content: 
@@ -2175,18 +3002,67 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "client_conversation_id": client_conversation_id
             }
-            await websocket.send_text(json.dumps(error_payload))
+            await safe_websocket_send(error_payload)
 
         return session_conversation_id
+    
+    except asyncio.CancelledError:
+        # Handle task cancellation
+        logger.info(f"Request {request_id} was cancelled")
+        await set_request_state(request_id, "cancelled", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "cancelled_at": time.time()
+        })
+        raise
+    
+    except Exception as e:
+        # Track any other errors
+        logger.error(f"Error processing request {request_id}: {str(e)}")
+        await set_request_state(request_id, "failed", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "error": str(e),
+            "error_time": time.time()
+        })
+        raise
         
     finally:
         # Clean up tracking
         if request_id:
-            active_tasks.pop(request_id, None)
-            # 🔧 CRITICAL FIX: Use the actual session_id, not a reconstructed one
-            # The session_id is consistent throughout the connection
-            if session_id in active_requests:
-                active_requests[session_id].discard(request_id)
+            # Remove from local task tracking
+            if redis_managers and "local_objects" in redis_managers:
+                await redis_managers["local_objects"].remove_task(request_id)
+            
+            # Remove from active requests (both local and Redis)
+            await remove_active_request(session_id, request_id)
+            logger.debug(f"Removed request {request_id} from active requests for session {session_id}")
+        
+        # Clean up chat session if WebSocket is disconnected and no more active tasks
+        # This ensures we don't leak memory from disconnected sessions
+        try:
+            # Check if WebSocket is still connected
+            websocket_connected = False
+            try:
+                # Try to check WebSocket state without sending anything
+                # WebSocket.client_state tells us if it's connected
+                websocket_connected = websocket.client_state.name == "CONNECTED"
+            except:
+                websocket_connected = False
+            
+            # If disconnected and no more active tasks for this session, clean up chat history
+            if not websocket_connected:
+                active_reqs = await get_active_requests(session_id)
+                session_has_active_requests = bool(active_reqs)
+                
+                if not session_has_active_requests:
+                    # Check if session has messages before clearing
+                    messages = await get_chat_messages(session_id)
+                    if messages:
+                        await clear_chat_session(session_id)
+                        logger.info(f"Cleaned up chat session {session_id} after task completion (WebSocket disconnected)")
+        except Exception as e:
+            logger.warning(f"Error during post-task cleanup for session {session_id}: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
