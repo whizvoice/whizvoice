@@ -2854,57 +2854,6 @@ async def get_request_state_endpoint(
     
     return state
 
-@app.post("/conversations/{conversation_id}/sync")
-async def sync_missed_messages(
-    conversation_id: Union[int, str],
-    since_timestamp: Optional[float] = None,
-    current_user: dict = Depends(get_current_user)
-):
-    """Sync any messages that may have been missed during disconnection"""
-    try:
-        user_id = current_user.get("sub")
-        
-        # Resolve conversation ID
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
-        if actual_conversation_id is None:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        
-        # Get messages from database - INCLUDING cancelled messages
-        # The client needs to know about cancellations that happened while disconnected
-        query = supabase.table("messages")\
-            .select("id, conversation_id, content, message_type, timestamp, updated_at, request_id, cancelled")\
-            .eq("conversation_id", actual_conversation_id)
-        
-        if since_timestamp:
-            # Convert timestamp to ISO format for Supabase
-            from datetime import datetime
-            since_datetime = datetime.fromtimestamp(since_timestamp).isoformat()
-            # Use updated_at to catch both new messages and cancellation updates
-            query = query.or_(f"timestamp.gt.{since_datetime},updated_at.gt.{since_datetime}")
-        
-        result = query.order("timestamp", desc=False).execute()
-        
-        # Process messages to ensure cancelled field is included
-        messages = result.data if result.data else []
-        for msg in messages:
-            # Ensure cancelled field is present (None if not cancelled, timestamp if cancelled)
-            if "cancelled" not in msg:
-                msg["cancelled"] = None
-        
-        logger.info(f"Syncing {len(messages)} messages for conversation {actual_conversation_id} (including cancelled)")
-        
-        return {
-            "conversation_id": actual_conversation_id,
-            "messages": messages,
-            "count": len(messages),
-            "includes_cancelled": True  # Signal to client that cancelled messages are included
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error syncing messages for conversation {conversation_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to sync messages")
-
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
