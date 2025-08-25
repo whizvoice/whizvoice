@@ -2662,8 +2662,7 @@ async def update_conversation_last_message_time(
 @app.get("/conversations/{conversation_id}/messages")
 async def get_messages(
     conversation_id: int,
-    since: Optional[str] = None,  # ISO timestamp string for incremental sync
-    limit: Optional[int] = 100,   # Pagination support
+    since_timestamp: Optional[float] = None,  # Unix timestamp for incremental sync
     current_user: Dict = Depends(get_current_user)
 ):
     """Get messages for a conversation with optional incremental sync"""
@@ -2672,7 +2671,7 @@ async def get_messages(
         if not user_id:
             raise HTTPException(status_code=401, detail="User not authenticated")
         
-        logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since: {since}")
+        logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since_timestamp: {since_timestamp}")
         
         # Resolve the actual conversation ID (handles optimistic IDs)
         actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
@@ -2680,48 +2679,50 @@ async def get_messages(
             logger.warning(f"No conversation found for conversation ID {conversation_id}")
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        # Build the messages query
+        # Build the messages query - explicitly select fields including cancelled
+        # Include ALL messages (including cancelled ones) so client can handle them appropriately
         query = supabase.table("messages")\
-            .select("*")\
+            .select("id, conversation_id, content, message_type, timestamp, updated_at, request_id, cancelled")\
             .eq("conversation_id", actual_conversation_id)\
-            .order("updated_at", desc=False)\
-            .limit(limit)
+            .order("timestamp", desc=False)
         
         # Add incremental sync filter if provided
-        if since:
-            try:
-                # Parse the timestamp and filter for records updated after it
-                since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
-                query = query.gte('updated_at', since_timestamp.isoformat())
-                logger.info(f"Incremental sync: fetching messages updated since {since_timestamp}")
-            except ValueError as e:
-                logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
-                # Fall back to full sync if timestamp is invalid
+        if since_timestamp:
+            # Convert Unix timestamp to ISO format for Supabase
+            from datetime import datetime
+            since_datetime = datetime.fromtimestamp(since_timestamp).isoformat()
+            # Use OR to catch both new messages and updates (like cancellations)
+            query = query.or_(f"timestamp.gt.{since_datetime},updated_at.gt.{since_datetime}")
+            logger.info(f"Incremental sync: fetching messages created or updated since {since_datetime}")
+        
         
         response = query.execute()
         messages = response.data if response.data else []
         
         # Log raw messages from database
-        logger.info(f"Fetched {len(messages)} messages from database for conversation {actual_conversation_id}")
+        logger.info(f"Fetched {len(messages)} messages from database for conversation {actual_conversation_id} (including cancelled)")
         
         # Update conversation_id in messages to use the actual server-backed ID
         # This ensures clients always receive messages with positive server-backed IDs
         for message in messages:
             message['conversation_id'] = actual_conversation_id
+            # Ensure cancelled field is present (None if not cancelled, timestamp if cancelled)
+            if 'cancelled' not in message:
+                message['cancelled'] = None
             # Debug logging to diagnose message_type issue and timestamp
-            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, request_id={message.get('request_id')}, timestamp={message.get('timestamp')}, content_preview={message.get('content', '')[:50]}")
+            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, cancelled={message.get('cancelled')}, timestamp={message.get('timestamp')}, content_preview={message.get('content', '')[:50]}")
         
         # Return with server timestamp for next incremental sync
         result = {
             'messages': messages,
             'conversation_id': actual_conversation_id,  # Return the resolved server-backed ID, not the parameter
             'server_timestamp': datetime.utcnow().isoformat() + 'Z',
-            'is_incremental': since is not None,
+            'is_incremental': since_timestamp is not None,
             'count': len(messages),
-            'has_more': len(messages) == limit  # Indicates if there might be more messages
+            'includes_cancelled': True  # Signal to client that cancelled messages are included
         }
         
-        logger.info(f"Returning {len(messages)} messages for conversation {conversation_id} (incremental: {since is not None})")
+        logger.info(f"Returning {len(messages)} messages for conversation {conversation_id} (incremental: {since_timestamp is not None})")
         return result
         
     except HTTPException:
@@ -2868,21 +2869,35 @@ async def sync_missed_messages(
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        # Get messages from database
-        query = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id)
+        # Get messages from database - INCLUDING cancelled messages
+        # The client needs to know about cancellations that happened while disconnected
+        query = supabase.table("messages")\
+            .select("id, conversation_id, content, message_type, timestamp, updated_at, request_id, cancelled")\
+            .eq("conversation_id", actual_conversation_id)
         
         if since_timestamp:
             # Convert timestamp to ISO format for Supabase
             from datetime import datetime
             since_datetime = datetime.fromtimestamp(since_timestamp).isoformat()
-            query = query.gt("created_at", since_datetime)
+            # Use updated_at to catch both new messages and cancellation updates
+            query = query.or_(f"timestamp.gt.{since_datetime},updated_at.gt.{since_datetime}")
         
-        result = query.order("created_at", desc=False).execute()
+        result = query.order("timestamp", desc=False).execute()
+        
+        # Process messages to ensure cancelled field is included
+        messages = result.data if result.data else []
+        for msg in messages:
+            # Ensure cancelled field is present (None if not cancelled, timestamp if cancelled)
+            if "cancelled" not in msg:
+                msg["cancelled"] = None
+        
+        logger.info(f"Syncing {len(messages)} messages for conversation {actual_conversation_id} (including cancelled)")
         
         return {
             "conversation_id": actual_conversation_id,
-            "messages": result.data,
-            "count": len(result.data)
+            "messages": messages,
+            "count": len(messages),
+            "includes_cancelled": True  # Signal to client that cancelled messages are included
         }
     except HTTPException:
         raise
@@ -3176,23 +3191,34 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         if response.content and response.content[0].type == 'text':
             assistant_response_text = response.content[0].text
             
-            # Save assistant message to database
-            logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, content_preview='{assistant_response_text[:50]}...'")
-            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
-            if save_result:
-                saved_conversation_id, bot_message_id = save_result
-                logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
-            else:
-                logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
-                saved_conversation_id = session_conversation_id  # Fallback to current conversation ID
-            
-            # Check if request was cancelled before sending response
+            # Check if request was cancelled
             request_cancelled = False
             if redis_managers and "request_messages" in redis_managers:
                 request_data = await redis_managers["request_messages"].get_messages(request_id)
                 if request_data and request_data.get("status") == "cancelled":
                     request_cancelled = True
-                    logger.info(f"Request {request_id} was cancelled, not sending response to client")
+                    logger.info(f"Request {request_id} was cancelled, will save bot message as cancelled")
+            
+            # Save assistant message to database (always save, but mark as cancelled if needed)
+            logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
+            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
+            if save_result:
+                saved_conversation_id, bot_message_id = save_result
+                logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
+                
+                # If cancelled, update the message to mark it as cancelled
+                if request_cancelled:
+                    try:
+                        supabase.table("messages")\
+                            .update({"cancelled": "now()"})\
+                            .eq("id", bot_message_id)\
+                            .execute()
+                        logger.info(f"Marked bot message {bot_message_id} as cancelled in database")
+                    except Exception as e:
+                        logger.error(f"Failed to mark bot message {bot_message_id} as cancelled: {e}")
+            else:
+                logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
+                saved_conversation_id = session_conversation_id
             
             if not request_cancelled:
                 # Send structured response with request_id and conversation_id
@@ -3208,17 +3234,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
                 else:
                     logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
-            else:
-                # Mark the bot message as cancelled in the database
-                if save_result:
-                    try:
-                        supabase.table("messages")\
-                            .update({"cancelled": "now()"})\
-                            .eq("id", bot_message_id)\
-                            .execute()
-                        logger.info(f"Marked bot message {bot_message_id} as cancelled in database")
-                    except Exception as e:
-                        logger.error(f"Failed to mark bot message {bot_message_id} as cancelled: {e}")
             
             # Clean up old request tracking data
             # Do this after saving the bot response to ensure we have the latest message IDs
