@@ -1772,8 +1772,35 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         logger.error(f"Error loading conversation history for user {user_id}, conversation {conversation_id}: {str(e)}")
         return []
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None) -> Optional[int]:
-    """Save a message to the database and return the conversation_id"""
+def get_user_message_ids_since_last_bot(conversation_id: int) -> List[int]:
+    """Get all user message IDs since the last bot message in a conversation"""
+    try:
+        # Get all messages ordered by timestamp
+        result = supabase.table("messages")\
+            .select("id, message_type")\
+            .eq("conversation_id", conversation_id)\
+            .is_("cancelled", "null")\
+            .order("timestamp", desc=False)\
+            .execute()
+        
+        if not result.data:
+            return []
+        
+        # Find user messages since last bot message
+        user_message_ids = []
+        for msg in reversed(result.data):  # Start from most recent
+            if msg["message_type"] == "ASSISTANT":
+                break  # Stop at the most recent bot message
+            elif msg["message_type"] == "USER":
+                user_message_ids.append(msg["id"])
+        
+        return list(reversed(user_message_ids))  # Return in chronological order
+    except Exception as e:
+        logger.error(f"Error getting user message IDs for conversation {conversation_id}: {e}")
+        return []
+
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None) -> Optional[Tuple[int, int]]:
+    """Save a message to the database and return (conversation_id, message_id)"""
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, client_conversation_id={client_conversation_id}, content='{content[:50]}...'")
         
@@ -1954,7 +1981,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         else:
             logger.warning(f"Failed to update conversation {conversation_id} timestamps")
         
-        return conversation_id
+        return (conversation_id, message_id)
         
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")
@@ -2783,9 +2810,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp)
-        logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}")
-        if real_conversation_id is None:
+        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp)
+        if save_result is None:
             logger.error("Failed to save user message to database")
             error_payload = {
                 "type": "error",
@@ -2795,7 +2821,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "client_conversation_id": client_conversation_id
             }
             await safe_websocket_send(error_payload)
-            return real_conversation_id
+            return session_conversation_id
+        
+        real_conversation_id, user_message_id = save_result
+        logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}, message_id: {user_message_id}")
         
         # Update optimistic → real mapping if client provided optimistic ID
         if client_conversation_id and client_conversation_id < 0 and real_conversation_id:
@@ -2833,6 +2862,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Use real conversation ID for rest of processing
         session_conversation_id = real_conversation_id
+        
+        # Track which message IDs this request is responding to
+        user_message_ids = get_user_message_ids_since_last_bot(session_conversation_id)
+        if redis_managers and "request_messages" in redis_managers:
+            await redis_managers["request_messages"].set_messages(
+                request_id, user_message_ids, session_conversation_id
+            )
+            logger.info(f"Tracking request {request_id} responding to message IDs: {user_message_ids}")
 
         async with chat_sessions_lock:
             await add_chat_message(session_id, {"role": "user", "content": message})
@@ -2867,19 +2904,23 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         })
 
         try:
-            # Use async API call with timeout
-            response = await asyncio.wait_for(
-                current_anthropic_client.beta.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=1000,
-                    messages=await get_chat_messages(session_id),
-                    system=CLAUDE_SYSTEM_PROMPT,
-                    tools=tools,
-                    tool_choice={"type": "auto"},
-                    betas=["token-efficient-tools-2025-02-19"]
-                ),
-                timeout=60.0  # 60 second timeout
+            # Create the stream/response
+            stream = current_anthropic_client.beta.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1000,
+                messages=await get_chat_messages(session_id),
+                system=CLAUDE_SYSTEM_PROMPT,
+                tools=tools,
+                tool_choice={"type": "auto"},
+                betas=["token-efficient-tools-2025-02-19"]
             )
+            
+            # Store stream for potential cancellation
+            if redis_managers and "local_objects" in redis_managers:
+                await redis_managers["local_objects"].add_stream(request_id, stream)
+            
+            # Use async API call with timeout
+            response = await asyncio.wait_for(stream, timeout=60.0)  # 60 second timeout
         except asyncio.TimeoutError:
             logger.error(f"Claude API timeout for request {request_id} after 60 seconds")
             await set_request_state(request_id, "timeout", {
@@ -2962,18 +3003,21 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Use async API call for tool response
             try:
-                response = await asyncio.wait_for(
-                    current_anthropic_client.beta.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=1000,
-                        messages=await get_chat_messages(session_id),
-                        system=CLAUDE_SYSTEM_PROMPT,
-                        tools=tools,
-                        tool_choice={"type": "auto"},
-                        betas=["token-efficient-tools-2025-02-19"]
-                    ),
-                    timeout=60.0  # 60 second timeout for tool responses too
+                tool_stream = current_anthropic_client.beta.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=1000,
+                    messages=await get_chat_messages(session_id),
+                    system=CLAUDE_SYSTEM_PROMPT,
+                    tools=tools,
+                    tool_choice={"type": "auto"},
+                    betas=["token-efficient-tools-2025-02-19"]
                 )
+                
+                # Update stream reference for cancellation
+                if redis_managers and "local_objects" in redis_managers:
+                    await redis_managers["local_objects"].add_stream(request_id, tool_stream)
+                
+                response = await asyncio.wait_for(tool_stream, timeout=60.0)  # 60 second timeout for tool responses too
             except asyncio.TimeoutError:
                 logger.error(f"Claude API timeout during tool use for request {request_id}")
                 await set_request_state(request_id, "timeout", {
@@ -3006,11 +3050,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Save assistant message to database
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, content_preview='{assistant_response_text[:50]}...'")
-            saved_conversation_id = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
-            if saved_conversation_id:
-                logger.info(f"ASSISTANT message saved successfully to conversation_id={saved_conversation_id} (original session_conversation_id={session_conversation_id})")
+            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
+            if save_result:
+                saved_conversation_id, bot_message_id = save_result
+                logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
             else:
                 logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
+                saved_conversation_id = session_conversation_id  # Fallback to current conversation ID
             
             # Send structured response with request_id and conversation_id
             response_payload = {
@@ -3086,6 +3132,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
     finally:
         # Clean up tracking
         if request_id:
+            # Remove Claude stream from tracking
+            if redis_managers and "local_objects" in redis_managers:
+                await redis_managers["local_objects"].remove_stream(request_id)
+            
             # Remove from local task tracking
             if redis_managers and "local_objects" in redis_managers:
                 await redis_managers["local_objects"].remove_task(request_id)
