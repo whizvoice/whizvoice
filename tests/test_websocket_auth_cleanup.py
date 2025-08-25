@@ -24,7 +24,7 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
     @patch('app.clear_session_mappings')
     @patch('app.remove_user_session')
     @patch('app.redis_managers')
-    @patch('app.jwt.decode')
+    @patch('jose.jwt.decode')
     @patch('app.update_session_activity_redis')
     @patch('app.load_conversation_history')
     @patch('app.set_chat_messages')
@@ -88,7 +88,7 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
     @patch('app.clear_session_mappings')
     @patch('app.remove_user_session')
     @patch('app.redis_managers')
-    @patch('app.jwt.decode')
+    @patch('jose.jwt.decode')
     @patch('app.update_session_activity_redis')
     @patch('app.load_conversation_history')
     @patch('app.set_chat_messages')
@@ -162,7 +162,7 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
     @patch('app.chat_sessions_lock', new_callable=asyncio.Lock)
     @patch('app.chat_sessions', {})
     @patch('app.MAX_TOTAL_SESSIONS', 0)  # Set to 0 to trigger capacity error
-    @patch('app.jwt.decode')
+    @patch('jose.jwt.decode')
     async def test_service_at_capacity_no_cleanup_needed(
         self,
         mock_jwt_decode
