@@ -1263,6 +1263,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             }
                             await websocket.send_text(json.dumps(interrupt_response))
                         
+                        # Before creating the new task, detect and cancel subset requests
+                        # We'll get the message IDs after the message is saved in process_message_task
+                        # But we need to do detection after the task starts to get the correct message IDs
+                        # So we'll move the detection into process_message_task itself
+                        
                         # Create task for processing this message
                         task = asyncio.create_task(
                             process_message_task(
@@ -1798,6 +1803,73 @@ def get_user_message_ids_since_last_bot(conversation_id: int) -> List[int]:
     except Exception as e:
         logger.error(f"Error getting user message IDs for conversation {conversation_id}: {e}")
         return []
+
+def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
+    """Get all non-cancelled bot message IDs in a conversation"""
+    try:
+        result = supabase.table("messages")\
+            .select("id")\
+            .eq("conversation_id", conversation_id)\
+            .eq("message_type", "ASSISTANT")\
+            .is_("cancelled", "null")\
+            .order("id", desc=False)\
+            .execute()
+        
+        if not result.data:
+            return []
+        
+        return [msg["id"] for msg in result.data]
+    except Exception as e:
+        logger.error(f"Error getting bot message IDs for conversation {conversation_id}: {e}")
+        return []
+
+async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int]) -> List[str]:
+    """
+    Detect requests that are subsets of the new message set and cancel them.
+    Returns list of cancelled request IDs.
+    """
+    cancelled_requests = []
+    
+    if not redis_managers or "request_messages" not in redis_managers:
+        return cancelled_requests
+    
+    try:
+        # Get all requests for this conversation
+        all_requests = await redis_managers["request_messages"].get_by_conversation(conversation_id)
+        
+        for request_id, request_data in all_requests.items():
+            # Skip if already cancelled
+            if request_data.get("status") == "cancelled":
+                continue
+            
+            old_message_ids = set(request_data.get("message_ids", []))
+            new_message_ids_set = set(new_message_ids)
+            
+            # Check if old request is a subset of new request
+            if old_message_ids and old_message_ids.issubset(new_message_ids_set) and old_message_ids != new_message_ids_set:
+                logger.info(f"Request {request_id} (messages {old_message_ids}) is subset of new request (messages {new_message_ids_set})")
+                
+                # Cancel the Claude stream if it exists
+                if redis_managers and "local_objects" in redis_managers:
+                    stream_cancelled = await redis_managers["local_objects"].cancel_stream(request_id)
+                    if stream_cancelled:
+                        logger.info(f"Cancelled Claude stream for request {request_id}")
+                
+                # Mark request as cancelled in tracking
+                await redis_managers["request_messages"].mark_cancelled(request_id)
+                cancelled_requests.append(request_id)
+                
+                # Cancel the asyncio task if it exists
+                if redis_managers and "local_objects" in redis_managers:
+                    await redis_managers["local_objects"].cancel_task(request_id)
+        
+        if cancelled_requests:
+            logger.info(f"Cancelled {len(cancelled_requests)} subset requests: {cancelled_requests}")
+            
+    except Exception as e:
+        logger.error(f"Error detecting subset requests: {e}")
+    
+    return cancelled_requests
 
 def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None) -> Optional[Tuple[int, int]]:
     """Save a message to the database and return (conversation_id, message_id)"""
@@ -2870,6 +2942,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 request_id, user_message_ids, session_conversation_id
             )
             logger.info(f"Tracking request {request_id} responding to message IDs: {user_message_ids}")
+        
+        # Detect and cancel subset requests
+        cancelled_requests = await detect_and_cancel_subset_requests(session_conversation_id, user_message_ids)
+        if cancelled_requests:
+            logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {session_conversation_id}")
 
         async with chat_sessions_lock:
             await add_chat_message(session_id, {"role": "user", "content": message})
@@ -3071,6 +3148,23 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
             else:
                 logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
+            
+            # Clean up old request tracking data
+            # Do this after saving the bot response to ensure we have the latest message IDs
+            if save_result and redis_managers and "request_messages" in redis_managers:
+                try:
+                    # Get all non-cancelled bot message IDs
+                    bot_message_ids = get_non_cancelled_bot_message_ids(saved_conversation_id)
+                    
+                    # Clean up requests that have 2+ bot messages after them
+                    cleaned_count = await redis_managers["request_messages"].cleanup_old_requests(
+                        saved_conversation_id, bot_message_ids
+                    )
+                    
+                    if cleaned_count > 0:
+                        logger.info(f"Cleaned up {cleaned_count} old request tracking entries for conversation {saved_conversation_id}")
+                except Exception as e:
+                    logger.warning(f"Error cleaning up old request tracking: {e}")
             
             # Mark request as completed successfully
             await set_request_state(request_id, "completed", {

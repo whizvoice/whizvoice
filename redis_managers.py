@@ -470,6 +470,16 @@ class LocalObjectManager:
         async with self.tasks_lock:
             return self.active_tasks.pop(request_id, None)
     
+    async def cancel_task(self, request_id: str) -> bool:
+        """Cancel a task by request ID"""
+        async with self.tasks_lock:
+            task = self.active_tasks.get(request_id)
+            if task:
+                task.cancel()
+                del self.active_tasks[request_id]
+                return True
+            return False
+    
     async def get_and_cancel_task(self, request_id: str):
         """Get and cancel a task"""
         async with self.tasks_lock:
