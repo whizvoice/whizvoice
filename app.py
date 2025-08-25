@@ -931,6 +931,7 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Authenticate if token is present
         user_id = None
+        resources_allocated = False  # Track if we've allocated resources that need cleanup
         if token:
             try:
                 # Verify token using our server's algorithm (HS256)
@@ -951,6 +952,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Reject if at capacity
                 if total_sessions >= MAX_TOTAL_SESSIONS:
                     logger.error(f"MAX_TOTAL_SESSIONS reached: {total_sessions}/{MAX_TOTAL_SESSIONS}. Rejecting connection from {user_email}")
+                    
+                    # Clean up any resources that may have been allocated before capacity check
+                    # Note: At this point, session_id hasn't been created yet, so no cleanup needed
+                    
                     error_payload = {
                         "type": "error",
                         "code": "SERVICE_AT_CAPACITY",
@@ -996,6 +1001,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 # IMPORTANT: Track session immediately to ensure cleanup even if errors occur
                 await update_session_activity_redis(session_id)
+                resources_allocated = True  # Mark that we've started allocating resources
                 
                 # Use actual_conversation_id for loading history (it already handles optimistic IDs internally,
                 # but we've already resolved it so we can pass the real ID directly)
@@ -1037,6 +1043,31 @@ async def websocket_endpoint(websocket: WebSocket):
                     
             except JWTError as e:
                 logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
+                
+                # Clean up any resources that may have been allocated
+                if resources_allocated and 'session_id' in locals():
+                    logger.info(f"Cleaning up resources for failed auth session {session_id}")
+                    
+                    # Clean up session timestamp if it was set
+                    await remove_session_timestamp(session_id)
+                    
+                    # Clean up chat messages if they were loaded
+                    await clear_chat_session(session_id)
+                    
+                    # Clean up any Redis subscriptions
+                    await unsubscribe_from_conversation(session_id)
+                    
+                    # Clean up session mappings
+                    await clear_session_mappings(session_id)
+                    
+                    # Clean up conversation websockets
+                    if redis_managers and "local_objects" in redis_managers:
+                        await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
+                    
+                    # Clean up from user sessions if it was added
+                    if 'user_id' in locals() and user_id:
+                        await remove_user_session(user_id, session_id)
+                
                 error_payload = {
                     "type": "error",
                     "code": "AUTH_JWT_INVALID",
@@ -1048,6 +1079,31 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception as e:
                 logger.error(f"Error during WebSocket authentication: {str(e)}")
                 logger.error(traceback.format_exc())
+                
+                # Clean up any resources that may have been allocated
+                if resources_allocated and 'session_id' in locals():
+                    logger.info(f"Cleaning up resources for failed auth session {session_id}")
+                    
+                    # Clean up session timestamp if it was set
+                    await remove_session_timestamp(session_id)
+                    
+                    # Clean up chat messages if they were loaded
+                    await clear_chat_session(session_id)
+                    
+                    # Clean up any Redis subscriptions
+                    await unsubscribe_from_conversation(session_id)
+                    
+                    # Clean up session mappings
+                    await clear_session_mappings(session_id)
+                    
+                    # Clean up conversation websockets
+                    if redis_managers and "local_objects" in redis_managers:
+                        await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
+                    
+                    # Clean up from user sessions if it was added
+                    if 'user_id' in locals() and user_id:
+                        await remove_user_session(user_id, session_id)
+                
                 error_payload = {
                     "type": "error",
                     "code": "AUTH_GENERAL_ERROR",
