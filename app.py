@@ -2506,12 +2506,15 @@ async def get_messages(
         response = query.execute()
         messages = response.data if response.data else []
         
+        # Log raw messages from database
+        logger.info(f"Fetched {len(messages)} messages from database for conversation {actual_conversation_id}")
+        
         # Update conversation_id in messages to use the actual server-backed ID
         # This ensures clients always receive messages with positive server-backed IDs
         for message in messages:
             message['conversation_id'] = actual_conversation_id
             # Debug logging to diagnose message_type issue and timestamp
-            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, request_id={message.get('request_id')}, timestamp={message.get('timestamp')}")
+            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, request_id={message.get('request_id')}, timestamp={message.get('timestamp')}, content_preview={message.get('content', '')[:50]}")
         
         # Return with server timestamp for next incremental sync
         result = {
@@ -2576,8 +2579,18 @@ async def create_message(
         if message.timestamp:
             message_data["timestamp"] = message.timestamp
             logger.info(f"Using client-provided timestamp for message: {message.timestamp}")
+        else:
+            logger.info(f"No timestamp provided for message, will use database default")
+        
+        # Log the data being sent to database
+        logger.info(f"Inserting message to database with data: {json.dumps(message_data, default=str)}")
         
         result = supabase.table("messages").insert(message_data).execute()
+        
+        # Log what was actually saved
+        if result.data:
+            saved_msg = result.data[0]
+            logger.info(f"Message saved to database - ID: {saved_msg.get('id')}, timestamp from DB: {saved_msg.get('timestamp')}, request_id: {saved_msg.get('request_id')}")
         
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create message")
