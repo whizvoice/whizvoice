@@ -159,9 +159,6 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         session_id_arg = mock_remove_timestamp.call_args[0][0]
         self.assertIn("ws_test_user_123", session_id_arg)
     
-    @patch('app.chat_sessions_lock', new_callable=asyncio.Lock)
-    @patch('app.chat_sessions', {})
-    @patch('app.MAX_TOTAL_SESSIONS', 0)  # Set to 0 to trigger capacity error
     @patch('jose.jwt.decode')
     async def test_service_at_capacity_no_cleanup_needed(
         self,
@@ -182,8 +179,11 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         # Import the websocket_endpoint function
         from app import websocket_endpoint
         
-        # Call the endpoint
-        await websocket_endpoint(self.mock_websocket)
+        # Call the endpoint with patches applied inline
+        with patch('app.chat_sessions_lock', new_callable=asyncio.Lock):
+            with patch('app.chat_sessions', {}):
+                with patch('app.MAX_TOTAL_SESSIONS', 0):  # Set to 0 to trigger capacity error
+                    await websocket_endpoint(self.mock_websocket)
         
         # Verify WebSocket was accepted then closed with capacity error
         self.mock_websocket.accept.assert_called_once()
