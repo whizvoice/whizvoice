@@ -426,8 +426,16 @@ async def update_websocket_conversation(session_id: str, old_conversation_id: Op
         
         # STEP 2: Update the conversation_websockets mapping using LocalObjectManager
         if redis_managers and "local_objects" in redis_managers:
-            await redis_managers["local_objects"].update_conversation_websocket(
-                session_id, old_conversation_id, new_conversation_id, websocket
+            # Pass the old conversation ID as optimistic if it's negative (optimistic)
+            optimistic_id = old_conversation_id if old_conversation_id and old_conversation_id < 0 else None
+            
+            # First unregister from old conversation
+            if old_conversation_id:
+                await redis_managers["local_objects"].unregister_conversation_websocket(session_id, old_conversation_id)
+            
+            # Then register with new conversation (with optimistic ID if migrating)
+            await redis_managers["local_objects"].register_conversation_websocket(
+                session_id, new_conversation_id, websocket, optimistic_id
             )
         
         # STEP 3: NOW unsubscribe from old channel (after new one is active)
@@ -1452,21 +1460,32 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
             await redis_client.publish(channel_name, json.dumps(message_data))
             logger.info(f"Published message to Redis channel {channel_name} (excluding session: {exclude_session})")
             
-            # ALSO publish to any optimistic conversation ID channels
-            # Look up if this real ID has an associated optimistic ID
-            try:
-                opt_result = supabase.table("conversations")\
-                    .select("optimistic_chat_id")\
-                    .eq("id", conversation_id)\
-                    .execute()
-                
-                if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
-                    optimistic_id = opt_result.data[0]["optimistic_chat_id"]
-                    opt_channel_name = f"conversation:{optimistic_id}"
-                    await redis_client.publish(opt_channel_name, json.dumps(message_data))
-                    logger.info(f"Also published message to optimistic Redis channel {opt_channel_name}")
-            except Exception as opt_e:
-                logger.warning(f"Could not check for optimistic ID for conversation {conversation_id}: {str(opt_e)}")
+            # Check for optimistic ID - first try cache, then database
+            optimistic_id = None
+            if redis_managers and "local_objects" in redis_managers:
+                optimistic_id = await redis_managers["local_objects"].get_optimistic_id_cached(conversation_id)
+            
+            if not optimistic_id:
+                # No cached mapping - query database
+                try:
+                    opt_result = supabase.table("conversations")\
+                        .select("optimistic_chat_id")\
+                        .eq("id", conversation_id)\
+                        .execute()
+                    
+                    if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
+                        optimistic_id = opt_result.data[0]["optimistic_chat_id"]
+                        
+                        # Cache this mapping for future use
+                        if redis_managers and "local_objects" in redis_managers:
+                            await redis_managers["local_objects"].cache_id_mapping(optimistic_id, conversation_id)
+                except Exception as opt_e:
+                    logger.warning(f"Could not check for optimistic ID for conversation {conversation_id}: {str(opt_e)}")
+            
+            if optimistic_id:
+                opt_channel_name = f"conversation:{optimistic_id}"
+                await redis_client.publish(opt_channel_name, json.dumps(message_data))
+                logger.info(f"Also published message to optimistic Redis channel {opt_channel_name}")
         except Exception as e:
             logger.error(f"Failed to publish to Redis: {str(e)}")
     
@@ -1474,33 +1493,40 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
     connections = []
     
     if redis_managers and "local_objects" in redis_managers:
+        local_objects = redis_managers["local_objects"]
+        
         # Get connections for the real conversation ID
-        connections.extend(await redis_managers["local_objects"].get_conversation_websockets(conversation_id))
+        connections.extend(await local_objects.get_conversation_websockets(conversation_id))
         
-        # ALSO check for any optimistic conversation IDs that map to this real ID
-        # First check the database for the optimistic ID
-        try:
-            opt_result = supabase.table("conversations")\
-                .select("optimistic_chat_id")\
-                .eq("id", conversation_id)\
-                .execute()
-            
-            if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
-                optimistic_id = int(opt_result.data[0]["optimistic_chat_id"])
-                opt_connections = await redis_managers["local_objects"].get_conversation_websockets(optimistic_id)
-                if opt_connections:
-                    logger.info(f"Found WebSockets registered under optimistic ID {optimistic_id} for real conversation {conversation_id}")
-                    connections.extend(opt_connections)
-        except Exception as e:
-            logger.warning(f"Could not check for optimistic ID in database: {str(e)}")
+        # Check for optimistic ID using cached mapping first (avoids database query)
+        optimistic_id = await local_objects.get_optimistic_id_cached(conversation_id)
         
-        # Also check Redis session_mappings as a fallback
-        # Note: This requires iterating through all sessions since Redis doesn't have reverse mapping lookup
-        # In practice, this fallback should rarely be needed since the database stores optimistic IDs
-        if redis_managers and "session_mappings" in redis_managers:
-            # For now, log that we're skipping this check since it would be inefficient
-            # The database check above should handle most cases
-            logger.debug(f"Skipping exhaustive session_mappings check for conversation {conversation_id}")
+        if optimistic_id:
+            # Found cached optimistic ID - use it directly
+            opt_connections = await local_objects.get_conversation_websockets(optimistic_id)
+            if opt_connections:
+                logger.info(f"Found WebSockets registered under cached optimistic ID {optimistic_id} for real conversation {conversation_id}")
+                connections.extend(opt_connections)
+        else:
+            # No cached mapping - fall back to database query (and cache the result)
+            try:
+                opt_result = supabase.table("conversations")\
+                    .select("optimistic_chat_id")\
+                    .eq("id", conversation_id)\
+                    .execute()
+                
+                if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
+                    optimistic_id = int(opt_result.data[0]["optimistic_chat_id"])
+                    
+                    # Cache this mapping for future use
+                    await local_objects.cache_id_mapping(optimistic_id, conversation_id)
+                    
+                    opt_connections = await local_objects.get_conversation_websockets(optimistic_id)
+                    if opt_connections:
+                        logger.info(f"Found WebSockets registered under optimistic ID {optimistic_id} for real conversation {conversation_id} (cached for future use)")
+                        connections.extend(opt_connections)
+            except Exception as e:
+                logger.warning(f"Could not check for optimistic ID in database: {str(e)}")
     
     if not connections:
         logger.info(f"No local WebSocket sessions registered for conversation {conversation_id} (checked real and optimistic IDs)")
