@@ -424,6 +424,14 @@ class LocalObjectManager:
         self.conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}  # Conversation WebSockets
         self.claude_streams: Dict[str, Any] = {}  # Claude API stream objects for cancellation
         
+        # NEW: Reverse lookup for efficient broadcasting
+        self.session_conversations: Dict[str, Set[int]] = {}  # session_id -> Set of conversation_ids
+        self.session_websocket: Dict[str, WebSocket] = {}  # session_id -> WebSocket (for fast lookup)
+        
+        # Cache for optimistic ID mappings to avoid database queries
+        self.optimistic_to_real: Dict[int, int] = {}  # optimistic_id -> real_id
+        self.real_to_optimistic: Dict[int, int] = {}  # real_id -> optimistic_id
+        
         # Locks for local objects
         self.pubsub_lock = asyncio.Lock()
         self.tasks_lock = asyncio.Lock()
@@ -431,6 +439,7 @@ class LocalObjectManager:
         self.clients_lock = asyncio.Lock()
         self.conversation_websockets_lock = asyncio.Lock()
         self.streams_lock = asyncio.Lock()
+        self.session_lookup_lock = asyncio.Lock()  # Lock for reverse lookup structures
     
     # WebSocket PubSub management
     async def add_pubsub(self, session_id: str, pubsub):
@@ -569,87 +578,116 @@ class LocalObjectManager:
             return conversation_ids
     
     async def register_conversation_websocket(self, session_id: str, conversation_id: int, 
-                                             websocket: WebSocket):
+                                             websocket: WebSocket, optimistic_id: Optional[int] = None):
         """Register a WebSocket for a conversation, handling migration from optimistic to real IDs"""
         async with self.conversation_websockets_lock:
-            # If this is a real ID (positive) and this WebSocket is already registered
-            # with an optimistic ID (negative), remove the optimistic registration
-            if conversation_id > 0:
-                # Check all conversations for this exact WebSocket instance
-                for conv_id in list(self.conversation_websockets.keys()):
-                    if conv_id < 0:  # It's an optimistic ID
-                        # Check if this WebSocket is registered there
-                        registrations = self.conversation_websockets[conv_id]
-                        for sid, ws in registrations[:]:  # Use slice copy to allow modification
-                            if ws is websocket:  # Same WebSocket instance
-                                registrations.remove((sid, ws))
-                                logger.info(f"Removed optimistic registration {conv_id} for WebSocket (session {sid}) migrating to real ID {conversation_id}")
-                                if not registrations:
-                                    del self.conversation_websockets[conv_id]
-                                break
-            
-            # Now proceed with normal registration
-            if conversation_id not in self.conversation_websockets:
-                self.conversation_websockets[conversation_id] = []
-            
-            # Remove any existing entry for this session (handles reconnection)
-            existing_entries = [(sid, ws) for sid, ws in self.conversation_websockets[conversation_id] 
-                              if sid == session_id]
-            for old_entry in existing_entries:
-                self.conversation_websockets[conversation_id].remove(old_entry)
-                logger.info(f"Replaced old WebSocket registration for session {session_id} in conversation {conversation_id}")
-            
-            # Add the new WebSocket registration
-            self.conversation_websockets[conversation_id].append((session_id, websocket))
-            logger.info(f"Registered WebSocket session {session_id} for conversation {conversation_id}")
+            async with self.session_lookup_lock:
+                # Cache the optimistic->real mapping if provided
+                if optimistic_id is not None and conversation_id > 0:
+                    self.optimistic_to_real[optimistic_id] = conversation_id
+                    self.real_to_optimistic[conversation_id] = optimistic_id
+                    logger.info(f"Cached mapping: optimistic {optimistic_id} -> real {conversation_id}")
+                
+                # If this is a real ID (positive) and this WebSocket is already registered
+                # with an optimistic ID (negative), remove the optimistic registration
+                if conversation_id > 0:
+                    # Check all conversations for this exact WebSocket instance
+                    for conv_id in list(self.conversation_websockets.keys()):
+                        if conv_id < 0:  # It's an optimistic ID
+                            # Check if this WebSocket is registered there
+                            registrations = self.conversation_websockets[conv_id]
+                            for sid, ws in registrations[:]:  # Use slice copy to allow modification
+                                if ws is websocket:  # Same WebSocket instance
+                                    registrations.remove((sid, ws))
+                                    # Update reverse lookup: remove optimistic ID from session
+                                    if sid in self.session_conversations:
+                                        self.session_conversations[sid].discard(conv_id)
+                                        if not self.session_conversations[sid]:
+                                            del self.session_conversations[sid]
+                                    # Cache this optimistic->real mapping
+                                    self.optimistic_to_real[conv_id] = conversation_id
+                                    self.real_to_optimistic[conversation_id] = conv_id
+                                    logger.info(f"Removed optimistic registration {conv_id} for WebSocket (session {sid}) migrating to real ID {conversation_id}")
+                                    if not registrations:
+                                        del self.conversation_websockets[conv_id]
+                                    break
+                
+                # Now proceed with normal registration
+                if conversation_id not in self.conversation_websockets:
+                    self.conversation_websockets[conversation_id] = []
+                
+                # Remove any existing entry for this session (handles reconnection)
+                existing_entries = [(sid, ws) for sid, ws in self.conversation_websockets[conversation_id] 
+                                  if sid == session_id]
+                for old_entry in existing_entries:
+                    self.conversation_websockets[conversation_id].remove(old_entry)
+                    logger.info(f"Replaced old WebSocket registration for session {session_id} in conversation {conversation_id}")
+                
+                # Add the new WebSocket registration
+                self.conversation_websockets[conversation_id].append((session_id, websocket))
+                
+                # Update reverse lookup mappings
+                if session_id not in self.session_conversations:
+                    self.session_conversations[session_id] = set()
+                self.session_conversations[session_id].add(conversation_id)
+                
+                # Update session -> websocket mapping
+                self.session_websocket[session_id] = websocket
+                
+                logger.info(f"Registered WebSocket session {session_id} for conversation {conversation_id}")
     
     async def unregister_conversation_websocket(self, session_id: str, conversation_id: Optional[int] = None):
         """Unregister a WebSocket from conversations"""
         async with self.conversation_websockets_lock:
-            conversations_cleaned = []
-            
-            if conversation_id is not None:
-                # Remove from specific conversation
-                if conversation_id in self.conversation_websockets:
-                    self.conversation_websockets[conversation_id] = [
-                        (sid, ws) for sid, ws in self.conversation_websockets[conversation_id]
-                        if sid != session_id
-                    ]
-                    if not self.conversation_websockets[conversation_id]:
-                        del self.conversation_websockets[conversation_id]
-                    conversations_cleaned.append(conversation_id)
-            else:
-                # Remove from all conversations (cleanup on disconnect)
-                for conv_id in list(self.conversation_websockets.keys()):
-                    original_count = len(self.conversation_websockets[conv_id])
-                    self.conversation_websockets[conv_id] = [
-                        (sid, ws) for sid, ws in self.conversation_websockets[conv_id]
-                        if sid != session_id
-                    ]
-                    if len(self.conversation_websockets[conv_id]) < original_count:
-                        conversations_cleaned.append(conv_id)
-                    if not self.conversation_websockets[conv_id]:
-                        del self.conversation_websockets[conv_id]
-            
-            for conv_id in conversations_cleaned:
-                logger.info(f"Removed WebSocket for session {session_id} from conversation {conv_id}")
+            async with self.session_lookup_lock:
+                conversations_cleaned = []
+                
+                if conversation_id is not None:
+                    # Remove from specific conversation
+                    if conversation_id in self.conversation_websockets:
+                        self.conversation_websockets[conversation_id] = [
+                            (sid, ws) for sid, ws in self.conversation_websockets[conversation_id]
+                            if sid != session_id
+                        ]
+                        if not self.conversation_websockets[conversation_id]:
+                            del self.conversation_websockets[conversation_id]
+                        conversations_cleaned.append(conversation_id)
+                        
+                        # Update reverse lookup
+                        if session_id in self.session_conversations:
+                            self.session_conversations[session_id].discard(conversation_id)
+                            if not self.session_conversations[session_id]:
+                                del self.session_conversations[session_id]
+                                # Also remove from session->websocket mapping if no conversations
+                                if session_id in self.session_websocket:
+                                    del self.session_websocket[session_id]
+                else:
+                    # Remove from all conversations (cleanup on disconnect)
+                    for conv_id in list(self.conversation_websockets.keys()):
+                        original_count = len(self.conversation_websockets[conv_id])
+                        self.conversation_websockets[conv_id] = [
+                            (sid, ws) for sid, ws in self.conversation_websockets[conv_id]
+                            if sid != session_id
+                        ]
+                        if len(self.conversation_websockets[conv_id]) < original_count:
+                            conversations_cleaned.append(conv_id)
+                        if not self.conversation_websockets[conv_id]:
+                            del self.conversation_websockets[conv_id]
+                    
+                    # Clear all reverse lookup entries for this session
+                    if session_id in self.session_conversations:
+                        del self.session_conversations[session_id]
+                    if session_id in self.session_websocket:
+                        del self.session_websocket[session_id]
+                
+                for conv_id in conversations_cleaned:
+                    logger.info(f"Removed WebSocket for session {session_id} from conversation {conv_id}")
     
     async def get_conversation_websockets(self, conversation_id: int) -> List[Tuple[str, WebSocket]]:
         """Get all WebSocket connections for a conversation"""
         async with self.conversation_websockets_lock:
             return list(self.conversation_websockets.get(conversation_id, []))
     
-    async def update_conversation_websocket(self, session_id: str, old_conversation_id: Optional[int],
-                                           new_conversation_id: int, websocket: WebSocket):
-        """Update the conversation mapping for a WebSocket"""
-        # First remove from old conversation if specified
-        if old_conversation_id:
-            await self.unregister_conversation_websocket(session_id, old_conversation_id)
-        
-        # Then register with new conversation (this will handle deduplication automatically)
-        await self.register_conversation_websocket(session_id, new_conversation_id, websocket)
-        
-        logger.info(f"Updated WebSocket conversation for session {session_id}: {old_conversation_id} → {new_conversation_id}")
     
     async def get_all_conversation_websockets(self) -> Dict[int, List[Tuple[str, WebSocket]]]:
         """Get all conversation WebSocket mappings (for monitoring/debugging)"""
@@ -669,6 +707,59 @@ class LocalObjectManager:
                 except ValueError:
                     return False
         return False
+    
+    # Helper methods for reverse lookup
+    async def get_session_conversations(self, session_id: str) -> Set[int]:
+        """Get all conversation IDs a session is registered for"""
+        async with self.session_lookup_lock:
+            return set(self.session_conversations.get(session_id, set()))
+    
+    async def get_session_websocket(self, session_id: str) -> Optional[WebSocket]:
+        """Get the WebSocket for a session ID (fast O(1) lookup)"""
+        async with self.session_lookup_lock:
+            return self.session_websocket.get(session_id)
+    
+    async def get_all_session_mappings(self) -> Dict[str, Set[int]]:
+        """Get all session -> conversations mappings (for debugging/monitoring)"""
+        async with self.session_lookup_lock:
+            return {sid: set(convs) for sid, convs in self.session_conversations.items()}
+    
+    async def session_is_registered(self, session_id: str, conversation_id: int) -> bool:
+        """Check if a session is registered for a specific conversation"""
+        async with self.session_lookup_lock:
+            return conversation_id in self.session_conversations.get(session_id, set())
+    
+    # Optimistic ID cache methods
+    async def get_optimistic_id_cached(self, real_id: int) -> Optional[int]:
+        """Get cached optimistic ID for a real conversation ID"""
+        async with self.session_lookup_lock:
+            return self.real_to_optimistic.get(real_id)
+    
+    async def get_real_id_cached(self, optimistic_id: int) -> Optional[int]:
+        """Get cached real ID for an optimistic conversation ID"""
+        async with self.session_lookup_lock:
+            return self.optimistic_to_real.get(optimistic_id)
+    
+    async def cache_id_mapping(self, optimistic_id: int, real_id: int):
+        """Cache an optimistic->real ID mapping"""
+        async with self.session_lookup_lock:
+            self.optimistic_to_real[optimistic_id] = real_id
+            self.real_to_optimistic[real_id] = optimistic_id
+            logger.debug(f"Cached ID mapping: optimistic {optimistic_id} <-> real {real_id}")
+    
+    async def clear_id_mapping_cache(self, conversation_id: int):
+        """Clear cached mappings for a conversation (when it's deleted/completed)"""
+        async with self.session_lookup_lock:
+            if conversation_id in self.real_to_optimistic:
+                opt_id = self.real_to_optimistic[conversation_id]
+                del self.real_to_optimistic[conversation_id]
+                if opt_id in self.optimistic_to_real:
+                    del self.optimistic_to_real[opt_id]
+            elif conversation_id in self.optimistic_to_real:
+                real_id = self.optimistic_to_real[conversation_id]
+                del self.optimistic_to_real[conversation_id]
+                if real_id in self.real_to_optimistic:
+                    del self.real_to_optimistic[real_id]
     
     # Claude stream management
     async def add_stream(self, request_id: str, stream):

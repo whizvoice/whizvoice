@@ -55,8 +55,8 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         from app import websocket_endpoint
         
         # Call the endpoint
-        with patch('app.chat_sessions_lock', new_callable=asyncio.Lock):
-            with patch('app.chat_sessions', {}):
+        with patch('redis_helpers.chat_sessions_lock', new_callable=asyncio.Lock):
+            with patch('redis_helpers.chat_sessions', {}):
                 with patch('app.MAX_TOTAL_SESSIONS', 100):
                     await websocket_endpoint(self.mock_websocket)
         
@@ -130,8 +130,8 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         from app import websocket_endpoint
         
         # Call the endpoint
-        with patch('app.chat_sessions_lock', new_callable=asyncio.Lock):
-            with patch('app.chat_sessions', {}):
+        with patch('redis_helpers.chat_sessions_lock', new_callable=asyncio.Lock):
+            with patch('redis_helpers.chat_sessions', {}):
                 with patch('app.MAX_TOTAL_SESSIONS', 100):
                     await websocket_endpoint(self.mock_websocket)
         
@@ -180,8 +180,8 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         from app import websocket_endpoint
         
         # Call the endpoint with patches applied inline
-        with patch('app.chat_sessions_lock', new_callable=asyncio.Lock):
-            with patch('app.chat_sessions', {}):
+        with patch('redis_helpers.chat_sessions_lock', new_callable=asyncio.Lock):
+            with patch('redis_helpers.chat_sessions', {}):
                 with patch('app.MAX_TOTAL_SESSIONS', 0):  # Set to 0 to trigger capacity error
                     await websocket_endpoint(self.mock_websocket)
         
