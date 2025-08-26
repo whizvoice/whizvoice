@@ -1263,6 +1263,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             }
                             await websocket.send_text(json.dumps(interrupt_response))
                         
+                        # Before creating the new task, detect and cancel subset requests
+                        # We'll get the message IDs after the message is saved in process_message_task
+                        # But we need to do detection after the task starts to get the correct message IDs
+                        # So we'll move the detection into process_message_task itself
+                        
                         # Create task for processing this message
                         task = asyncio.create_task(
                             process_message_task(
@@ -1772,8 +1777,142 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         logger.error(f"Error loading conversation history for user {user_id}, conversation {conversation_id}: {str(e)}")
         return []
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None) -> Optional[int]:
-    """Save a message to the database and return the conversation_id"""
+def get_user_message_ids_since_last_bot(conversation_id: int) -> List[int]:
+    """Get all user message IDs since the last bot message in a conversation"""
+    try:
+        # Get all messages ordered by timestamp
+        result = supabase.table("messages")\
+            .select("id, message_type")\
+            .eq("conversation_id", conversation_id)\
+            .is_("cancelled", "null")\
+            .order("timestamp", desc=False)\
+            .execute()
+        
+        if not result.data:
+            return []
+        
+        # Find user messages since last bot message
+        user_message_ids = []
+        for msg in reversed(result.data):  # Start from most recent
+            if msg["message_type"] == "ASSISTANT":
+                break  # Stop at the most recent bot message
+            elif msg["message_type"] == "USER":
+                user_message_ids.append(msg["id"])
+        
+        return list(reversed(user_message_ids))  # Return in chronological order
+    except Exception as e:
+        logger.error(f"Error getting user message IDs for conversation {conversation_id}: {e}")
+        return []
+
+def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
+    """Get all non-cancelled bot message IDs in a conversation"""
+    try:
+        result = supabase.table("messages")\
+            .select("id")\
+            .eq("conversation_id", conversation_id)\
+            .eq("message_type", "ASSISTANT")\
+            .is_("cancelled", "null")\
+            .order("id", desc=False)\
+            .execute()
+        
+        if not result.data:
+            return []
+        
+        return [msg["id"] for msg in result.data]
+    except Exception as e:
+        logger.error(f"Error getting bot message IDs for conversation {conversation_id}: {e}")
+        return []
+
+async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int], websocket=None, session_id=None) -> List[str]:
+    """
+    Detect requests that are subsets of the new message set and cancel them.
+    Returns list of cancelled request IDs.
+    """
+    cancelled_requests = []
+    cancelled_bot_messages = []  # Track bot messages that need delete notifications
+    
+    if not redis_managers or "request_messages" not in redis_managers:
+        return cancelled_requests
+    
+    try:
+        # Get all requests for this conversation
+        all_requests = await redis_managers["request_messages"].get_by_conversation(conversation_id)
+        
+        for request_id, request_data in all_requests.items():
+            # Skip if already cancelled
+            if request_data.get("status") == "cancelled":
+                continue
+            
+            old_message_ids = set(request_data.get("message_ids", []))
+            new_message_ids_set = set(new_message_ids)
+            
+            # Check if old request is a subset of new request
+            if old_message_ids and old_message_ids.issubset(new_message_ids_set) and old_message_ids != new_message_ids_set:
+                logger.info(f"Request {request_id} (messages {old_message_ids}) is subset of new request (messages {new_message_ids_set})")
+                
+                # Check if this request has already sent a bot response
+                # Query the database for bot messages with this request_id
+                try:
+                    bot_msg_result = supabase.table("messages")\
+                        .select("id")\
+                        .eq("request_id", request_id)\
+                        .eq("message_type", "ASSISTANT")\
+                        .is_("cancelled", "null")\
+                        .execute()
+                    
+                    if bot_msg_result.data:
+                        for bot_msg in bot_msg_result.data:
+                            bot_message_id = bot_msg["id"]
+                            cancelled_bot_messages.append(bot_message_id)
+                            
+                            # Mark the bot message as cancelled in the database
+                            supabase.table("messages")\
+                                .update({"cancelled": "now()"})\
+                                .eq("id", bot_message_id)\
+                                .execute()
+                            logger.info(f"Marked bot message {bot_message_id} as cancelled for request {request_id}")
+                except Exception as e:
+                    logger.error(f"Error checking/cancelling bot messages for request {request_id}: {e}")
+                
+                # Cancel the Claude stream if it exists
+                if redis_managers and "local_objects" in redis_managers:
+                    stream_cancelled = await redis_managers["local_objects"].cancel_stream(request_id)
+                    if stream_cancelled:
+                        logger.info(f"Cancelled Claude stream for request {request_id}")
+                
+                # Mark request as cancelled in tracking
+                await redis_managers["request_messages"].mark_cancelled(request_id)
+                cancelled_requests.append(request_id)
+                
+                # Cancel the asyncio task if it exists
+                if redis_managers and "local_objects" in redis_managers:
+                    await redis_managers["local_objects"].cancel_task(request_id)
+        
+        if cancelled_requests:
+            logger.info(f"Cancelled {len(cancelled_requests)} subset requests: {cancelled_requests}")
+        
+        # Send delete notifications for cancelled bot messages
+        if cancelled_bot_messages and websocket and session_id:
+            for bot_message_id in cancelled_bot_messages:
+                delete_notification = {
+                    "type": "delete_message",
+                    "message_id": bot_message_id,
+                    "conversation_id": conversation_id,
+                    "reason": "superseded_by_new_request"
+                }
+                try:
+                    await websocket.send_text(json.dumps(delete_notification))
+                    logger.info(f"Sent delete notification for bot message {bot_message_id} to session {session_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to send delete notification for message {bot_message_id}: {e}")
+            
+    except Exception as e:
+        logger.error(f"Error detecting subset requests: {e}")
+    
+    return cancelled_requests
+
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None) -> Optional[Tuple[int, int]]:
+    """Save a message to the database and return (conversation_id, message_id)"""
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, client_conversation_id={client_conversation_id}, content='{content[:50]}...'")
         
@@ -1954,7 +2093,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         else:
             logger.warning(f"Failed to update conversation {conversation_id} timestamps")
         
-        return conversation_id
+        return (conversation_id, message_id)
         
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")
@@ -2523,17 +2662,18 @@ async def update_conversation_last_message_time(
 @app.get("/conversations/{conversation_id}/messages")
 async def get_messages(
     conversation_id: int,
-    since: Optional[str] = None,  # ISO timestamp string for incremental sync
-    limit: Optional[int] = 100,   # Pagination support
+    since_timestamp: Optional[float] = None,  # Unix timestamp for incremental sync
     current_user: Dict = Depends(get_current_user)
 ):
     """Get messages for a conversation with optional incremental sync"""
+    from datetime import datetime
+    
     try:
         user_id = current_user.get("sub")
         if not user_id:
             raise HTTPException(status_code=401, detail="User not authenticated")
         
-        logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since: {since}")
+        logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since_timestamp: {since_timestamp}")
         
         # Resolve the actual conversation ID (handles optimistic IDs)
         actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
@@ -2541,48 +2681,49 @@ async def get_messages(
             logger.warning(f"No conversation found for conversation ID {conversation_id}")
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        # Build the messages query
+        # Build the messages query - explicitly select fields including cancelled
+        # Include ALL messages (including cancelled ones) so client can handle them appropriately
         query = supabase.table("messages")\
-            .select("*")\
+            .select("id, conversation_id, content, message_type, timestamp, updated_at, request_id, cancelled")\
             .eq("conversation_id", actual_conversation_id)\
-            .order("updated_at", desc=False)\
-            .limit(limit)
+            .order("timestamp", desc=False)
         
         # Add incremental sync filter if provided
-        if since:
-            try:
-                # Parse the timestamp and filter for records updated after it
-                since_timestamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
-                query = query.gte('updated_at', since_timestamp.isoformat())
-                logger.info(f"Incremental sync: fetching messages updated since {since_timestamp}")
-            except ValueError as e:
-                logger.warning(f"Invalid 'since' timestamp format: {since}, error: {e}")
-                # Fall back to full sync if timestamp is invalid
+        if since_timestamp:
+            # Convert Unix timestamp to ISO format for Supabase
+            since_datetime = datetime.fromtimestamp(since_timestamp).isoformat()
+            # Use OR to catch both new messages and updates (like cancellations)
+            query = query.or_(f"timestamp.gt.{since_datetime},updated_at.gt.{since_datetime}")
+            logger.info(f"Incremental sync: fetching messages created or updated since {since_datetime}")
+        
         
         response = query.execute()
         messages = response.data if response.data else []
         
         # Log raw messages from database
-        logger.info(f"Fetched {len(messages)} messages from database for conversation {actual_conversation_id}")
+        logger.info(f"Fetched {len(messages)} messages from database for conversation {actual_conversation_id} (including cancelled)")
         
         # Update conversation_id in messages to use the actual server-backed ID
         # This ensures clients always receive messages with positive server-backed IDs
         for message in messages:
             message['conversation_id'] = actual_conversation_id
+            # Ensure cancelled field is present (None if not cancelled, timestamp if cancelled)
+            if 'cancelled' not in message:
+                message['cancelled'] = None
             # Debug logging to diagnose message_type issue and timestamp
-            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, request_id={message.get('request_id')}, timestamp={message.get('timestamp')}, content_preview={message.get('content', '')[:50]}")
+            logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, cancelled={message.get('cancelled')}, timestamp={message.get('timestamp')}, content_preview={message.get('content', '')[:50]}")
         
         # Return with server timestamp for next incremental sync
         result = {
             'messages': messages,
             'conversation_id': actual_conversation_id,  # Return the resolved server-backed ID, not the parameter
             'server_timestamp': datetime.utcnow().isoformat() + 'Z',
-            'is_incremental': since is not None,
+            'is_incremental': since_timestamp is not None,
             'count': len(messages),
-            'has_more': len(messages) == limit  # Indicates if there might be more messages
+            'includes_cancelled': True  # Signal to client that cancelled messages are included
         }
         
-        logger.info(f"Returning {len(messages)} messages for conversation {conversation_id} (incremental: {since is not None})")
+        logger.info(f"Returning {len(messages)} messages for conversation {conversation_id} (incremental: {since_timestamp is not None})")
         return result
         
     except HTTPException:
@@ -2714,43 +2855,6 @@ async def get_request_state_endpoint(
     
     return state
 
-@app.post("/conversations/{conversation_id}/sync")
-async def sync_missed_messages(
-    conversation_id: Union[int, str],
-    since_timestamp: Optional[float] = None,
-    current_user: dict = Depends(get_current_user)
-):
-    """Sync any messages that may have been missed during disconnection"""
-    try:
-        user_id = current_user.get("sub")
-        
-        # Resolve conversation ID
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
-        if actual_conversation_id is None:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        
-        # Get messages from database
-        query = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id)
-        
-        if since_timestamp:
-            # Convert timestamp to ISO format for Supabase
-            from datetime import datetime
-            since_datetime = datetime.fromtimestamp(since_timestamp).isoformat()
-            query = query.gt("created_at", since_datetime)
-        
-        result = query.order("created_at", desc=False).execute()
-        
-        return {
-            "conversation_id": actual_conversation_id,
-            "messages": result.data,
-            "count": len(result.data)
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error syncing messages for conversation {conversation_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to sync messages")
-
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
@@ -2783,9 +2887,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        real_conversation_id = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp)
-        logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}")
-        if real_conversation_id is None:
+        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp)
+        if save_result is None:
             logger.error("Failed to save user message to database")
             error_payload = {
                 "type": "error",
@@ -2795,7 +2898,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "client_conversation_id": client_conversation_id
             }
             await safe_websocket_send(error_payload)
-            return real_conversation_id
+            return session_conversation_id
+        
+        real_conversation_id, user_message_id = save_result
+        logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}, message_id: {user_message_id}")
         
         # Update optimistic → real mapping if client provided optimistic ID
         if client_conversation_id and client_conversation_id < 0 and real_conversation_id:
@@ -2833,6 +2939,21 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Use real conversation ID for rest of processing
         session_conversation_id = real_conversation_id
+        
+        # Track which message IDs this request is responding to
+        user_message_ids = get_user_message_ids_since_last_bot(session_conversation_id)
+        if redis_managers and "request_messages" in redis_managers:
+            await redis_managers["request_messages"].set_messages(
+                request_id, user_message_ids, session_conversation_id
+            )
+            logger.info(f"Tracking request {request_id} responding to message IDs: {user_message_ids}")
+        
+        # Detect and cancel subset requests
+        cancelled_requests = await detect_and_cancel_subset_requests(
+            session_conversation_id, user_message_ids, websocket, session_id
+        )
+        if cancelled_requests:
+            logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {session_conversation_id}")
 
         async with chat_sessions_lock:
             await add_chat_message(session_id, {"role": "user", "content": message})
@@ -2867,19 +2988,23 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         })
 
         try:
-            # Use async API call with timeout
-            response = await asyncio.wait_for(
-                current_anthropic_client.beta.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=1000,
-                    messages=await get_chat_messages(session_id),
-                    system=CLAUDE_SYSTEM_PROMPT,
-                    tools=tools,
-                    tool_choice={"type": "auto"},
-                    betas=["token-efficient-tools-2025-02-19"]
-                ),
-                timeout=60.0  # 60 second timeout
+            # Create the stream/response
+            stream = current_anthropic_client.beta.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1000,
+                messages=await get_chat_messages(session_id),
+                system=CLAUDE_SYSTEM_PROMPT,
+                tools=tools,
+                tool_choice={"type": "auto"},
+                betas=["token-efficient-tools-2025-02-19"]
             )
+            
+            # Store stream for potential cancellation
+            if redis_managers and "local_objects" in redis_managers:
+                await redis_managers["local_objects"].add_stream(request_id, stream)
+            
+            # Use async API call with timeout
+            response = await asyncio.wait_for(stream, timeout=60.0)  # 60 second timeout
         except asyncio.TimeoutError:
             logger.error(f"Claude API timeout for request {request_id} after 60 seconds")
             await set_request_state(request_id, "timeout", {
@@ -2917,6 +3042,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # Handle tool calls
         while response.stop_reason == 'tool_use':
+            # Check for cancellation before each tool iteration
+            if asyncio.current_task().cancelled():
+                logger.info(f"Request {request_id} cancelled during tool use")
+                await set_request_state(request_id, "cancelled", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id
+                })
+                return session_conversation_id
+            
             tool_block = next((block for block in response.content if block.type == 'tool_use'), None)
             if not tool_block:
                 logger.error("Stop reason is tool_use but no tool_use block found.")
@@ -2962,18 +3096,21 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Use async API call for tool response
             try:
-                response = await asyncio.wait_for(
-                    current_anthropic_client.beta.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=1000,
-                        messages=await get_chat_messages(session_id),
-                        system=CLAUDE_SYSTEM_PROMPT,
-                        tools=tools,
-                        tool_choice={"type": "auto"},
-                        betas=["token-efficient-tools-2025-02-19"]
-                    ),
-                    timeout=60.0  # 60 second timeout for tool responses too
+                tool_stream = current_anthropic_client.beta.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=1000,
+                    messages=await get_chat_messages(session_id),
+                    system=CLAUDE_SYSTEM_PROMPT,
+                    tools=tools,
+                    tool_choice={"type": "auto"},
+                    betas=["token-efficient-tools-2025-02-19"]
                 )
+                
+                # Update stream reference for cancellation
+                if redis_managers and "local_objects" in redis_managers:
+                    await redis_managers["local_objects"].add_stream(request_id, tool_stream)
+                
+                response = await asyncio.wait_for(tool_stream, timeout=60.0)  # 60 second timeout for tool responses too
             except asyncio.TimeoutError:
                 logger.error(f"Claude API timeout during tool use for request {request_id}")
                 await set_request_state(request_id, "timeout", {
@@ -3004,27 +3141,66 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         if response.content and response.content[0].type == 'text':
             assistant_response_text = response.content[0].text
             
-            # Save assistant message to database
-            logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, content_preview='{assistant_response_text[:50]}...'")
-            saved_conversation_id = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
-            if saved_conversation_id:
-                logger.info(f"ASSISTANT message saved successfully to conversation_id={saved_conversation_id} (original session_conversation_id={session_conversation_id})")
+            # Check if request was cancelled
+            request_cancelled = False
+            if redis_managers and "request_messages" in redis_managers:
+                request_data = await redis_managers["request_messages"].get_messages(request_id)
+                if request_data and request_data.get("status") == "cancelled":
+                    request_cancelled = True
+                    logger.info(f"Request {request_id} was cancelled, will save bot message as cancelled")
+            
+            # Save assistant message to database (always save, but mark as cancelled if needed)
+            logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
+            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
+            if save_result:
+                saved_conversation_id, bot_message_id = save_result
+                logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
+                
+                # If cancelled, update the message to mark it as cancelled
+                if request_cancelled:
+                    try:
+                        supabase.table("messages")\
+                            .update({"cancelled": "now()"})\
+                            .eq("id", bot_message_id)\
+                            .execute()
+                        logger.info(f"Marked bot message {bot_message_id} as cancelled in database")
+                    except Exception as e:
+                        logger.error(f"Failed to mark bot message {bot_message_id} as cancelled: {e}")
             else:
                 logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
+                saved_conversation_id = session_conversation_id
             
-            # Send structured response with request_id and conversation_id
-            response_payload = {
-                "response": assistant_response_text,
-                "request_id": request_id,
-                "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
-                "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
-                "client_message_id": client_message_id,  # Echo back optimistic message ID
-                "type": "response"  # Indicate this is a direct response (vs broadcast)
-            }
-            if await safe_websocket_send(response_payload):
-                logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
-            else:
-                logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
+            if not request_cancelled:
+                # Send structured response with request_id and conversation_id
+                response_payload = {
+                    "response": assistant_response_text,
+                    "request_id": request_id,
+                    "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
+                    "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
+                    "client_message_id": client_message_id,  # Echo back optimistic message ID
+                    "type": "response"  # Indicate this is a direct response (vs broadcast)
+                }
+                if await safe_websocket_send(response_payload):
+                    logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
+                else:
+                    logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
+            
+            # Clean up old request tracking data
+            # Do this after saving the bot response to ensure we have the latest message IDs
+            if save_result and redis_managers and "request_messages" in redis_managers:
+                try:
+                    # Get all non-cancelled bot message IDs
+                    bot_message_ids = get_non_cancelled_bot_message_ids(saved_conversation_id)
+                    
+                    # Clean up requests that have 2+ bot messages after them
+                    cleaned_count = await redis_managers["request_messages"].cleanup_old_requests(
+                        saved_conversation_id, bot_message_ids
+                    )
+                    
+                    if cleaned_count > 0:
+                        logger.info(f"Cleaned up {cleaned_count} old request tracking entries for conversation {saved_conversation_id}")
+                except Exception as e:
+                    logger.warning(f"Error cleaning up old request tracking: {e}")
             
             # Mark request as completed successfully
             await set_request_state(request_id, "completed", {
@@ -3086,6 +3262,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
     finally:
         # Clean up tracking
         if request_id:
+            # Remove Claude stream from tracking
+            if redis_managers and "local_objects" in redis_managers:
+                await redis_managers["local_objects"].remove_stream(request_id)
+            
             # Remove from local task tracking
             if redis_managers and "local_objects" in redis_managers:
                 await redis_managers["local_objects"].remove_task(request_id)

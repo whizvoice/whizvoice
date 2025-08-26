@@ -304,6 +304,111 @@ class RequestStateManager:
         return result
 
 
+class RequestMessageTracker:
+    """Tracks which message IDs each request is responding to"""
+    
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+        self.ttl = 3600  # 1 hour TTL
+    
+    async def set_messages(self, request_id: str, message_ids: List[int], 
+                          conversation_id: int, stream_object: Optional[Any] = None):
+        """Store message IDs for a request"""
+        data = {
+            "message_ids": message_ids,
+            "conversation_id": conversation_id,
+            "timestamp": time.time(),
+            "status": "active"
+        }
+        await self.redis.set(
+            f"request_messages:{request_id}",
+            json.dumps(data),
+            ex=self.ttl
+        )
+        # Stream object is stored locally via LocalObjectManager
+    
+    async def get_messages(self, request_id: str) -> Optional[Dict[str, Any]]:
+        """Get message IDs for a request"""
+        data = await self.redis.get(f"request_messages:{request_id}")
+        return json.loads(data) if data else None
+    
+    async def get_by_conversation(self, conversation_id: int) -> Dict[str, Dict[str, Any]]:
+        """Get all requests for a conversation"""
+        # Use SCAN to find all request keys
+        result = {}
+        cursor = 0
+        while True:
+            cursor, keys = await self.redis.scan(
+                cursor, match="request_messages:*", count=100
+            )
+            for key in keys:
+                data = await self.redis.get(key)
+                if data:
+                    parsed = json.loads(data)
+                    if parsed.get("conversation_id") == conversation_id:
+                        request_id = key.decode().replace("request_messages:", "")
+                        result[request_id] = parsed
+            if cursor == 0:
+                break
+        return result
+    
+    async def mark_cancelled(self, request_id: str):
+        """Mark a request as cancelled"""
+        data = await self.get_messages(request_id)
+        if data:
+            data["status"] = "cancelled"
+            data["cancelled_at"] = time.time()
+            await self.redis.set(
+                f"request_messages:{request_id}",
+                json.dumps(data),
+                ex=self.ttl
+            )
+    
+    async def delete(self, request_id: str):
+        """Delete request tracking data"""
+        await self.redis.delete(f"request_messages:{request_id}")
+    
+    async def cleanup_old_requests(self, conversation_id: int, 
+                                  bot_message_ids: List[int]) -> int:
+        """
+        Clean up old request tracking data.
+        Removes requests that have 2+ non-cancelled bot messages after them.
+        Returns number of cleaned up requests.
+        """
+        # Get all requests for this conversation
+        all_requests = await self.get_by_conversation(conversation_id)
+        if not all_requests:
+            return 0
+        
+        cleaned_count = 0
+        
+        for request_id, request_data in all_requests.items():
+            # Skip if already cancelled or very recent
+            if request_data.get("status") == "cancelled":
+                continue
+                
+            request_message_ids = request_data.get("message_ids", [])
+            if not request_message_ids:
+                continue
+            
+            # Find the latest user message ID from this request
+            latest_user_msg_id = max(request_message_ids)
+            
+            # Count non-cancelled bot messages after this request's messages
+            bot_messages_after = [
+                msg_id for msg_id in bot_message_ids 
+                if msg_id > latest_user_msg_id
+            ]
+            
+            # If there are 2+ bot messages after this request, it's safe to clean up
+            if len(bot_messages_after) >= 2:
+                await self.delete(request_id)
+                cleaned_count += 1
+                logger.debug(f"Cleaned up old request {request_id} (had {len(bot_messages_after)} bot messages after)")
+        
+        return cleaned_count
+
+
 class LocalObjectManager:
     """
     Manages objects that must stay local (can't be serialized to Redis).
@@ -317,6 +422,7 @@ class LocalObjectManager:
         self.redis_listener_tasks: Dict[str, asyncio.Task] = {}  # Redis listener tasks
         self.anthropic_clients: Dict[str, Any] = {}  # Client objects
         self.conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}  # Conversation WebSockets
+        self.claude_streams: Dict[str, Any] = {}  # Claude API stream objects for cancellation
         
         # Locks for local objects
         self.pubsub_lock = asyncio.Lock()
@@ -324,6 +430,7 @@ class LocalObjectManager:
         self.listener_tasks_lock = asyncio.Lock()
         self.clients_lock = asyncio.Lock()
         self.conversation_websockets_lock = asyncio.Lock()
+        self.streams_lock = asyncio.Lock()
     
     # WebSocket PubSub management
     async def add_pubsub(self, session_id: str, pubsub):
@@ -362,6 +469,16 @@ class LocalObjectManager:
     async def remove_task(self, request_id: str):
         async with self.tasks_lock:
             return self.active_tasks.pop(request_id, None)
+    
+    async def cancel_task(self, request_id: str) -> bool:
+        """Cancel a task by request ID"""
+        async with self.tasks_lock:
+            task = self.active_tasks.get(request_id)
+            if task:
+                task.cancel()
+                del self.active_tasks[request_id]
+                return True
+            return False
     
     async def get_and_cancel_task(self, request_id: str):
         """Get and cancel a task"""
@@ -552,6 +669,42 @@ class LocalObjectManager:
                 except ValueError:
                     return False
         return False
+    
+    # Claude stream management
+    async def add_stream(self, request_id: str, stream):
+        """Store a Claude API stream for potential cancellation"""
+        async with self.streams_lock:
+            self.claude_streams[request_id] = stream
+            logger.info(f"Stored Claude stream for request {request_id}")
+    
+    async def get_stream(self, request_id: str):
+        """Get a Claude API stream"""
+        async with self.streams_lock:
+            return self.claude_streams.get(request_id)
+    
+    async def cancel_stream(self, request_id: str) -> bool:
+        """Cancel a Claude API stream"""
+        async with self.streams_lock:
+            stream = self.claude_streams.get(request_id)
+            if stream:
+                try:
+                    # Anthropic streams have a .close() method for cancellation
+                    if hasattr(stream, 'close'):
+                        await stream.close()
+                    del self.claude_streams[request_id]
+                    logger.info(f"Cancelled Claude stream for request {request_id}")
+                    return True
+                except Exception as e:
+                    logger.error(f"Error cancelling stream for request {request_id}: {e}")
+                    return False
+            return False
+    
+    async def remove_stream(self, request_id: str):
+        """Remove a completed stream from tracking"""
+        async with self.streams_lock:
+            if request_id in self.claude_streams:
+                del self.claude_streams[request_id]
+                logger.debug(f"Removed Claude stream for request {request_id}")
 
 
 # Singleton instances (initialize these in your app startup)
@@ -564,5 +717,6 @@ def create_managers(redis_client: redis.Redis) -> Dict[str, Any]:
         "active_requests": ActiveRequestManager(redis_client),
         "session_mappings": SessionMappingManager(redis_client),
         "request_states": RequestStateManager(redis_client),
+        "request_messages": RequestMessageTracker(redis_client),
         "local_objects": LocalObjectManager()
     }
