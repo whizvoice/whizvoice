@@ -23,6 +23,8 @@ from preferences import set_preference, get_preference, ensure_user_and_prefs, g
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 from supabase_client import supabase
 from redis_managers import create_managers
+import stripe
+from constants import STRIPE_SECRET_KEY, STRIPE_PRICE_ID
 from redis_helpers import (
     # Chat session functions
     get_chat_messages, add_chat_message, set_chat_messages, clear_chat_session,
@@ -47,6 +49,9 @@ from redis_helpers import (
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Initialize Stripe
+stripe.api_key = STRIPE_SECRET_KEY
 
 # System prompt for Claude
 CLAUDE_SYSTEM_PROMPT = "You are Whiz Voice, a friendly AI chatbot that can help with anything. If the user mentions Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary. Also, you have a get_app_info tool that can be used to get information about the Whiz Voice app, including its features, functionality, and how to use it. Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."
@@ -871,6 +876,178 @@ async def refresh_access_token(request_data: RefreshTokenRequest):
         logger.error(f"Unexpected error during token refresh: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Could not refresh token due to server error")
+
+# Stripe Subscription Models
+class CreateCheckoutSessionRequest(BaseModel):
+    success_url: str
+    cancel_url: str
+
+class CreateCheckoutSessionResponse(BaseModel):
+    checkout_url: str
+    session_id: str
+
+class CancelSubscriptionResponse(BaseModel):
+    status: str
+    message: str
+    canceled_at: Optional[int] = None
+
+class SubscriptionStatusResponse(BaseModel):
+    has_subscription: bool
+    subscription_id: Optional[str] = None
+    status: Optional[str] = None
+    current_period_end: Optional[int] = None
+    cancel_at_period_end: Optional[bool] = None
+
+# Stripe Subscription Endpoints
+@app.post("/subscription/create-checkout-session", response_model=CreateCheckoutSessionResponse)
+async def create_checkout_session(
+    request_data: CreateCheckoutSessionRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a Stripe checkout session for subscription"""
+    try:
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User ID not found")
+        
+        # Create Stripe customer if doesn't exist
+        customers = stripe.Customer.list(email=current_user.get("email"), limit=1)
+        if customers.data:
+            customer = customers.data[0]
+        else:
+            customer = stripe.Customer.create(
+                email=current_user.get("email"),
+                metadata={"user_id": user_id}
+            )
+        
+        # Create checkout session
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price': STRIPE_PRICE_ID,
+                'quantity': 1,
+            }],
+            mode='subscription',
+            success_url=request_data.success_url,
+            cancel_url=request_data.cancel_url,
+            customer=customer.id,
+            metadata={"user_id": user_id}
+        )
+        
+        return CreateCheckoutSessionResponse(
+            checkout_url=checkout_session.url,
+            session_id=checkout_session.id
+        )
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating checkout session: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating checkout session: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+@app.get("/subscription/status", response_model=SubscriptionStatusResponse)
+async def get_subscription_status(current_user: dict = Depends(get_current_user)):
+    """Get current subscription status for the user"""
+    try:
+        user_id = current_user.get("sub")
+        email = current_user.get("email")
+        
+        if not user_id or not email:
+            raise HTTPException(status_code=401, detail="User information incomplete")
+        
+        # Find customer by email
+        customers = stripe.Customer.list(email=email, limit=1)
+        if not customers.data:
+            return SubscriptionStatusResponse(has_subscription=False)
+        
+        customer = customers.data[0]
+        
+        # Get active subscriptions
+        subscriptions = stripe.Subscription.list(
+            customer=customer.id,
+            status='active',
+            limit=1
+        )
+        
+        if not subscriptions.data:
+            # Check for canceled subscriptions that are still active until period end
+            subscriptions = stripe.Subscription.list(
+                customer=customer.id,
+                status='all',
+                limit=1
+            )
+            if subscriptions.data and subscriptions.data[0].status in ['active', 'trialing']:
+                subscription = subscriptions.data[0]
+                return SubscriptionStatusResponse(
+                    has_subscription=True,
+                    subscription_id=subscription.id,
+                    status=subscription.status,
+                    current_period_end=subscription.current_period_end,
+                    cancel_at_period_end=subscription.cancel_at_period_end
+                )
+            return SubscriptionStatusResponse(has_subscription=False)
+        
+        subscription = subscriptions.data[0]
+        return SubscriptionStatusResponse(
+            has_subscription=True,
+            subscription_id=subscription.id,
+            status=subscription.status,
+            current_period_end=subscription.current_period_end,
+            cancel_at_period_end=subscription.cancel_at_period_end
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting subscription status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get subscription status")
+
+@app.post("/subscription/cancel", response_model=CancelSubscriptionResponse)
+async def cancel_subscription(current_user: dict = Depends(get_current_user)):
+    """Cancel the user's subscription at period end"""
+    try:
+        user_id = current_user.get("sub")
+        email = current_user.get("email")
+        
+        if not user_id or not email:
+            raise HTTPException(status_code=401, detail="User information incomplete")
+        
+        # Find customer by email
+        customers = stripe.Customer.list(email=email, limit=1)
+        if not customers.data:
+            raise HTTPException(status_code=404, detail="No subscription found")
+        
+        customer = customers.data[0]
+        
+        # Get active subscriptions
+        subscriptions = stripe.Subscription.list(
+            customer=customer.id,
+            status='active',
+            limit=1
+        )
+        
+        if not subscriptions.data:
+            raise HTTPException(status_code=404, detail="No active subscription found")
+        
+        # Cancel subscription at period end
+        subscription = stripe.Subscription.modify(
+            subscriptions.data[0].id,
+            cancel_at_period_end=True
+        )
+        
+        return CancelSubscriptionResponse(
+            status="success",
+            message="Subscription will be canceled at the end of the billing period",
+            canceled_at=subscription.current_period_end
+        )
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error canceling subscription: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error canceling subscription: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to cancel subscription")
 
 @app.websocket("/chat")
 async def websocket_endpoint(websocket: WebSocket):
