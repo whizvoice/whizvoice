@@ -767,14 +767,24 @@ async def get_api_token_status(current_user: Dict = Depends(get_current_user)):
         raise HTTPException(status_code=401, detail="User not authenticated")
 
     try:
+        logger.info(f"🔍 [get_api_token_status] Checking tokens for user {user_id}")
+        
         # CLAUDE_API_KEY_PREF_NAME should be imported from preferences or defined globally
         claude_key = get_decrypted_preference_key(user_id, CLAUDE_API_KEY_PREF_NAME)
         asana_key = get_decrypted_preference_key(user_id, ASANA_ACCESS_TOKEN_PREF_NAME)
+        
+        # Log raw values for debugging
+        logger.info(f"  Claude key raw check:")
+        logger.info(f"    Type: {type(claude_key)}, Is None: {claude_key is None}")
+        logger.info(f"    Repr: {repr(claude_key)}")
+        if claude_key is not None:
+            logger.info(f"    Length: {len(claude_key)}, Empty string: {claude_key == ''}")
 
         has_claude = bool(claude_key) 
         has_asana = bool(asana_key)   
         
-        logger.info(f"Checked token status for user {user_id}. Claude: {has_claude}, Asana: {has_asana}")
+        logger.info(f"  Results using bool() check:")
+        logger.info(f"    has_claude_token: {has_claude}, has_asana_token: {has_asana}")
         
         return ApiTokenStatusResponse(
             has_claude_token=has_claude,
@@ -840,8 +850,25 @@ async def set_user_api_key(
     # Allowing request.key_value to be None or an empty string to clear the key.
     # set_encrypted_preference_key should handle this by storing None or empty string,
     # which should then be retrievable as such.
+    
+    # Log what we're about to set
+    logger.info(f"🔑 Setting key '{request.key_name}' for user {user_id}")
+    logger.info(f"  Value type: {type(request.key_value)}")
+    logger.info(f"  Value is None: {request.key_value is None}")
+    logger.info(f"  Value repr: {repr(request.key_value)}")
+    
     if set_encrypted_preference_key(user_id, request.key_name, request.key_value):
-        logger.info(f"Successfully set preference key '{request.key_name}' for user {user_id}.")
+        logger.info(f"✅ Successfully set preference key '{request.key_name}' for user {user_id}.")
+        
+        # Immediately check what was stored
+        retrieved_value = get_decrypted_preference_key(user_id, request.key_name)
+        logger.info(f"🔍 Verification - Retrieved value after setting:")
+        logger.info(f"  Retrieved type: {type(retrieved_value)}")
+        logger.info(f"  Retrieved is None: {retrieved_value is None}")
+        logger.info(f"  Retrieved repr: {repr(retrieved_value)}")
+        logger.info(f"  Retrieved length: {len(retrieved_value) if retrieved_value is not None else 'N/A'}")
+        logger.info(f"  Bool evaluation: {bool(retrieved_value)}")
+        
         return {"message": f"Successfully set API key: '{request.key_name}'"}
     else:
         logger.error(f"Failed to set preference key '{request.key_name}' for user {user_id}.")
@@ -2477,13 +2504,44 @@ async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
     try:
         user_id = current_user["sub"]
         
+        logger.info(f"🔍 Checking token status for user {user_id}")
+        
         # Get both tokens
         claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
         asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
         
+        # Detailed logging for Claude token
+        logger.info(f"  Claude token check:")
+        logger.info(f"    Raw value type: {type(claude_token)}")
+        logger.info(f"    Raw value is None: {claude_token is None}")
+        logger.info(f"    Raw value repr: {repr(claude_token)}")
+        if claude_token is not None:
+            logger.info(f"    Raw value length: {len(claude_token)}")
+            logger.info(f"    Is empty string: {claude_token == ''}")
+            logger.info(f"    Is whitespace only: {claude_token.strip() == '' if isinstance(claude_token, str) else 'N/A'}")
+        
+        # Detailed logging for Asana token
+        logger.info(f"  Asana token check:")
+        logger.info(f"    Raw value type: {type(asana_token)}")
+        logger.info(f"    Raw value is None: {asana_token is None}")
+        logger.info(f"    Raw value repr: {repr(asana_token)[:50] + '...' if asana_token and len(repr(asana_token)) > 50 else repr(asana_token)}")
+        
+        # Current logic
+        has_claude = claude_token is not None
+        has_asana = asana_token is not None
+        
+        logger.info(f"  Current logic results:")
+        logger.info(f"    has_claude_token: {has_claude} (based on: claude_token is not None)")
+        logger.info(f"    has_asana_token: {has_asana} (based on: asana_token is not None)")
+        
+        # Alternative logic for comparison
+        logger.info(f"  Alternative logic would give:")
+        logger.info(f"    has_claude (bool check): {bool(claude_token)}")
+        logger.info(f"    has_claude (non-empty): {bool(claude_token and claude_token.strip())}")
+        
         return {
-            "has_claude_token": claude_token is not None,
-            "has_asana_token": asana_token is not None
+            "has_claude_token": has_claude,
+            "has_asana_token": has_asana
         }
     except Exception as e:
         logger.error(f"Error getting tokens: {str(e)}")
