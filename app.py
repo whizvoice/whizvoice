@@ -780,10 +780,11 @@ async def get_api_token_status(current_user: Dict = Depends(get_current_user)):
         if claude_key is not None:
             logger.info(f"    Length: {len(claude_key)}, Empty string: {claude_key == ''}")
 
-        has_claude = bool(claude_key) 
-        has_asana = bool(asana_key)   
+        # Updated logic to handle both None and string "None"
+        has_claude = bool(claude_key) and claude_key != "None"
+        has_asana = bool(asana_key) and asana_key != "None"
         
-        logger.info(f"  Results using bool() check:")
+        logger.info(f"  Results using updated logic (bool check + not 'None'):")
         logger.info(f"    has_claude_token: {has_claude}, has_asana_token: {has_asana}")
         
         return ApiTokenStatusResponse(
@@ -2526,18 +2527,19 @@ async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
         logger.info(f"    Raw value is None: {asana_token is None}")
         logger.info(f"    Raw value repr: {repr(asana_token)[:50] + '...' if asana_token and len(repr(asana_token)) > 50 else repr(asana_token)}")
         
-        # Current logic
-        has_claude = claude_token is not None
-        has_asana = asana_token is not None
+        # Updated logic to handle both None and string "None"
+        has_claude = claude_token is not None and claude_token != "None" and claude_token != ""
+        has_asana = asana_token is not None and asana_token != "None" and asana_token != ""
         
-        logger.info(f"  Current logic results:")
-        logger.info(f"    has_claude_token: {has_claude} (based on: claude_token is not None)")
-        logger.info(f"    has_asana_token: {has_asana} (based on: asana_token is not None)")
+        logger.info(f"  Updated logic results:")
+        logger.info(f"    has_claude_token: {has_claude} (checks: not None, not 'None', not empty)")
+        logger.info(f"    has_asana_token: {has_asana} (checks: not None, not 'None', not empty)")
         
-        # Alternative logic for comparison
-        logger.info(f"  Alternative logic would give:")
-        logger.info(f"    has_claude (bool check): {bool(claude_token)}")
-        logger.info(f"    has_claude (non-empty): {bool(claude_token and claude_token.strip())}")
+        # Show what old logic would have given for comparison
+        old_has_claude = claude_token is not None
+        old_has_asana = asana_token is not None
+        logger.info(f"  Old logic would have given:")
+        logger.info(f"    has_claude_token: {old_has_claude}, has_asana_token: {old_has_asana}")
         
         return {
             "has_claude_token": has_claude,
