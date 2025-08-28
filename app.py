@@ -1,7 +1,7 @@
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from typing import List, Optional, Dict, Any, Union, Set, Tuple
 import json
 import os
@@ -789,13 +789,48 @@ async def get_api_token_status(current_user: Dict = Depends(get_current_user)):
 
 @app.post("/user/api_key", status_code=200) # Singular, updates one key at a time
 async def set_user_api_key(
-    request: UserApiKeySetRequest,
+    request: Request,
     current_user: Dict = Depends(get_current_user) # Ensures endpoint is protected
 ):
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
-
+    
+    # Log the raw request body to debug 422 errors from Android app
+    try:
+        body = await request.body()
+        logger.info(f"📱 /user/api_key request from user {user_id}")
+        logger.info(f"  Raw body bytes: {body}")
+        logger.info(f"  Body length: {len(body)} bytes")
+        
+        body_str = body.decode('utf-8')
+        logger.info(f"  Decoded body string: '{body_str}'")
+        
+        # Parse the body as JSON
+        body_json = json.loads(body_str)
+        logger.info(f"  Parsed JSON: {body_json}")
+        logger.info(f"  JSON keys: {list(body_json.keys())}")
+        
+        # Validate against our expected model
+        api_request = UserApiKeySetRequest(**body_json)
+        logger.info(f"  ✅ Successfully validated request: key_name='{api_request.key_name}', key_value={'[REDACTED]' if api_request.key_value else 'None/empty'}")
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"  ❌ JSON decode error: {e}")
+        logger.error(f"  Body was: '{body_str}'")
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {str(e)}")
+    except ValidationError as e:
+        logger.error(f"  ❌ Pydantic validation error: {e}")
+        logger.error(f"  Expected fields: key_name (str), key_value (Optional[str])")
+        logger.error(f"  Received: {body_json}")
+        raise HTTPException(status_code=422, detail=f"Validation error: {str(e.errors())}")
+    except Exception as e:
+        logger.error(f"  ❌ Unexpected error parsing request: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=422, detail=f"Error parsing request: {str(e)}")
+    
+    # Use the validated request object from here
+    request = api_request
+    
     if request.key_name not in ALLOWED_API_KEY_NAMES:
         raise HTTPException(
             status_code=400,
