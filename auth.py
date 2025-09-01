@@ -5,7 +5,12 @@ from jwt.exceptions import InvalidTokenError, ExpiredSignatureError
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 import os
-from constants import GOOGLE_WEB_CLIENT_SECRET
+
+try:
+    from constants import GOOGLE_WEB_CLIENT_SECRET
+except ImportError:
+    # For testing environments where constants.py might not exist
+    GOOGLE_WEB_CLIENT_SECRET = os.getenv("GOOGLE_WEB_CLIENT_SECRET", "")
 from google.oauth2 import id_token
 from google.auth.transport import requests
 import logging

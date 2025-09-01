@@ -24,7 +24,13 @@ from auth import verify_google_token, create_access_token, get_current_user, Aut
 from supabase_client import supabase
 from redis_managers import create_managers
 import stripe
-from constants import STRIPE_SECRET_KEY, STRIPE_PRICE_ID
+
+try:
+    from constants import STRIPE_SECRET_KEY, STRIPE_PRICE_ID
+except ImportError:
+    # For testing environments where constants.py might not exist
+    STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+    STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 from redis_helpers import (
     # Chat session functions
     get_chat_messages, add_chat_message, set_chat_messages, clear_chat_session,

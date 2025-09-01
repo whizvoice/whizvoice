@@ -1,6 +1,11 @@
 from supabase_client import supabase
 import os
-from constants import PGCRYPTO_KEY
+
+try:
+    from constants import PGCRYPTO_KEY
+except ImportError:
+    # For testing environments where constants.py might not exist
+    PGCRYPTO_KEY = os.getenv("PGCRYPTO_KEY", "")
 import logging
 import json
 import pytz
