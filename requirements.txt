@@ -18,3 +18,4 @@ supabase==2.15.1
 pytz==2025.2
 redis==5.0.1
 aioredis==2.0.1
+stripe==10.5.0

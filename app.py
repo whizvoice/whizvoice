@@ -1,7 +1,7 @@
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from typing import List, Optional, Dict, Any, Union, Set, Tuple
 import json
 import os
@@ -23,6 +23,14 @@ from preferences import set_preference, get_preference, ensure_user_and_prefs, g
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 from supabase_client import supabase
 from redis_managers import create_managers
+import stripe
+
+try:
+    from constants import STRIPE_SECRET_KEY, STRIPE_PRICE_ID
+except ImportError:
+    # For testing environments where constants.py might not exist
+    STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+    STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 from redis_helpers import (
     # Chat session functions
     get_chat_messages, add_chat_message, set_chat_messages, clear_chat_session,
@@ -47,6 +55,9 @@ from redis_helpers import (
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Initialize Stripe
+stripe.api_key = STRIPE_SECRET_KEY
 
 # System prompt for Claude
 CLAUDE_SYSTEM_PROMPT = "You are Whiz Voice, a friendly AI chatbot that can help with anything. If the user mentions Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary. Also, you have a get_app_info tool that can be used to get information about the Whiz Voice app, including its features, functionality, and how to use it. Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."
@@ -762,14 +773,25 @@ async def get_api_token_status(current_user: Dict = Depends(get_current_user)):
         raise HTTPException(status_code=401, detail="User not authenticated")
 
     try:
+        logger.info(f"🔍 [get_api_token_status] Checking tokens for user {user_id}")
+        
         # CLAUDE_API_KEY_PREF_NAME should be imported from preferences or defined globally
         claude_key = get_decrypted_preference_key(user_id, CLAUDE_API_KEY_PREF_NAME)
         asana_key = get_decrypted_preference_key(user_id, ASANA_ACCESS_TOKEN_PREF_NAME)
-
-        has_claude = bool(claude_key) 
-        has_asana = bool(asana_key)   
         
-        logger.info(f"Checked token status for user {user_id}. Claude: {has_claude}, Asana: {has_asana}")
+        # Log raw values for debugging
+        logger.info(f"  Claude key raw check:")
+        logger.info(f"    Type: {type(claude_key)}, Is None: {claude_key is None}")
+        logger.info(f"    Repr: {repr(claude_key)}")
+        if claude_key is not None:
+            logger.info(f"    Length: {len(claude_key)}, Empty string: {claude_key == ''}")
+
+        # Updated logic to handle both None and string "None"
+        has_claude = bool(claude_key) and claude_key != "None"
+        has_asana = bool(asana_key) and asana_key != "None"
+        
+        logger.info(f"  Results using updated logic (bool check + not 'None'):")
+        logger.info(f"    has_claude_token: {has_claude}, has_asana_token: {has_asana}")
         
         return ApiTokenStatusResponse(
             has_claude_token=has_claude,
@@ -784,31 +806,117 @@ async def get_api_token_status(current_user: Dict = Depends(get_current_user)):
 
 @app.post("/user/api_key", status_code=200) # Singular, updates one key at a time
 async def set_user_api_key(
-    request: UserApiKeySetRequest,
+    request: Request,
     current_user: Dict = Depends(get_current_user) # Ensures endpoint is protected
 ):
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
-
+    
+    # Log the raw request body to debug 422 errors from Android app
+    try:
+        body = await request.body()
+        logger.info(f"📱 /user/api_key request from user {user_id}")
+        logger.info(f"  Raw body bytes: {body}")
+        logger.info(f"  Body length: {len(body)} bytes")
+        
+        body_str = body.decode('utf-8')
+        logger.info(f"  Decoded body string: '{body_str}'")
+        
+        # Parse the body as JSON
+        body_json = json.loads(body_str)
+        logger.info(f"  Parsed JSON: {body_json}")
+        logger.info(f"  JSON keys: {list(body_json.keys())}")
+        
+        # Validate against our expected model
+        api_request = UserApiKeySetRequest(**body_json)
+        logger.info(f"  ✅ Successfully validated request: key_name='{api_request.key_name}', key_value={'[REDACTED]' if api_request.key_value else 'None/empty'}")
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"  ❌ JSON decode error: {e}")
+        logger.error(f"  Body was: '{body_str}'")
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {str(e)}")
+    except ValidationError as e:
+        logger.error(f"  ❌ Pydantic validation error: {e}")
+        logger.error(f"  Expected fields: key_name (str), key_value (Optional[str])")
+        logger.error(f"  Received: {body_json}")
+        raise HTTPException(status_code=422, detail=f"Validation error: {str(e.errors())}")
+    except Exception as e:
+        logger.error(f"  ❌ Unexpected error parsing request: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=422, detail=f"Error parsing request: {str(e)}")
+    
+    # Use the validated request object from here
+    request = api_request
+    
     if request.key_name not in ALLOWED_API_KEY_NAMES:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid key_name: '{request.key_name}'. Allowed keys are: {list(ALLOWED_API_KEY_NAMES)}"
         )
     
-    # Allowing request.key_value to be None or an empty string to clear the key.
-    # set_encrypted_preference_key should handle this by storing None or empty string,
-    # which should then be retrievable as such.
-    if set_encrypted_preference_key(user_id, request.key_name, request.key_value):
-        logger.info(f"Successfully set preference key '{request.key_name}' for user {user_id}.")
-        return {"message": f"Successfully set API key: '{request.key_name}'"}
+    # Check if this is a CLEAR operation (None or empty string)
+    if request.key_value is None or request.key_value == "":
+        # Use the new atomic clear-and-verify RPC function
+        logger.info(f"🗑️ Clearing key '{request.key_name}' using atomic RPC for user {user_id}")
+        
+        from preferences import clear_and_verify_encrypted_token
+        result = clear_and_verify_encrypted_token(user_id, request.key_name)
+        
+        if result and result.get('success') and result.get('token_cleared'):
+            logger.info(f"✅ Successfully cleared '{request.key_name}' for user {user_id}")
+            logger.info(f"  Clear result: {result}")
+            
+            # Return the updated token status immediately
+            from preferences import get_decrypted_preference_key
+            claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
+            asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+            
+            return {
+                "message": f"Successfully cleared API key: '{request.key_name}'",
+                "cleared": True,
+                "has_claude_token": bool(claude_token),
+                "has_asana_token": bool(asana_token)
+            }
+        else:
+            logger.error(f"Failed to clear '{request.key_name}' for user {user_id}. Result: {result}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to clear API key: '{request.key_name}'"
+            )
     else:
-        logger.error(f"Failed to set preference key '{request.key_name}' for user {user_id}.")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to set API key: '{request.key_name}'"
-        )
+        # Normal SET operation for non-null values
+        logger.info(f"🔑 Setting key '{request.key_name}' for user {user_id}")
+        logger.info(f"  Value type: {type(request.key_value)}")
+        logger.info(f"  Value repr: {repr(request.key_value)}")
+        
+        if set_encrypted_preference_key(user_id, request.key_name, request.key_value):
+            logger.info(f"✅ Successfully set preference key '{request.key_name}' for user {user_id}.")
+            
+            # Immediately check what was stored
+            retrieved_value = get_decrypted_preference_key(user_id, request.key_name)
+            logger.info(f"🔍 Verification - Retrieved value after setting:")
+            logger.info(f"  Retrieved type: {type(retrieved_value)}")
+            logger.info(f"  Retrieved is None: {retrieved_value is None}")
+            logger.info(f"  Retrieved repr: {repr(retrieved_value)}")
+            logger.info(f"  Retrieved length: {len(retrieved_value) if retrieved_value is not None else 'N/A'}")
+            logger.info(f"  Bool evaluation: {bool(retrieved_value)}")
+            
+            # Return the updated token status immediately
+            from preferences import get_decrypted_preference_key
+            claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
+            asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+            
+            return {
+                "message": f"Successfully set API key: '{request.key_name}'",
+                "has_claude_token": bool(claude_token),
+                "has_asana_token": bool(asana_token)
+            }
+        else:
+            logger.error(f"Failed to set preference key '{request.key_name}' for user {user_id}.")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to set API key: '{request.key_name}'"
+            )
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
@@ -871,6 +979,178 @@ async def refresh_access_token(request_data: RefreshTokenRequest):
         logger.error(f"Unexpected error during token refresh: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Could not refresh token due to server error")
+
+# Stripe Subscription Models
+class CreateCheckoutSessionRequest(BaseModel):
+    success_url: str
+    cancel_url: str
+
+class CreateCheckoutSessionResponse(BaseModel):
+    checkout_url: str
+    session_id: str
+
+class CancelSubscriptionResponse(BaseModel):
+    status: str
+    message: str
+    canceled_at: Optional[int] = None
+
+class SubscriptionStatusResponse(BaseModel):
+    has_subscription: bool
+    subscription_id: Optional[str] = None
+    status: Optional[str] = None
+    current_period_end: Optional[int] = None
+    cancel_at_period_end: Optional[bool] = None
+
+# Stripe Subscription Endpoints
+@app.post("/subscription/create-checkout-session", response_model=CreateCheckoutSessionResponse)
+async def create_checkout_session(
+    request_data: CreateCheckoutSessionRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a Stripe checkout session for subscription"""
+    try:
+        user_id = current_user.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User ID not found")
+        
+        # Create Stripe customer if doesn't exist
+        customers = stripe.Customer.list(email=current_user.get("email"), limit=1)
+        if customers.data:
+            customer = customers.data[0]
+        else:
+            customer = stripe.Customer.create(
+                email=current_user.get("email"),
+                metadata={"user_id": user_id}
+            )
+        
+        # Create checkout session
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price': STRIPE_PRICE_ID,
+                'quantity': 1,
+            }],
+            mode='subscription',
+            success_url=request_data.success_url,
+            cancel_url=request_data.cancel_url,
+            customer=customer.id,
+            metadata={"user_id": user_id}
+        )
+        
+        return CreateCheckoutSessionResponse(
+            checkout_url=checkout_session.url,
+            session_id=checkout_session.id
+        )
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating checkout session: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating checkout session: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+@app.get("/subscription/status", response_model=SubscriptionStatusResponse)
+async def get_subscription_status(current_user: dict = Depends(get_current_user)):
+    """Get current subscription status for the user"""
+    try:
+        user_id = current_user.get("sub")
+        email = current_user.get("email")
+        
+        if not user_id or not email:
+            raise HTTPException(status_code=401, detail="User information incomplete")
+        
+        # Find customer by email
+        customers = stripe.Customer.list(email=email, limit=1)
+        if not customers.data:
+            return SubscriptionStatusResponse(has_subscription=False)
+        
+        customer = customers.data[0]
+        
+        # Get active subscriptions
+        subscriptions = stripe.Subscription.list(
+            customer=customer.id,
+            status='active',
+            limit=1
+        )
+        
+        if not subscriptions.data:
+            # Check for canceled subscriptions that are still active until period end
+            subscriptions = stripe.Subscription.list(
+                customer=customer.id,
+                status='all',
+                limit=1
+            )
+            if subscriptions.data and subscriptions.data[0].status in ['active', 'trialing']:
+                subscription = subscriptions.data[0]
+                return SubscriptionStatusResponse(
+                    has_subscription=True,
+                    subscription_id=subscription.id,
+                    status=subscription.status,
+                    current_period_end=subscription.current_period_end,
+                    cancel_at_period_end=subscription.cancel_at_period_end
+                )
+            return SubscriptionStatusResponse(has_subscription=False)
+        
+        subscription = subscriptions.data[0]
+        return SubscriptionStatusResponse(
+            has_subscription=True,
+            subscription_id=subscription.id,
+            status=subscription.status,
+            current_period_end=subscription.current_period_end,
+            cancel_at_period_end=subscription.cancel_at_period_end
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting subscription status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get subscription status")
+
+@app.post("/subscription/cancel", response_model=CancelSubscriptionResponse)
+async def cancel_subscription(current_user: dict = Depends(get_current_user)):
+    """Cancel the user's subscription at period end"""
+    try:
+        user_id = current_user.get("sub")
+        email = current_user.get("email")
+        
+        if not user_id or not email:
+            raise HTTPException(status_code=401, detail="User information incomplete")
+        
+        # Find customer by email
+        customers = stripe.Customer.list(email=email, limit=1)
+        if not customers.data:
+            raise HTTPException(status_code=404, detail="No subscription found")
+        
+        customer = customers.data[0]
+        
+        # Get active subscriptions
+        subscriptions = stripe.Subscription.list(
+            customer=customer.id,
+            status='active',
+            limit=1
+        )
+        
+        if not subscriptions.data:
+            raise HTTPException(status_code=404, detail="No active subscription found")
+        
+        # Cancel subscription at period end
+        subscription = stripe.Subscription.modify(
+            subscriptions.data[0].id,
+            cancel_at_period_end=True
+        )
+        
+        return CancelSubscriptionResponse(
+            status="success",
+            message="Subscription will be canceled at the end of the billing period",
+            canceled_at=subscription.current_period_end
+        )
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error canceling subscription: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error canceling subscription: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to cancel subscription")
 
 @app.websocket("/chat")
 async def websocket_endpoint(websocket: WebSocket):
@@ -2265,13 +2545,45 @@ async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
     try:
         user_id = current_user["sub"]
         
+        logger.info(f"🔍 Checking token status for user {user_id}")
+        
         # Get both tokens
         claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
         asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
         
+        # Detailed logging for Claude token
+        logger.info(f"  Claude token check:")
+        logger.info(f"    Raw value type: {type(claude_token)}")
+        logger.info(f"    Raw value is None: {claude_token is None}")
+        logger.info(f"    Raw value repr: {repr(claude_token)}")
+        if claude_token is not None:
+            logger.info(f"    Raw value length: {len(claude_token)}")
+            logger.info(f"    Is empty string: {claude_token == ''}")
+            logger.info(f"    Is whitespace only: {claude_token.strip() == '' if isinstance(claude_token, str) else 'N/A'}")
+        
+        # Detailed logging for Asana token
+        logger.info(f"  Asana token check:")
+        logger.info(f"    Raw value type: {type(asana_token)}")
+        logger.info(f"    Raw value is None: {asana_token is None}")
+        logger.info(f"    Raw value repr: {repr(asana_token)[:50] + '...' if asana_token and len(repr(asana_token)) > 50 else repr(asana_token)}")
+        
+        # Updated logic to handle both None and string "None"
+        has_claude = claude_token is not None and claude_token != "None" and claude_token != ""
+        has_asana = asana_token is not None and asana_token != "None" and asana_token != ""
+        
+        logger.info(f"  Updated logic results:")
+        logger.info(f"    has_claude_token: {has_claude} (checks: not None, not 'None', not empty)")
+        logger.info(f"    has_asana_token: {has_asana} (checks: not None, not 'None', not empty)")
+        
+        # Show what old logic would have given for comparison
+        old_has_claude = claude_token is not None
+        old_has_asana = asana_token is not None
+        logger.info(f"  Old logic would have given:")
+        logger.info(f"    has_claude_token: {old_has_claude}, has_asana_token: {old_has_asana}")
+        
         return {
-            "has_claude_token": claude_token is not None,
-            "has_asana_token": asana_token is not None
+            "has_claude_token": has_claude,
+            "has_asana_token": has_asana
         }
     except Exception as e:
         logger.error(f"Error getting tokens: {str(e)}")
