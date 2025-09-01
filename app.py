@@ -848,35 +848,49 @@ async def set_user_api_key(
             detail=f"Invalid key_name: '{request.key_name}'. Allowed keys are: {list(ALLOWED_API_KEY_NAMES)}"
         )
     
-    # Allowing request.key_value to be None or an empty string to clear the key.
-    # set_encrypted_preference_key should handle this by storing None or empty string,
-    # which should then be retrievable as such.
-    
-    # Log what we're about to set
-    logger.info(f"🔑 Setting key '{request.key_name}' for user {user_id}")
-    logger.info(f"  Value type: {type(request.key_value)}")
-    logger.info(f"  Value is None: {request.key_value is None}")
-    logger.info(f"  Value repr: {repr(request.key_value)}")
-    
-    if set_encrypted_preference_key(user_id, request.key_name, request.key_value):
-        logger.info(f"✅ Successfully set preference key '{request.key_name}' for user {user_id}.")
+    # Check if this is a CLEAR operation (None or empty string)
+    if request.key_value is None or request.key_value == "":
+        # Use the new atomic clear-and-verify RPC function
+        logger.info(f"🗑️ Clearing key '{request.key_name}' using atomic RPC for user {user_id}")
         
-        # Immediately check what was stored
-        retrieved_value = get_decrypted_preference_key(user_id, request.key_name)
-        logger.info(f"🔍 Verification - Retrieved value after setting:")
-        logger.info(f"  Retrieved type: {type(retrieved_value)}")
-        logger.info(f"  Retrieved is None: {retrieved_value is None}")
-        logger.info(f"  Retrieved repr: {repr(retrieved_value)}")
-        logger.info(f"  Retrieved length: {len(retrieved_value) if retrieved_value is not None else 'N/A'}")
-        logger.info(f"  Bool evaluation: {bool(retrieved_value)}")
+        from preferences import clear_and_verify_encrypted_token
+        result = clear_and_verify_encrypted_token(user_id, request.key_name)
         
-        return {"message": f"Successfully set API key: '{request.key_name}'"}
+        if result and result.get('success') and result.get('token_cleared'):
+            logger.info(f"✅ Successfully cleared '{request.key_name}' for user {user_id}")
+            logger.info(f"  Clear result: {result}")
+            return {"message": f"Successfully cleared API key: '{request.key_name}'", "cleared": True}
+        else:
+            logger.error(f"Failed to clear '{request.key_name}' for user {user_id}. Result: {result}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to clear API key: '{request.key_name}'"
+            )
     else:
-        logger.error(f"Failed to set preference key '{request.key_name}' for user {user_id}.")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to set API key: '{request.key_name}'"
-        )
+        # Normal SET operation for non-null values
+        logger.info(f"🔑 Setting key '{request.key_name}' for user {user_id}")
+        logger.info(f"  Value type: {type(request.key_value)}")
+        logger.info(f"  Value repr: {repr(request.key_value)}")
+        
+        if set_encrypted_preference_key(user_id, request.key_name, request.key_value):
+            logger.info(f"✅ Successfully set preference key '{request.key_name}' for user {user_id}.")
+            
+            # Immediately check what was stored
+            retrieved_value = get_decrypted_preference_key(user_id, request.key_name)
+            logger.info(f"🔍 Verification - Retrieved value after setting:")
+            logger.info(f"  Retrieved type: {type(retrieved_value)}")
+            logger.info(f"  Retrieved is None: {retrieved_value is None}")
+            logger.info(f"  Retrieved repr: {repr(retrieved_value)}")
+            logger.info(f"  Retrieved length: {len(retrieved_value) if retrieved_value is not None else 'N/A'}")
+            logger.info(f"  Bool evaluation: {bool(retrieved_value)}")
+            
+            return {"message": f"Successfully set API key: '{request.key_name}'"}
+        else:
+            logger.error(f"Failed to set preference key '{request.key_name}' for user {user_id}.")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to set API key: '{request.key_name}'"
+            )
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str

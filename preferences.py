@@ -147,6 +147,37 @@ def set_encrypted_preference_key(user_id, key, value):
         logger.error(f"Exception in set_encrypted_preference_key for user {user_id}, key '{key}': {str(e)}", exc_info=True)
         return False
 
+def clear_and_verify_encrypted_token(user_id, key_name):
+    """Atomically clears an encrypted preference token and verifies it was cleared.
+       Uses the new RPC function to ensure read-after-write consistency.
+       Returns a dict with success status and verification results.
+    """
+    try:
+        logger.debug(f"Calling RPC clear_and_verify_encrypted_token for user {user_id}, key '{key_name}'")
+        result = supabase.rpc('clear_and_verify_encrypted_token', {
+            'p_user_id': user_id,
+            'p_key_name': key_name,
+            'p_encryption_key': PGCRYPTO_KEY
+        }).execute()
+        
+        if result.data:
+            logger.info(f"RPC clear_and_verify_encrypted_token result: {result.data}")
+            return result.data
+        else:
+            logger.warning(f"RPC clear_and_verify_encrypted_token returned no data for user {user_id}, key '{key_name}'")
+            return {
+                'success': False,
+                'token_cleared': False,
+                'message': 'No data returned from RPC'
+            }
+    except Exception as e:
+        logger.error(f"Exception in clear_and_verify_encrypted_token for user {user_id}, key '{key_name}': {str(e)}", exc_info=True)
+        return {
+            'success': False,
+            'token_cleared': False,
+            'message': f'Error: {str(e)}'
+        }
+
 def get_user_timezone(user_id: str) -> tuple[bool, pytz.timezone]:
     """Get the user's timezone from preferences. Returns a tuple of (success, timezone).
     If no timezone is set or invalid, returns (False, Pacific Time)."""
