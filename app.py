@@ -859,7 +859,18 @@ async def set_user_api_key(
         if result and result.get('success') and result.get('token_cleared'):
             logger.info(f"✅ Successfully cleared '{request.key_name}' for user {user_id}")
             logger.info(f"  Clear result: {result}")
-            return {"message": f"Successfully cleared API key: '{request.key_name}'", "cleared": True}
+            
+            # Return the updated token status immediately
+            from preferences import get_decrypted_preference_key
+            claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
+            asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+            
+            return {
+                "message": f"Successfully cleared API key: '{request.key_name}'",
+                "cleared": True,
+                "has_claude_token": bool(claude_token),
+                "has_asana_token": bool(asana_token)
+            }
         else:
             logger.error(f"Failed to clear '{request.key_name}' for user {user_id}. Result: {result}")
             raise HTTPException(
@@ -884,7 +895,16 @@ async def set_user_api_key(
             logger.info(f"  Retrieved length: {len(retrieved_value) if retrieved_value is not None else 'N/A'}")
             logger.info(f"  Bool evaluation: {bool(retrieved_value)}")
             
-            return {"message": f"Successfully set API key: '{request.key_name}'"}
+            # Return the updated token status immediately
+            from preferences import get_decrypted_preference_key
+            claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
+            asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+            
+            return {
+                "message": f"Successfully set API key: '{request.key_name}'",
+                "has_claude_token": bool(claude_token),
+                "has_asana_token": bool(asana_token)
+            }
         else:
             logger.error(f"Failed to set preference key '{request.key_name}' for user {user_id}.")
             raise HTTPException(
