@@ -19,6 +19,8 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
 from about_me_tool import about_me_tools, get_app_info
+from launch_app_tool import launch_app_tools, launch_app
+from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 from supabase_client import supabase
@@ -63,7 +65,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 CLAUDE_SYSTEM_PROMPT = "You are Whiz Voice, a friendly AI chatbot that can help with anything. If the user mentions Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary. Also, you have a get_app_info tool that can be used to get information about the Whiz Voice app, including its features, functionality, and how to use it. Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools
+tools = asana_tools + about_me_tools + launch_app_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -78,6 +80,9 @@ async def startup_event():
     # Start the background task for cleaning up stale sessions
     asyncio.create_task(cleanup_stale_sessions())
     logger.info(f"Started stale session cleanup task (checking every {CLEANUP_INTERVAL_SECONDS} seconds for sessions older than {SESSION_TIMEOUT_SECONDS} seconds)")
+    # Start the background task for cleaning up abandoned tool executions
+    asyncio.create_task(cleanup_abandoned_tool_executions())
+    logger.info("Started abandoned tool execution cleanup task")
 
 # Clean up on app shutdown
 @app.on_event("shutdown")
@@ -542,6 +547,12 @@ TOOL_REGISTRY = {
         "requires_auth": False,
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
+    },
+    "launch_app": {
+        "function_name": "launch_app",
+        "requires_auth": False,
+        "args_mapping": lambda args, user_id: (args.get('app_name'), user_id),
+        "validation": lambda args: {"error": "App name is required."} if not args.get('app_name') else None
     }
 }
 
@@ -1450,6 +1461,25 @@ async def websocket_endpoint(websocket: WebSocket):
                         message = message_text
                         logger.info("Received legacy plain text message")
                     
+                    # Handle tool result messages from Android
+                    if message_type == "tool_result":
+                        tool_request_id = message_data.get("request_id")
+                        tool_result = message_data.get("result", {})
+                        
+                        logger.info(f"Received tool_result for request_id: {tool_request_id}")
+                        
+                        # Pass the result to the handler which will complete the waiting Future
+                        if tool_request_id:
+                            success = tool_result_handler.handle_tool_result(tool_request_id, tool_result)
+                            if success:
+                                logger.info(f"Successfully delivered tool result for request {tool_request_id}")
+                            else:
+                                logger.warning(f"No pending execution found for tool result {tool_request_id}")
+                        else:
+                            logger.warning("Received tool_result without request_id")
+                        
+                        continue  # Don't process as a regular message
+                    
                     # Handle cancellation requests
                     if message_type == "cancel":
                         cancel_request_id = message_data.get("cancel_request_id")
@@ -2082,6 +2112,20 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
         
         # Clean up the evicted session
         await cleanup_session(eviction_candidate, user_id, evicted_conversation_id)
+
+async def cleanup_abandoned_tool_executions():
+    """Periodically clean up abandoned tool executions that were never completed"""
+    while True:
+        try:
+            await asyncio.sleep(60)  # Run every minute
+            tool_result_handler.cleanup_old_executions(max_age_seconds=60)
+            
+            pending_count = tool_result_handler.get_pending_count()
+            if pending_count > 0:
+                logger.debug(f"Currently {pending_count} tool executions pending")
+                
+        except Exception as e:
+            logger.error(f"Error in tool execution cleanup task: {str(e)}")
 
 async def cleanup_stale_sessions():
     """Periodically clean up stale sessions that haven't been active"""
@@ -3508,8 +3552,39 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 tool_execution_result["client_conversation_id"] = client_conversation_id
                 await safe_websocket_send(tool_execution_result)
                 raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
+            
+            # Check if this is a WebSocket action (tool execution on Android device)
+            if isinstance(tool_execution_result, dict) and \
+               tool_execution_result.get("_websocket_action") == "tool_execution":
+                logger.info(f"Tool {tool_block.name} requires Android device execution. Sending tool_execution message to client.")
+                
+                tool_request_id = tool_execution_result.get("_request_id")
+                
+                # Create the WebSocket message for the Android app
+                tool_execution_message = {
+                    "type": "tool_execution",
+                    "tool": tool_execution_result.get("tool"),
+                    "request_id": tool_request_id,
+                    "params": tool_execution_result.get("params", {}),
+                    "conversation_id": session_conversation_id
+                }
+                
+                # Send to Android app via WebSocket
+                await safe_websocket_send(tool_execution_message)
+                
+                # Wait for tool result with timeout (10 seconds)
+                logger.info(f"Waiting for tool result from Android device (request_id: {tool_request_id})")
+                
+                # Use the ToolResultHandler to wait for the result
+                tool_execution_result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=10.0
+                )
+                
+                # Log the result we received
+                logger.info(f"Tool execution result for {tool_request_id}: {tool_execution_result}")
 
-            # If not the specific Asana auth error, proceed as before with Claude:
+            # If not the specific Asana auth error or WebSocket action, proceed as before with Claude:
             async with chat_sessions_lock:
                 # Convert tool_block to a serializable dict
                 tool_block_dict = {
