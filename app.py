@@ -551,13 +551,28 @@ TOOL_REGISTRY = {
     "launch_app": {
         "function_name": "launch_app",
         "requires_auth": False,
-        "args_mapping": lambda args, user_id: (args.get('app_name'), user_id),
+        "is_async": True,  # Mark this as an async tool
+        "needs_websocket": True,  # This tool needs WebSocket context
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('app_name'), 
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
         "validation": lambda args: {"error": "App name is required."} if not args.get('app_name') else None
     }
 }
 
-def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
-    """Execute a tool using the tool registry"""
+async def execute_tool(tool_name, tool_args, user_id: Optional[str] = None, **context):
+    """Execute a tool using the tool registry
+    
+    Args:
+        tool_name: Name of the tool to execute
+        tool_args: Arguments for the tool
+        user_id: User ID if authenticated
+        **context: Additional context (websocket, tool_result_handler, conversation_id, etc.)
+    """
     logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
     
     # Check if tool exists
@@ -588,7 +603,13 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     
     # Get function arguments using the mapping
     try:
-        func_args = tool_config["args_mapping"](tool_args, user_id)
+        # Check if this tool needs WebSocket context
+        if tool_config.get("needs_websocket", False):
+            # Pass additional context to the args mapping
+            func_args = tool_config["args_mapping"](tool_args, user_id, **context)
+        else:
+            # Legacy tools don't need extra context
+            func_args = tool_config["args_mapping"](tool_args, user_id)
         
         # Get the actual function using globals() for easy mocking
         function_name = tool_config["function_name"]
@@ -596,9 +617,19 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
             func = globals()[function_name]
         else:
             raise ValueError(f"Function {function_name} not found")
-            
-        # Call the function with the mapped arguments
-        return func(*func_args)
+        
+        # Check if this is an async tool
+        if tool_config.get("is_async", False):
+            # For async tools, await the result
+            import asyncio
+            if asyncio.iscoroutinefunction(func):
+                return await func(*func_args)
+            else:
+                logger.error(f"Tool {tool_name} marked as async but function is not async")
+                raise ValueError(f"Tool {tool_name} misconfigured: marked as async but function is not async")
+        else:
+            # For sync tools, call normally
+            return func(*func_args)
         
     except Exception as e:
         logger.error(f"Error executing tool {tool_name}: {str(e)}")
@@ -3341,10 +3372,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
     async def safe_websocket_send(payload):
         """Send payload to WebSocket, handling disconnection gracefully"""
         try:
-            await websocket.send_text(json.dumps(payload))
+            message_json = json.dumps(payload)
+            logger.debug(f"Attempting to send WebSocket message (type: {payload.get('type', 'unknown')}, size: {len(message_json)} bytes)")
+            await websocket.send_text(message_json)
+            logger.debug(f"Successfully sent WebSocket message of type: {payload.get('type', 'unknown')}")
             return True
         except Exception as e:
-            logger.warning(f"WebSocket send failed for session {session_id}: {str(e)} - Response will be available on reconnect")
+            logger.warning(f"WebSocket send failed for session {session_id}: {str(e)} - Message type: {payload.get('type', 'unknown')}")
             return False
     
     try:
@@ -3540,7 +3574,16 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 raise StopIteration("ToolBlockMissingError")
 
             logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
-            tool_execution_result = execute_tool(tool_block.name, tool_block.input, user_id)
+            
+            # Pass WebSocket context for tools that need it (like launch_app)
+            tool_execution_result = await execute_tool(
+                tool_block.name, 
+                tool_block.input, 
+                user_id,
+                websocket=websocket,
+                tool_result_handler=tool_result_handler,
+                conversation_id=session_conversation_id
+            )
             
             # Check if the tool_execution_result is our specific Asana auth error
             if isinstance(tool_execution_result, dict) and \
@@ -3553,36 +3596,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 await safe_websocket_send(tool_execution_result)
                 raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
             
-            # Check if this is a WebSocket action (tool execution on Android device)
-            if isinstance(tool_execution_result, dict) and \
-               tool_execution_result.get("_websocket_action") == "tool_execution":
-                logger.info(f"Tool {tool_block.name} requires Android device execution. Sending tool_execution message to client.")
-                
-                tool_request_id = tool_execution_result.get("_request_id")
-                
-                # Create the WebSocket message for the Android app
-                tool_execution_message = {
-                    "type": "tool_execution",
-                    "tool": tool_execution_result.get("tool"),
-                    "request_id": tool_request_id,
-                    "params": tool_execution_result.get("params", {}),
-                    "conversation_id": session_conversation_id
-                }
-                
-                # Send to Android app via WebSocket
-                await safe_websocket_send(tool_execution_message)
-                
-                # Wait for tool result with timeout (10 seconds)
-                logger.info(f"Waiting for tool result from Android device (request_id: {tool_request_id})")
-                
-                # Use the ToolResultHandler to wait for the result
-                tool_execution_result = await tool_result_handler.wait_for_tool_result(
-                    request_id=tool_request_id,
-                    timeout=10.0
-                )
-                
-                # Log the result we received
-                logger.info(f"Tool execution result for {tool_request_id}: {tool_execution_result}")
+            # The launch_app tool now handles WebSocket communication directly,
+            # so we don't need special handling here anymore
 
             # If not the specific Asana auth error or WebSocket action, proceed as before with Claude:
             async with chat_sessions_lock:

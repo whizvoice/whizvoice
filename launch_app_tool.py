@@ -1,48 +1,102 @@
 import logging
 import json
 import uuid
+import asyncio
+from typing import Optional, Dict, Any
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-def launch_app(app_name: str, user_id: str = None) -> dict:
+async def launch_app(app_name: str, user_id: str = None, websocket = None, 
+                     tool_result_handler = None, conversation_id: str = None) -> dict:
     """
-    Create a WebSocket message to trigger app launch on the Android device.
+    Launch an application on the user's Android device via WebSocket.
     
-    This tool doesn't directly launch the app - instead, it returns a special
-    response that signals the server should send a tool_execution message to 
-    the Android app via WebSocket.
+    This tool sends a tool_execution message directly to the Android app via WebSocket
+    and waits for the result.
     
     Args:
         app_name: The name of the app to launch (e.g., "YouTube", "Chrome", "Maps")
         user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
     
     Returns:
-        A dictionary containing the WebSocket message to send to the Android app
+        A dictionary containing the result of the app launch operation
     """
     try:
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
         
-        logger.info(f"Creating app launch request for '{app_name}' (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Launching app '{app_name}' (user: {user_id}, request: {tool_request_id})")
         
-        # Return a special response that indicates a WebSocket message should be sent
-        # The server will recognize this format and send it via WebSocket instead of 
-        # returning it to Claude
-        return {
-            "_websocket_action": "tool_execution",  # Special marker for WebSocket routing
-            "_request_id": tool_request_id,
+        # If no WebSocket provided, return error
+        if not websocket:
+            logger.error("No WebSocket connection available for app launch")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+        
+        # Create the WebSocket message for the Android app
+        tool_execution_message = {
+            "type": "tool_execution",
             "tool": "launch_app",
+            "request_id": tool_request_id,
             "params": {
                 "app_name": app_name
             },
-            "_user_message": f"Launching {app_name} on your device..."  # Message to show user
+            "conversation_id": conversation_id
         }
         
+        # Send to Android app via WebSocket
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending tool_execution message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent launch_app command for '{app_name}'")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+        
+        # If we have a tool_result_handler, wait for the result
+        if tool_result_handler:
+            logger.info(f"Waiting for tool result from Android device (request_id: {tool_request_id})")
+            
+            try:
+                # Wait for tool result with timeout (10 seconds)
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=10.0
+                )
+                
+                logger.info(f"Tool execution result for {tool_request_id}: {result}")
+                return result
+                
+            except Exception as e:
+                logger.error(f"Error waiting for tool result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            # If no handler, just return success after sending
+            return {
+                "status": "sent",
+                "message": f"Command to launch {app_name} sent to device",
+                "request_id": tool_request_id
+            }
+        
     except Exception as e:
-        logger.error(f"Error creating app launch request for user {user_id}: {str(e)}")
+        logger.error(f"Error in launch_app for user {user_id}: {str(e)}")
         return {
-            "error": f"Failed to create app launch request: {str(e)}",
+            "error": f"Failed to launch app: {str(e)}",
             "success": False
         }
 
