@@ -1498,6 +1498,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         tool_result = message_data.get("result", {})
                         
                         logger.info(f"Received tool_result for request_id: {tool_request_id}")
+                        logger.info(f"Tool result content: {json.dumps(tool_result)}")
                         
                         # Pass the result to the handler which will complete the waiting Future
                         if tool_request_id:

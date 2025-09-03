@@ -69,10 +69,10 @@ async def launch_app(app_name: str, user_id: str = None, websocket = None,
             logger.info(f"Waiting for tool result from Android device (request_id: {tool_request_id})")
             
             try:
-                # Wait for tool result with timeout (10 seconds)
+                # Wait for tool result with timeout (30 seconds to give Android more time)
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=10.0
+                    timeout=30.0
                 )
                 
                 logger.info(f"Tool execution result for {tool_request_id}: {result}")
