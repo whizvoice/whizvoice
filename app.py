@@ -19,7 +19,7 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
 from about_me_tool import about_me_tools, get_app_info
-from launch_app_tool import launch_app_tools, launch_app
+from screen_agent_tools import screen_agent_tools, launch_app, whatsapp_select_chat, whatsapp_send_message
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -65,7 +65,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 CLAUDE_SYSTEM_PROMPT = "You are Whiz Voice, a friendly AI chatbot that can help with anything. If the user mentions Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary. Also, you have a get_app_info tool that can be used to get information about the Whiz Voice app, including its features, functionality, and how to use it. Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + launch_app_tools
+tools = asana_tools + about_me_tools + screen_agent_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -561,6 +561,34 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": lambda args: {"error": "App name is required."} if not args.get('app_name') else None
+    },
+    "whatsapp_select_chat": {
+        "function_name": "whatsapp_select_chat",
+        "requires_auth": False,
+        "is_async": True,  # Mark this as an async tool
+        "needs_websocket": True,  # This tool needs WebSocket context
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('chat_name'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Chat name is required."} if not args.get('chat_name') else None
+    },
+    "whatsapp_send_message": {
+        "function_name": "whatsapp_send_message",
+        "requires_auth": False,
+        "is_async": True,  # Mark this as an async tool
+        "needs_websocket": True,  # This tool needs WebSocket context
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('message'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     }
 }
 
