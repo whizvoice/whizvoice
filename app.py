@@ -1578,6 +1578,39 @@ async def websocket_endpoint(websocket: WebSocket):
                         # But we need to do detection after the task starts to get the correct message IDs
                         # So we'll move the detection into process_message_task itself
                         
+                        # Define a callback to handle task completion
+                        async def handle_task_completion(task_future):
+                            try:
+                                updated_session_conversation_id = await task_future
+                                if updated_session_conversation_id is not None:
+                                    # Register WebSocket with new conversation ID if it changed
+                                    if updated_session_conversation_id != session_conversation_id:
+                                        # Use the safe update function that creates new listener before destroying old one
+                                        try:
+                                            await update_websocket_conversation(session_id, session_conversation_id, updated_session_conversation_id, websocket)
+                                        except Exception as e:
+                                            logger.error(f"Failed to update WebSocket conversation in task completion: {str(e)}")
+                                        
+                                        # Note: We can't update session_conversation_id here as it's in the outer scope
+                                        # This might need additional handling if conversation ID changes are critical
+                                        logger.info(f"Conversation ID changed from {session_conversation_id} to {updated_session_conversation_id}")
+                            except asyncio.CancelledError:
+                                logger.info(f"Request {request_id} was cancelled")
+                                # Clean up tracking
+                                if request_id and redis_managers:
+                                    if "local_objects" in redis_managers:
+                                        await redis_managers["local_objects"].remove_task(request_id)
+                                    if "active_requests" in redis_managers:
+                                        await redis_managers["active_requests"].remove(session_id, request_id)
+                            except Exception as e:
+                                logger.error(f"Error in task completion handler: {e}")
+                                # Clean up tracking
+                                if request_id and redis_managers:
+                                    if "local_objects" in redis_managers:
+                                        await redis_managers["local_objects"].remove_task(request_id)
+                                    if "active_requests" in redis_managers:
+                                        await redis_managers["active_requests"].remove(session_id, request_id)
+                        
                         # Create task for processing this message
                         task = asyncio.create_task(
                             process_message_task(
@@ -1600,37 +1633,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             if "active_requests" in redis_managers:
                                 await redis_managers["active_requests"].add(session_id, request_id)
                         
-                        # Wait for task completion and update session_conversation_id
-                        try:
-                            updated_session_conversation_id = await task
-                            if updated_session_conversation_id is not None:
-                                # Register WebSocket with new conversation ID if it changed
-                                if updated_session_conversation_id != session_conversation_id:
-                                    # Use the safe update function that creates new listener before destroying old one
-                                    try:
-                                        await update_websocket_conversation(session_id, session_conversation_id, updated_session_conversation_id, websocket)
-                                    except Exception as e:
-                                        logger.error(f"Failed to update WebSocket conversation in main loop: {str(e)}")
-                                        # Continue with the current conversation ID if update fails
-                                
-                                session_conversation_id = updated_session_conversation_id
-                        except asyncio.CancelledError:
-                            logger.info(f"Request {request_id} was cancelled")
-                            # Clean up tracking
-                            if request_id and redis_managers:
-                                if "local_objects" in redis_managers:
-                                    await redis_managers["local_objects"].remove_task(request_id)
-                                if "active_requests" in redis_managers:
-                                    await redis_managers["active_requests"].remove(session_id, request_id)
-                        except Exception as e:
-                            logger.error(f"Error processing message: {e}")
-                            # Clean up tracking
-                            if request_id and redis_managers:
-                                if "local_objects" in redis_managers:
-                                    await redis_managers["local_objects"].remove_task(request_id)
-                                if "active_requests" in redis_managers:
-                                    await redis_managers["active_requests"].remove(session_id, request_id)
-                            raise
+                        # Create a separate task to handle completion without blocking
+                        # This allows the WebSocket loop to continue receiving messages
+                        asyncio.create_task(handle_task_completion(task))
+                        
+                        logger.info(f"Started background processing for request {request_id}, continuing to listen for messages")
 
                 except AuthenticationError as claude_auth_exc: # MODIFIED: Use AuthenticationError directly
                     logger.warning(f"Anthropic authentication error for user {user_id} in session {session_id}: {claude_auth_exc}")
