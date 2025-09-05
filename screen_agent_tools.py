@@ -477,7 +477,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "launch_app",
-        "description": "Launch an application on the user's Android device. Use this when the user asks to open or launch an app like YouTube, Chrome, Maps, Gmail, Camera, Settings, etc.",
+        "description": "Launch an application on the user's Android device. This will also show a bubble overlay for easy return to WhizVoice. Use this when the user asks to open or launch an app like YouTube, Chrome, Maps, Gmail, Camera, Settings, WhatsApp, etc. For WhatsApp messaging, always launch WhatsApp first before using WhatsApp-specific tools.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -492,7 +492,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "whatsapp_select_chat",
-        "description": "Select a specific chat in WhatsApp by contact or group name. Use this when the user wants to open a conversation with a specific person or group in WhatsApp.",
+        "description": "Select a specific chat in WhatsApp by contact or group name. IMPORTANT: WhatsApp must already be open - use launch_app tool first to open WhatsApp if needed. Use this when the user wants to open a conversation with a specific person or group in WhatsApp.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -507,7 +507,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "whatsapp_draft_message",
-        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay showing what will be sent.",
+        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: WhatsApp chat must be open first (use launch_app to open WhatsApp, then whatsapp_select_chat to open the chat). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay showing what will be sent.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -522,7 +522,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "whatsapp_confirm_send",
-        "description": "Confirm and send the previously drafted WhatsApp message. IMPORTANT: Only use this AFTER using whatsapp_draft_message and getting user confirmation. This will take the drafted message and actually send it in WhatsApp. Always ask the user 'Should I send this message?' or similar confirmation before using this tool.",
+        "description": "Confirm and send the previously drafted WhatsApp message. IMPORTANT: Only use this AFTER: 1) WhatsApp is open (launch_app), 2) Chat is selected (whatsapp_select_chat), 3) Message is drafted (whatsapp_draft_message), 4) User has confirmed. This will take the drafted message and actually send it in WhatsApp. Always ask the user 'Should I send this message?' or similar confirmation before using this tool.",
         "input_schema": {
             "type": "object",
             "properties": {},
