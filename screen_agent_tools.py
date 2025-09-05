@@ -109,9 +109,7 @@ async def whatsapp_select_chat(chat_name: str, user_id: str = None, websocket = 
                                tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Select a specific chat in WhatsApp on the user's Android device.
-    
-    This tool first opens WhatsApp and then navigates to the specified chat.
-    
+        
     Args:
         chat_name: The name of the chat/contact to select
         user_id: The user ID (for logging purposes)
@@ -290,96 +288,6 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
             "success": False
         }
 
-async def whatsapp_confirm_send(user_id: str = None, websocket = None,
-                               tool_result_handler = None, conversation_id: str = None) -> dict:
-    """
-    Confirm and send the previously drafted WhatsApp message.
-    
-    This tool takes the message that was previously drafted and actually sends it.
-    Only use this after whatsapp_draft_message and user confirmation.
-    
-    Args:
-        user_id: The user ID (for logging purposes)
-        websocket: The WebSocket connection to send messages through
-        tool_result_handler: Handler for tracking pending tool executions
-        conversation_id: The conversation ID for context
-    
-    Returns:
-        A dictionary containing the result of the send operation
-    """
-    try:
-        # Generate a unique request ID for tracking
-        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
-        
-        logger.info(f"Confirming and sending WhatsApp message (user: {user_id}, request: {tool_request_id})")
-        
-        # If no WebSocket provided, return error
-        if not websocket:
-            logger.error("No WebSocket connection available for WhatsApp confirm send")
-            return {
-                "error": "No connection to device available",
-                "success": False
-            }
-        
-        # Create the WebSocket message for the Android app
-        tool_execution_message = {
-            "type": "tool_execution",
-            "tool": "whatsapp_confirm_send",
-            "request_id": tool_request_id,
-            "params": {},  # No params needed - uses the drafted message
-            "conversation_id": conversation_id
-        }
-        
-        # Send to Android app via WebSocket
-        try:
-            message_json = json.dumps(tool_execution_message)
-            logger.debug(f"Sending WhatsApp confirm send to Android: {tool_execution_message}")
-            await websocket.send_text(message_json)
-            logger.info(f"Successfully sent whatsapp_confirm_send command")
-        except Exception as e:
-            logger.error(f"Failed to send WebSocket message: {str(e)}")
-            return {
-                "status": "error",
-                "error": f"Failed to send command to device: {str(e)}",
-                "success": False
-            }
-        
-        # If we have a tool_result_handler, wait for the result
-        if tool_result_handler:
-            logger.info(f"Waiting for WhatsApp confirm send result from Android device (request_id: {tool_request_id})")
-            
-            try:
-                # Wait for tool result with timeout
-                result = await tool_result_handler.wait_for_tool_result(
-                    request_id=tool_request_id,
-                    timeout=8.0
-                )
-                
-                logger.info(f"WhatsApp confirm send result for {tool_request_id}: {result}")
-                return result
-                
-            except Exception as e:
-                logger.error(f"Error waiting for WhatsApp confirm send result: {str(e)}")
-                return {
-                    "status": "error",
-                    "error": f"Error waiting for device response: {str(e)}",
-                    "success": False
-                }
-        else:
-            # If no handler, just return success after sending
-            return {
-                "status": "sent",
-                "message": f"Command to confirm and send message sent to device",
-                "request_id": tool_request_id
-            }
-        
-    except Exception as e:
-        logger.error(f"Error in whatsapp_confirm_send for user {user_id}: {str(e)}")
-        return {
-            "error": f"Failed to confirm and send WhatsApp message: {str(e)}",
-            "success": False
-        }
-
 async def whatsapp_send_message(message: str, user_id: str = None, websocket = None,
                                 tool_result_handler = None, conversation_id: str = None) -> dict:
     """
@@ -521,12 +429,17 @@ screen_agent_tools = [
     },
     {
         "type": "custom",
-        "name": "whatsapp_confirm_send",
-        "description": "Confirm and send the previously drafted WhatsApp message. IMPORTANT: Only use this AFTER: 1) WhatsApp is open (launch_app), 2) Chat is selected (whatsapp_select_chat), 3) Message is drafted (whatsapp_draft_message), 4) User has confirmed. This will take the drafted message and actually send it in WhatsApp. Always ask the user 'Should I send this message?' or similar confirmation before using this tool.",
+        "name": "whatsapp_send_message",
+        "description": "Send a message in WhatsApp. CRITICAL: You MUST have already: 1) Opened WhatsApp (launch_app), 2) Selected a chat (whatsapp_select_chat), 3) Drafted the message (whatsapp_draft_message), 4) Asked the user for confirmation like 'Should I send this message?' and received approval. NEVER use this tool without completing ALL these steps first. This tool will actually send the message in WhatsApp.",
         "input_schema": {
             "type": "object",
-            "properties": {},
-            "required": []
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The exact message text that was drafted and confirmed by the user"
+                }
+            },
+            "required": ["message"]
         }
     }
 ]
