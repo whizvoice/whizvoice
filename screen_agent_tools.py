@@ -195,8 +195,8 @@ async def whatsapp_select_chat(chat_name: str, user_id: str = None, websocket = 
             "success": False
         }
 
-async def whatsapp_draft_message(message: str, previous_text: str = None, user_id: str = None, websocket = None,
-                                tool_result_handler = None, conversation_id: str = None) -> dict:
+async def whatsapp_draft_message(message: str, user_id: str = None, websocket = None,
+                                tool_result_handler = None, conversation_id: str = None, previous_text: str = None) -> dict:
     """
     Draft a message in WhatsApp by showing an overlay for user review.
     
@@ -423,7 +423,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "whatsapp_draft_message",
-        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: WhatsApp chat must be open first (use launch_app to open WhatsApp, then whatsapp_select_chat to open the chat). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. Please provide previous_text If you are correcting a message that was already drafted, so that the user can see the difference between the old and the new changes. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending.",
+        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: WhatsApp chat must be open first (use launch_app to open WhatsApp, then whatsapp_select_chat to open the chat). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
