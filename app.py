@@ -3610,6 +3610,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 })
                 return session_conversation_id
             
+            # Log all content blocks from AI response
+            logger.info(f"AI response stop_reason: {response.stop_reason}")
+            logger.info(f"AI response content blocks: {[{'type': block.type, 'name': getattr(block, 'name', None)} for block in response.content]}")
+            
             tool_block = next((block for block in response.content if block.type == 'tool_use'), None)
             if not tool_block:
                 logger.error("Stop reason is tool_use but no tool_use block found.")
@@ -3623,6 +3627,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 await safe_websocket_send(error_payload)
                 raise StopIteration("ToolBlockMissingError")
 
+            logger.info(f"AI attempting to execute tool: {tool_block.name}")
+            logger.info(f"Tool input parameters: {json.dumps(tool_block.input, indent=2)}")
             logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
             
             # Pass WebSocket context for tools that need it (like launch_app)
@@ -3690,6 +3696,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": "Claude API timed out during tool use"
                 })
                 raise
+        
+        # Log final response details
+        logger.info(f"Final AI response - stop_reason: {response.stop_reason}")
+        logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': getattr(block, 'text', '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
         
         # Add assistant final response to session history (if not an intercepted error)
         async with chat_sessions_lock:
