@@ -600,7 +600,8 @@ TOOL_REGISTRY = {
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
-            kwargs.get('conversation_id')
+            kwargs.get('conversation_id'),
+            args.get('previous_text')  # Add previous_text parameter
         ),
         "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     }
