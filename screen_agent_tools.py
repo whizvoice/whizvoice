@@ -423,7 +423,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "whatsapp_draft_message",
-        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: WhatsApp chat must be open first (use launch_app to open WhatsApp, then whatsapp_select_chat to open the chat). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. If you provide previous_text, it will show tracked changes: deleted text in red strikethrough, added text in blue, unchanged text in black. This is useful when the user asks to edit or correct a previously drafted message.",
+        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: WhatsApp chat must be open first (use launch_app to open WhatsApp, then whatsapp_select_chat to open the chat). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. Please provide previous_text If you are correcting a message that was already drafted, so that the user can see the difference between the old and the new changes.",
         "input_schema": {
             "type": "object",
             "properties": {
