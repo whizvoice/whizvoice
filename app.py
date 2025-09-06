@@ -62,7 +62,16 @@ logger = logging.getLogger(__name__)
 stripe.api_key = STRIPE_SECRET_KEY
 
 # System prompt for Claude
-CLAUDE_SYSTEM_PROMPT = "You are Whiz Voice, a friendly AI chatbot that can help with anything. If the user mentions Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary. Also, you have a get_app_info tool that can be used to get information about the Whiz Voice app, including its features, functionality, and how to use it. Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."
+CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can help with anything. You have access to various tools that you MUST use when appropriate:
+
+1. When the user asks to open/launch an app (like WhatsApp, YouTube, Maps, etc.), you MUST use the 'launch_app' tool
+2. For WhatsApp messaging, use the WhatsApp-specific tools (whatsapp_select_chat, whatsapp_draft_message, whatsapp_send_message)
+3. For Asana/task management, use the Asana tools
+4. For app information, use the get_app_info tool
+
+IMPORTANT: When a user asks you to open an app, DO NOT just say you opened it - you MUST actually use the launch_app tool to open it on their device. Similarly, use the appropriate tools for all actions rather than just describing what you would do.
+
+Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."""
 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools + screen_agent_tools
@@ -3548,6 +3557,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         })
 
         try:
+            # Log the tools being sent to Claude for debugging
+            logger.info(f"Sending {len(tools)} tools to Claude")
+            logger.debug(f"Tool names: {[tool.get('name') for tool in tools]}")
+            # Log specifically the launch_app tool structure
+            launch_app_tool = next((t for t in tools if t.get('name') == 'launch_app'), None)
+            if launch_app_tool:
+                logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
+            
             # Create the stream/response
             stream = current_anthropic_client.beta.messages.create(
                 model="claude-sonnet-4-20250514",
@@ -3585,6 +3602,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             return session_conversation_id
         except Exception as api_error:
             logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
+            logger.error(f"Error type: {type(api_error).__name__}")
+            logger.error(f"Error details: {repr(api_error)}")
+            # Log if this is a tool-related error
+            if "tool" in str(api_error).lower():
+                logger.error(f"TOOL ERROR DETECTED: This appears to be a tool-related error")
             await set_request_state(request_id, "failed", {
                 "session_id": session_id,
                 "conversation_id": session_conversation_id,
@@ -3600,6 +3622,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             })
             return session_conversation_id
 
+        # Log the initial response to see if Claude is trying to use tools
+        logger.info(f"Claude response stop_reason: {response.stop_reason}")
+        if hasattr(response, 'content'):
+            logger.info(f"Claude response content: {[{'type': getattr(block, 'type', 'unknown'), 'text': getattr(block, 'text', None)[:100] if hasattr(block, 'text') else None} for block in response.content]}")
+        
         # Handle tool calls
         while response.stop_reason == 'tool_use':
             # Check for cancellation before each tool iteration
