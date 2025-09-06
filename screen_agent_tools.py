@@ -195,7 +195,7 @@ async def whatsapp_select_chat(chat_name: str, user_id: str = None, websocket = 
             "success": False
         }
 
-async def whatsapp_draft_message(message: str, user_id: str = None, websocket = None,
+async def whatsapp_draft_message(message: str, previous_text: str = None, user_id: str = None, websocket = None,
                                 tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Draft a message in WhatsApp by showing an overlay for user review.
@@ -203,8 +203,14 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
     This tool shows a WhizVoice overlay with the message text for user confirmation
     before actually sending. Always use this before sending messages.
     
+    If previous_text is provided, the overlay will show tracked changes:
+    - Deleted text appears with red strikethrough
+    - Added text appears in blue
+    - Unchanged text appears in black
+    
     Args:
         message: The message text to draft for user review
+        previous_text: Optional. The previous version of the message for track changes display
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -228,13 +234,15 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
             }
         
         # Create the WebSocket message for the Android app
+        params = {"message": message}
+        if previous_text is not None:
+            params["previous_text"] = previous_text
+            
         tool_execution_message = {
             "type": "tool_execution",
             "tool": "whatsapp_draft_message",
             "request_id": tool_request_id,
-            "params": {
-                "message": message
-            },
+            "params": params,
             "conversation_id": conversation_id
         }
         
@@ -415,13 +423,17 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "whatsapp_draft_message",
-        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: WhatsApp chat must be open first (use launch_app to open WhatsApp, then whatsapp_select_chat to open the chat). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay showing what will be sent.",
+        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: WhatsApp chat must be open first (use launch_app to open WhatsApp, then whatsapp_select_chat to open the chat). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. If you provide previous_text, it will show tracked changes: deleted text in red strikethrough, added text in blue, unchanged text in black. This is useful when the user asks to edit or correct a previously drafted message.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string",
                     "description": "The message text to draft for user review before sending"
+                },
+                "previous_text": {
+                    "type": "string",
+                    "description": "Optional. The previous version of the message text. When provided, the overlay will show tracked changes (deletions in red strikethrough, additions in blue)"
                 }
             },
             "required": ["message"]
