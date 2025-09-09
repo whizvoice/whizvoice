@@ -961,7 +961,7 @@ async def set_user_api_key(
             logger.info(f"  Clear result: {result}")
             
             # Return the updated token status immediately
-            from preferences import get_decrypted_preference_key
+            # get_decrypted_preference_key is already imported at the top
             claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
             asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
             
@@ -996,7 +996,7 @@ async def set_user_api_key(
             logger.info(f"  Bool evaluation: {bool(retrieved_value)}")
             
             # Return the updated token status immediately
-            from preferences import get_decrypted_preference_key
+            # get_decrypted_preference_key is already imported at the top
             claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
             asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
             
