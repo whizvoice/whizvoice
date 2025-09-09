@@ -3662,6 +3662,44 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         })
         
         messages = await get_chat_messages(session_id)
+        
+        # If we have an existing conversation but no messages in Redis, populate from database
+        # This handles reconnection scenarios where multiple messages were sent while offline
+        if len(messages) == 0 and session_conversation_id and session_conversation_id > 0:
+            logger.info(f"Redis session empty for existing conversation {session_conversation_id}, loading history from database")
+            try:
+                # Get all messages from database for this conversation
+                query = supabase.table("messages")\
+                    .select("id, content, message_type, timestamp, request_id, cancelled")\
+                    .eq("conversation_id", session_conversation_id)\
+                    .order("timestamp", desc=False)
+                
+                response = query.execute()
+                db_messages = response.data if response.data else []
+                
+                # Build Redis session from database messages
+                redis_messages = []
+                for msg in db_messages:
+                    # Skip cancelled messages
+                    if msg.get('cancelled'):
+                        continue
+                    
+                    # Format for Redis (same as Claude API format)
+                    if msg['message_type'] == 'USER':
+                        redis_messages.append({"role": "user", "content": msg['content']})
+                    elif msg['message_type'] == 'ASSISTANT':
+                        redis_messages.append({"role": "assistant", "content": msg['content']})
+                
+                # Populate Redis session with conversation history
+                if redis_messages:
+                    await set_chat_messages(session_id, redis_messages)
+                    messages = redis_messages
+                    logger.info(f"Populated Redis session with {len(redis_messages)} messages from database")
+                
+            except Exception as e:
+                logger.error(f"Error loading conversation history from database: {str(e)}")
+                # Continue with empty context if database load fails
+        
         logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(messages)}")
         
         # Save user message to database and update session_conversation_id
