@@ -179,6 +179,21 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
         _anthropic_clients_cache[api_key] = new_client
         return new_client
 
+async def call_claude_api(client: AsyncAnthropic, session_id: str):
+    """
+    Standard method to call Claude API with consistent parameters.
+    Returns the stream/response object from Claude.
+    """
+    return client.beta.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1000,
+        messages=await get_chat_messages(session_id),
+        system=CLAUDE_SYSTEM_PROMPT,
+        tools=tools,
+        tool_choice={"type": "auto"},
+        betas=["token-efficient-tools-2025-02-19"]
+    )
+
 class ChatMessage(BaseModel):
     content: str
     session_id: Optional[str] = None
@@ -3405,6 +3420,201 @@ async def get_message_count(
         logger.error(f"Error getting message count for conversation {conversation_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get message count")
 
+@app.post("/conversations/{conversation_id}/check-retry")
+async def check_and_retry_failed_messages(
+    conversation_id: int,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Check for error messages and retry getting assistant response from Claude"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        # Resolve the actual conversation ID (handles optimistic IDs)
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Get all messages for this conversation
+        result = supabase.table("messages")\
+            .select("*")\
+            .eq("conversation_id", actual_conversation_id)\
+            .order("timestamp", desc=False)\
+            .execute()
+        
+        if not result.data:
+            return {"retried": False, "reason": "No messages in conversation"}
+        
+        messages = result.data
+        
+        # Find the last message
+        if messages:
+            last_message = messages[-1]
+            
+            # Check if it's an error message (ASSISTANT type with JSON error content)
+            if last_message.get("message_type") == "ASSISTANT":
+                try:
+                    content = json.loads(last_message.get("content", ""))
+                    if content.get("type") == "error":
+                        error_code = content.get("code")
+                        request_id = content.get("request_id")
+                        
+                        logger.info(f"Found error message with code {error_code}, will retry getting assistant response")
+                        
+                        # Find the user message before this error
+                        user_message_content = None
+                        for i in range(len(messages) - 2, -1, -1):
+                            if messages[i].get("message_type") == "USER":
+                                user_message_content = messages[i].get("content")
+                                break
+                        
+                        if user_message_content:
+                            # Delete the error message immediately to prevent duplicate retries
+                            logger.info(f"Deleting error message {last_message.get('id')} before retry")
+                            supabase.table("messages")\
+                                .delete()\
+                                .eq("id", last_message.get("id"))\
+                                .execute()
+                            
+                            # Create a temporary session ID for this retry
+                            session_id = f"retry_{actual_conversation_id}_{int(time.time())}"
+                            
+                            # Build conversation history in chat session (exclude the error message)
+                            chat_messages = []
+                            for msg in messages[:-1]:  # Exclude the last error message
+                                if msg.get("message_type") == "USER":
+                                    chat_messages.append({"role": "user", "content": msg.get("content")})
+                                elif msg.get("message_type") == "ASSISTANT":
+                                    # Skip if it's an error message
+                                    try:
+                                        msg_content = json.loads(msg.get("content", ""))
+                                        if msg_content.get("type") != "error":
+                                            chat_messages.append({"role": "assistant", "content": msg.get("content")})
+                                    except:
+                                        # Regular assistant message
+                                        chat_messages.append({"role": "assistant", "content": msg.get("content")})
+                            
+                            # Set up the chat session for retry
+                            await set_chat_messages(session_id, chat_messages)
+                            
+                            # Get the anthropic client using the standard method
+                            current_anthropic_client = await get_anthropic_client(user_id)
+                            if not current_anthropic_client:
+                                logger.warning(f"No Claude API key configured for user {user_id}")
+                                return {
+                                    "retried": False,
+                                    "reason": "No Claude API key configured",
+                                    "error_code": "CLAUDE_API_KEY_MISSING"
+                                }
+                            
+                            try:
+                                # Call Claude API using the same approach as process_message_task
+                                logger.info(f"Calling Claude API to retry message for conversation {actual_conversation_id}")
+                                
+                                stream = await call_claude_api(current_anthropic_client, session_id)
+                                
+                                # Use timeout like in normal flow
+                                response = await asyncio.wait_for(stream, timeout=60.0)
+                                
+                                # Extract text response
+                                assistant_response = ""
+                                if response.content and response.content[0].type == 'text':
+                                    assistant_response = response.content[0].text
+                                
+                                if assistant_response:
+                                    # Save the new assistant response (error message already deleted)
+                                    logger.info(f"Saving new assistant response for conversation {actual_conversation_id}")
+                                    save_result = save_message_to_db(
+                                        user_id=user_id,
+                                        conversation_id=actual_conversation_id,
+                                        content=assistant_response,
+                                        message_type="ASSISTANT",
+                                        request_id=request_id
+                                    )
+                                    
+                                    if save_result:
+                                        saved_conversation_id, message_id = save_result
+                                        logger.info(f"Successfully saved assistant response as message {message_id}")
+                                        
+                                        return {
+                                            "retried": True,
+                                            "reason": "Successfully got assistant response",
+                                            "response": assistant_response,
+                                            "message_id": message_id
+                                        }
+                                    else:
+                                        logger.error(f"Failed to save assistant response to database")
+                                        return {
+                                            "retried": False,
+                                            "reason": "Failed to save response to database"
+                                        }
+                                else:
+                                    logger.warning(f"Got empty response from Claude")
+                                    return {
+                                        "retried": False,
+                                        "reason": "Got empty response from Claude"
+                                    }
+                                    
+                            except AuthenticationError as auth_error:
+                                logger.warning(f"Claude authentication failed during retry: {str(auth_error)}")
+                                # Re-save the error message since we deleted it
+                                error_content = json.dumps({
+                                    "type": "error",
+                                    "code": "CLAUDE_AUTHENTICATION_ERROR",
+                                    "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
+                                    "request_id": request_id
+                                })
+                                save_message_to_db(
+                                    user_id=user_id,
+                                    conversation_id=actual_conversation_id,
+                                    content=error_content,
+                                    message_type="ASSISTANT",
+                                    request_id=request_id
+                                )
+                                return {
+                                    "retried": False,
+                                    "reason": "Claude authentication still failing",
+                                    "error": str(auth_error)
+                                }
+                            except Exception as api_error:
+                                logger.error(f"Claude API error during retry: {str(api_error)}")
+                                # Re-save error message with new error (since we deleted the old one)
+                                new_error_content = json.dumps({
+                                    "type": "error",
+                                    "code": "CLAUDE_API_ERROR",
+                                    "message": f"Claude API error: {str(api_error)}",
+                                    "request_id": request_id
+                                })
+                                
+                                save_message_to_db(
+                                    user_id=user_id,
+                                    conversation_id=actual_conversation_id,
+                                    content=new_error_content,
+                                    message_type="ASSISTANT",
+                                    request_id=request_id
+                                )
+                                
+                                return {
+                                    "retried": False,
+                                    "reason": "Claude API error",
+                                    "error": str(api_error)
+                                }
+                        else:
+                            return {"retried": False, "reason": "No user message found to retry"}
+                            
+                except json.JSONDecodeError:
+                    # Not a JSON error message, it's a regular assistant message
+                    pass
+        
+        return {"retried": False, "reason": "No error message found"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking for retry in conversation {conversation_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to check for retry")
+
 @app.get("/requests/{request_id}/state")
 async def get_request_state_endpoint(
     request_id: str,
@@ -3566,15 +3776,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
             
             # Create the stream/response
-            stream = current_anthropic_client.beta.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=1000,
-                messages=await get_chat_messages(session_id),
-                system=CLAUDE_SYSTEM_PROMPT,
-                tools=tools,
-                tool_choice={"type": "auto"},
-                betas=["token-efficient-tools-2025-02-19"]
-            )
+            stream = await call_claude_api(current_anthropic_client, session_id)
             
             # Store stream for potential cancellation
             if redis_managers and "local_objects" in redis_managers:
@@ -3609,7 +3811,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "error": str(auth_error)
             })
             
-            # Send authentication error to client
+            # Create error payload
             error_payload = {
                 "type": "error",
                 "code": "CLAUDE_AUTHENTICATION_ERROR",
@@ -3618,6 +3820,24 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "conversation_id": session_conversation_id,
                 "client_conversation_id": client_conversation_id
             }
+            
+            # Save error as ASSISTANT message to database (persists even if WebSocket fails)
+            error_json_content = json.dumps(error_payload)
+            logger.info(f"Saving authentication error as ASSISTANT message for conversation {session_conversation_id}")
+            save_result = save_message_to_db(
+                user_id=user_id,
+                conversation_id=session_conversation_id,
+                content=error_json_content,
+                message_type="ASSISTANT",
+                request_id=request_id
+            )
+            if save_result:
+                saved_conversation_id, error_message_id = save_result
+                logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
+            else:
+                logger.error(f"Failed to save authentication error message to database")
+            
+            # Try to send via WebSocket (may fail, but error is persisted in DB)
             await safe_websocket_send(error_payload)
             
             # Don't raise - let the client handle the error gracefully
@@ -3723,15 +3943,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Use async API call for tool response
             try:
-                tool_stream = current_anthropic_client.beta.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=1000,
-                    messages=await get_chat_messages(session_id),
-                    system=CLAUDE_SYSTEM_PROMPT,
-                    tools=tools,
-                    tool_choice={"type": "auto"},
-                    betas=["token-efficient-tools-2025-02-19"]
-                )
+                tool_stream = await call_claude_api(current_anthropic_client, session_id)
                 
                 # Update stream reference for cancellation
                 if redis_managers and "local_objects" in redis_managers:
@@ -3755,7 +3967,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": str(auth_error)
                 })
                 
-                # Send authentication error to client
+                # Create error payload
                 error_payload = {
                     "type": "error",
                     "code": "CLAUDE_AUTHENTICATION_ERROR",
@@ -3764,6 +3976,24 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "conversation_id": session_conversation_id,
                     "client_conversation_id": client_conversation_id
                 }
+                
+                # Save error as ASSISTANT message to database (persists even if WebSocket fails)
+                error_json_content = json.dumps(error_payload)
+                logger.info(f"Saving authentication error (during tool use) as ASSISTANT message for conversation {session_conversation_id}")
+                save_result = save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content=error_json_content,
+                    message_type="ASSISTANT",
+                    request_id=request_id
+                )
+                if save_result:
+                    saved_conversation_id, error_message_id = save_result
+                    logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
+                else:
+                    logger.error(f"Failed to save authentication error message to database")
+                
+                # Try to send via WebSocket (may fail, but error is persisted in DB)
                 await safe_websocket_send(error_payload)
                 
                 # Don't raise - let the client handle the error gracefully
