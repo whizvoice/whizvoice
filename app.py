@@ -3600,6 +3600,28 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
+        except AuthenticationError as auth_error:
+            # Handle Claude API authentication errors (401 Unauthorized)
+            logger.warning(f"Claude API authentication error for request {request_id}: {str(auth_error)}")
+            await set_request_state(request_id, "auth_failed", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "error": str(auth_error)
+            })
+            
+            # Send authentication error to client
+            error_payload = {
+                "type": "error",
+                "code": "CLAUDE_AUTHENTICATION_ERROR",
+                "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
+                "request_id": request_id,
+                "conversation_id": session_conversation_id,
+                "client_conversation_id": client_conversation_id
+            }
+            await safe_websocket_send(error_payload)
+            
+            # Don't raise - let the client handle the error gracefully
+            return session_conversation_id
         except Exception as api_error:
             logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
             logger.error(f"Error type: {type(api_error).__name__}")
@@ -3724,6 +3746,28 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": "Claude API timed out during tool use"
                 })
                 raise
+            except AuthenticationError as auth_error:
+                # Handle Claude API authentication errors during tool use
+                logger.warning(f"Claude API authentication error during tool use for request {request_id}: {str(auth_error)}")
+                await set_request_state(request_id, "auth_failed", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "error": str(auth_error)
+                })
+                
+                # Send authentication error to client
+                error_payload = {
+                    "type": "error",
+                    "code": "CLAUDE_AUTHENTICATION_ERROR",
+                    "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
+                    "request_id": request_id,
+                    "conversation_id": session_conversation_id,
+                    "client_conversation_id": client_conversation_id
+                }
+                await safe_websocket_send(error_payload)
+                
+                # Don't raise - let the client handle the error gracefully
+                return session_conversation_id
         
         # Log final response details
         logger.info(f"Final AI response - stop_reason: {response.stop_reason}")
