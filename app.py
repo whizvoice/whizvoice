@@ -179,19 +179,33 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
         _anthropic_clients_cache[api_key] = new_client
         return new_client
 
-async def call_claude_api(client: AsyncAnthropic, session_id: str):
+async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = False):
     """
     Standard method to call Claude API with consistent parameters.
     Returns the stream/response object from Claude.
+    If stream=True, returns a streaming response that can be cancelled.
     """
+    # Get messages and log them for debugging
+    messages = await get_chat_messages(session_id)
+    
+    # Log the conversation context being sent to Claude
+    logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}")
+    for i, msg in enumerate(messages):
+        role = msg.get('role', 'unknown')
+        content = msg.get('content', '')
+        # Truncate content for logging
+        content_preview = content[:100] + "..." if len(content) > 100 else content
+        logger.info(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
+    
     return client.beta.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1000,
-        messages=await get_chat_messages(session_id),
+        messages=messages,
         system=CLAUDE_SYSTEM_PROMPT,
         tools=tools,
         tool_choice={"type": "auto"},
-        betas=["token-efficient-tools-2025-02-19"]
+        betas=["token-efficient-tools-2025-02-19"],
+        stream=stream  # Support streaming for cancellation
     )
 
 class ChatMessage(BaseModel):
@@ -1608,9 +1622,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if redis_managers and "active_requests" in redis_managers:
                             active_request_ids = list(await redis_managers["active_requests"].get_all(session_id))
                             has_active_requests = len(active_request_ids) > 0
-                            if has_active_requests:
-                                # Clear all active requests for this session in Redis
-                                await redis_managers["active_requests"].clear(session_id)
+                            # Note: We don't clear active requests here anymore since we're only cancelling streams
+                            # The tasks will remove themselves when they complete or fail
                         
                         if has_active_requests:
                             # Validate interrupt context if optimistic ID provided
@@ -1626,10 +1639,23 @@ async def websocket_endpoint(websocket: WebSocket):
                                 logger.info(f"Validated interrupt: optimistic {client_conversation_id} → real {real_id}")
                             
                             logger.info(f"Interrupt detected. Cancelling {len(active_request_ids)} active requests")
-                            # Cancel all active requests for this session
+                            # Try to cancel Claude streams first, if that fails, cancel the task
+                            # The task will keep running until it checks for cancellation
+                            stream_cancelled_count = 0
+                            task_cancelled_count = 0
                             if redis_managers and "local_objects" in redis_managers:
-                                cancelled_count = await redis_managers["local_objects"].cancel_tasks_by_ids(list(active_request_ids))
-                                logger.info(f"Cancelled {cancelled_count} tasks")
+                                for req_id in active_request_ids:
+                                    # First try to cancel the stream (if Claude has been called)
+                                    if await redis_managers["local_objects"].cancel_stream(req_id):
+                                        stream_cancelled_count += 1
+                                        logger.debug(f"Cancelled Claude stream for request {req_id}")
+                                    else:
+                                        # No stream yet, cancel the task instead
+                                        # The task will continue until it checks cancellation status
+                                        if await redis_managers["local_objects"].cancel_task(req_id):
+                                            task_cancelled_count += 1
+                                            logger.debug(f"Marked task for cancellation: {req_id}")
+                                logger.info(f"Cancelled {stream_cancelled_count} Claude streams and marked {task_cancelled_count} tasks for cancellation")
                             
                             # Send interrupt notification with client context
                             interrupt_response = {
@@ -1662,7 +1688,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                         # This might need additional handling if conversation ID changes are critical
                                         logger.info(f"Conversation ID changed from {session_conversation_id} to {updated_session_conversation_id}")
                             except asyncio.CancelledError:
-                                logger.info(f"Request {request_id} was cancelled")
+                                # This shouldn't happen anymore since we only cancel streams, not tasks
+                                logger.warning(f"Unexpected task cancellation for request {request_id}")
                                 # Clean up tracking
                                 if request_id and redis_managers:
                                     if "local_objects" in redis_managers:
@@ -2433,9 +2460,12 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                 await redis_managers["request_messages"].mark_cancelled(request_id)
                 cancelled_requests.append(request_id)
                 
-                # Cancel the asyncio task if it exists
+                # Cancel only the Claude stream, not the entire task
+                # This preserves the message in Redis while stopping Claude generation
                 if redis_managers and "local_objects" in redis_managers:
-                    await redis_managers["local_objects"].cancel_task(request_id)
+                    stream_cancelled = await redis_managers["local_objects"].cancel_stream(request_id)
+                    if stream_cancelled:
+                        logger.info(f"Cancelled Claude stream for subset request {request_id}")
         
         if cancelled_requests:
             logger.info(f"Cancelled {len(cancelled_requests)} subset requests: {cancelled_requests}")
@@ -3757,6 +3787,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Use real conversation ID for rest of processing
         session_conversation_id = real_conversation_id
         
+        # Add message to Redis IMMEDIATELY after getting real conversation ID
+        # This ensures the message is in context even if the task is cancelled
+        async with chat_sessions_lock:
+            await add_chat_message(session_id, {"role": "user", "content": message})
+        logger.info(f"Added message to Redis session for conversation {session_conversation_id}")
+        
         # Track which message IDs this request is responding to
         user_message_ids = get_user_message_ids_since_last_bot(session_conversation_id)
         if redis_managers and "request_messages" in redis_managers:
@@ -3772,9 +3808,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         if cancelled_requests:
             logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {session_conversation_id}")
 
-        async with chat_sessions_lock:
-            await add_chat_message(session_id, {"role": "user", "content": message})
-
         current_anthropic_client = await get_anthropic_client(user_id)
         if not current_anthropic_client:
             error_payload_key = {
@@ -3789,11 +3822,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
             return session_conversation_id
 
-        # Check for cancellation before making API call
+        # Check if this task has been marked for cancellation
+        # (might happen if interrupt arrived before we reached Claude call)
         if asyncio.current_task().cancelled():
+            logger.info(f"Task for request {request_id} was cancelled before Claude call")
             await set_request_state(request_id, "cancelled", {
                 "session_id": session_id,
-                "conversation_id": session_conversation_id
+                "conversation_id": session_conversation_id,
+                "cancelled_before_api": True
             })
             return session_conversation_id
 
@@ -3822,6 +3858,29 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Use async API call with timeout
             response = await asyncio.wait_for(stream, timeout=60.0)  # 60 second timeout
+        except (asyncio.CancelledError, Exception) as e:
+            # Check if this is a stream cancellation (from interrupt or subset detection)
+            if "stream" in str(e).lower() or "cancelled" in str(e).lower() or "closed" in str(e).lower():
+                logger.info(f"Claude stream cancelled for request {request_id} (likely due to interrupt)")
+                await set_request_state(request_id, "interrupted", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "reason": "Stream cancelled by newer request"
+                })
+                
+                # Clean up the stream tracking
+                if redis_managers and "local_objects" in redis_managers:
+                    await redis_managers["local_objects"].remove_stream(request_id)
+                
+                # Don't send error to client - they already got an interrupt notification
+                return session_conversation_id
+            
+            # Re-raise if it's a different type of cancellation
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            
+            # Continue to handle other exceptions normally
+            raise
         except asyncio.TimeoutError:
             logger.error(f"Claude API timeout for request {request_id} after 60 seconds")
             await set_request_state(request_id, "timeout", {
