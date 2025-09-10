@@ -179,14 +179,45 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
         _anthropic_clients_cache[api_key] = new_client
         return new_client
 
-async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = False):
+async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = False, conversation_id: Optional[int] = None):
     """
     Standard method to call Claude API with consistent parameters.
     Returns the stream/response object from Claude.
     If stream=True, returns a streaming response that can be cancelled.
+    conversation_id: Optional - if provided, will reload context from DB if empty
     """
     # Get messages and log them for debugging
     messages = await get_chat_messages(session_id)
+    
+    # SAFETY NET: If context is empty but we have a conversation_id, try to load from database
+    # This handles edge cases where Redis session might have been cleared unexpectedly
+    if len(messages) == 0 and conversation_id:
+        logger.warning(f"[CLAUDE_CONTEXT] Empty context for conversation {conversation_id}, attempting to reload from database")
+        try:
+            from supabase_client import supabase
+            query = supabase.table("messages")\
+                .select("id, content, message_type, timestamp, cancelled")\
+                .eq("conversation_id", conversation_id)\
+                .order("timestamp", desc=False)
+            
+            response = query.execute()
+            db_messages = response.data if response.data else []
+            
+            redis_messages = []
+            for msg in db_messages:
+                if msg.get('cancelled'):
+                    continue
+                if msg['message_type'] == 'USER':
+                    redis_messages.append({"role": "user", "content": msg['content']})
+                elif msg['message_type'] == 'ASSISTANT':
+                    redis_messages.append({"role": "assistant", "content": msg['content']})
+            
+            if redis_messages:
+                await set_chat_messages(session_id, redis_messages)
+                messages = redis_messages
+                logger.info(f"[CLAUDE_CONTEXT] Reloaded {len(redis_messages)} messages from database")
+        except Exception as e:
+            logger.error(f"[CLAUDE_CONTEXT] Failed to reload context from database: {e}")
     
     # Log the conversation context being sent to Claude
     logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}")
@@ -3542,7 +3573,7 @@ async def check_and_retry_failed_messages(
                                 # Call Claude API using the same approach as process_message_task
                                 logger.info(f"Calling Claude API to retry message for conversation {actual_conversation_id}")
                                 
-                                stream = await call_claude_api(current_anthropic_client, session_id)
+                                stream = await call_claude_api(current_anthropic_client, session_id, conversation_id=actual_conversation_id)
                                 
                                 # Use timeout like in normal flow
                                 response = await asyncio.wait_for(stream, timeout=60.0)
@@ -3695,8 +3726,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # If we have an existing conversation but no messages in Redis, populate from database
         # This handles reconnection scenarios where multiple messages were sent while offline
-        if len(messages) == 0 and session_conversation_id and session_conversation_id > 0:
-            logger.info(f"Redis session empty for existing conversation {session_conversation_id}, loading history from database")
+        # IMPORTANT: Also check for optimistic conversations (negative IDs) that may have messages in DB
+        if len(messages) == 0 and session_conversation_id:
+            logger.info(f"Redis session empty for conversation {session_conversation_id}, loading history from database")
             try:
                 # Get all messages from database for this conversation
                 query = supabase.table("messages")\
@@ -3791,8 +3823,44 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Use asyncio.shield to protect this from cancellation - MUST complete even if task is cancelled
         try:
             async with chat_sessions_lock:
+                # CRITICAL: For new conversations, check if we need to load existing messages first
+                # This handles the case where multiple messages were queued offline
+                current_messages = await get_chat_messages(session_id)
+                if len(current_messages) == 0 and session_conversation_id:
+                    # Try to load any existing messages from the database
+                    logger.info(f"Loading existing messages for conversation {session_conversation_id} before adding new message")
+                    try:
+                        query = supabase.table("messages")\
+                            .select("id, content, message_type, timestamp, request_id, cancelled")\
+                            .eq("conversation_id", session_conversation_id)\
+                            .order("timestamp", desc=False)
+                        
+                        response = query.execute()
+                        db_messages = response.data if response.data else []
+                        
+                        # Build Redis session from database messages (excluding current message)
+                        redis_messages = []
+                        for msg in db_messages:
+                            # Skip cancelled messages and the current message (by request_id)
+                            if msg.get('cancelled') or msg.get('request_id') == request_id:
+                                continue
+                            
+                            # Format for Redis (same as Claude API format)
+                            if msg['message_type'] == 'USER':
+                                redis_messages.append({"role": "user", "content": msg['content']})
+                            elif msg['message_type'] == 'ASSISTANT':
+                                redis_messages.append({"role": "assistant", "content": msg['content']})
+                        
+                        if redis_messages:
+                            await set_chat_messages(session_id, redis_messages)
+                            logger.info(f"Pre-loaded {len(redis_messages)} existing messages into Redis session")
+                    except Exception as e:
+                        logger.error(f"Failed to pre-load existing messages: {e}")
+                        # Continue without context rather than fail
+                
+                # Now add the current message
                 await asyncio.shield(add_chat_message(session_id, {"role": "user", "content": message}))
-            logger.info(f"Added message to Redis session for conversation {session_conversation_id}")
+            logger.info(f"Added current message to Redis session for conversation {session_conversation_id}")
         except Exception as e:
             logger.error(f"Failed to add message to Redis: {e}")
             # Continue anyway - better to process without full context than to fail
@@ -3855,7 +3923,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
             
             # Create the stream/response
-            stream = await call_claude_api(current_anthropic_client, session_id)
+            stream = await call_claude_api(current_anthropic_client, session_id, conversation_id=session_conversation_id)
             
             # Store stream for potential cancellation
             if redis_managers and "local_objects" in redis_managers:
@@ -4045,7 +4113,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Use async API call for tool response
             try:
-                tool_stream = await call_claude_api(current_anthropic_client, session_id)
+                tool_stream = await call_claude_api(current_anthropic_client, session_id, conversation_id=session_conversation_id)
                 
                 # Update stream reference for cancellation
                 if redis_managers and "local_objects" in redis_managers:
