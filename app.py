@@ -3931,29 +3931,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Use async API call with timeout
             response = await asyncio.wait_for(stream, timeout=60.0)  # 60 second timeout
-        except (asyncio.CancelledError, Exception) as e:
-            # Check if this is a stream cancellation (from interrupt or subset detection)
-            if "stream" in str(e).lower() or "cancelled" in str(e).lower() or "closed" in str(e).lower():
-                logger.info(f"Claude stream cancelled for request {request_id} (likely due to interrupt)")
-                await set_request_state(request_id, "interrupted", {
-                    "session_id": session_id,
-                    "conversation_id": session_conversation_id,
-                    "reason": "Stream cancelled by newer request"
-                })
-                
-                # Clean up the stream tracking
-                if redis_managers and "local_objects" in redis_managers:
-                    await redis_managers["local_objects"].remove_stream(request_id)
-                
-                # Don't send error to client - they already got an interrupt notification
-                return session_conversation_id
-            
-            # Re-raise if it's a different type of cancellation
-            if isinstance(e, asyncio.CancelledError):
-                raise
-            
-            # Continue to handle other exceptions normally
-            raise
         except asyncio.TimeoutError:
             logger.error(f"Claude API timeout for request {request_id} after 60 seconds")
             await set_request_state(request_id, "timeout", {
@@ -4012,7 +3989,31 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Don't raise - let the client handle the error gracefully
             return session_conversation_id
+        except asyncio.CancelledError:
+            # Handle explicit task cancellation
+            logger.info(f"Task for request {request_id} was cancelled")
+            await set_request_state(request_id, "cancelled", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id
+            })
+            raise
         except Exception as api_error:
+            # Check if this is a stream cancellation (from interrupt or subset detection)
+            if "stream" in str(api_error).lower() or "cancelled" in str(api_error).lower() or "closed" in str(api_error).lower():
+                logger.info(f"Claude stream cancelled for request {request_id} (likely due to interrupt)")
+                await set_request_state(request_id, "interrupted", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "reason": "Stream cancelled by newer request"
+                })
+                
+                # Clean up the stream tracking
+                if redis_managers and "local_objects" in redis_managers:
+                    await redis_managers["local_objects"].remove_stream(request_id)
+                
+                # Don't send error to client - they already got an interrupt notification
+                return session_conversation_id
+            
             logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
             logger.error(f"Error type: {type(api_error).__name__}")
             logger.error(f"Error details: {repr(api_error)}")
