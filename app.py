@@ -3788,10 +3788,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         session_conversation_id = real_conversation_id
         
         # Add message to Redis IMMEDIATELY after getting real conversation ID
-        # This ensures the message is in context even if the task is cancelled
-        async with chat_sessions_lock:
-            await add_chat_message(session_id, {"role": "user", "content": message})
-        logger.info(f"Added message to Redis session for conversation {session_conversation_id}")
+        # Use asyncio.shield to protect this from cancellation - MUST complete even if task is cancelled
+        try:
+            async with chat_sessions_lock:
+                await asyncio.shield(add_chat_message(session_id, {"role": "user", "content": message}))
+            logger.info(f"Added message to Redis session for conversation {session_conversation_id}")
+        except Exception as e:
+            logger.error(f"Failed to add message to Redis: {e}")
+            # Continue anyway - better to process without full context than to fail
         
         # Track which message IDs this request is responding to
         user_message_ids = get_user_message_ids_since_last_bot(session_conversation_id)
@@ -3808,6 +3812,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         if cancelled_requests:
             logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {session_conversation_id}")
 
+        # Check if this task has been marked for cancellation AFTER critical housekeeping
+        # All important work (DB save, Redis add) is done, safe to exit if cancelled
+        if asyncio.current_task().cancelled():
+            logger.info(f"Task for request {request_id} was cancelled after housekeeping")
+            await set_request_state(request_id, "cancelled", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "cancelled_before_api": True
+            })
+            return session_conversation_id
+
         current_anthropic_client = await get_anthropic_client(user_id)
         if not current_anthropic_client:
             error_payload_key = {
@@ -3822,16 +3837,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
             return session_conversation_id
 
-        # Check if this task has been marked for cancellation
-        # (might happen if interrupt arrived before we reached Claude call)
-        if asyncio.current_task().cancelled():
-            logger.info(f"Task for request {request_id} was cancelled before Claude call")
-            await set_request_state(request_id, "cancelled", {
-                "session_id": session_id,
-                "conversation_id": session_conversation_id,
-                "cancelled_before_api": True
-            })
-            return session_conversation_id
 
         # Update state to processing
         await set_request_state(request_id, "processing", {
