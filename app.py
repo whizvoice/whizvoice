@@ -4219,14 +4219,16 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         return session_conversation_id
     
     except asyncio.CancelledError:
-        # Handle task cancellation
-        logger.info(f"Request {request_id} was cancelled")
+        # Handle task cancellation gracefully
+        # The task was cancelled before reaching Claude (interrupt detected early)
+        logger.info(f"Request {request_id} was cancelled (task cancellation)")
         await set_request_state(request_id, "cancelled", {
             "session_id": session_id,
             "conversation_id": session_conversation_id,
             "cancelled_at": time.time()
         })
-        raise
+        # Don't re-raise - let the finally block run for cleanup
+        return session_conversation_id
     
     except Exception as e:
         # Track any other errors
