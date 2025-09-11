@@ -3986,23 +3986,31 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
             
             # Create the stream/response (auto-detects whether to stream)
-            api_response = await call_claude_api(current_anthropic_client, session_id, conversation_id=session_conversation_id)
+            # call_claude_api returns either AsyncStream (stream=True) or coroutine (stream=False)
+            api_call_result = await call_claude_api(current_anthropic_client, session_id, conversation_id=session_conversation_id)
             
-            # Check if we got a streaming response or a coroutine
-            is_streaming = hasattr(api_response, '__aiter__')  # Async iterator = streaming
+            # Debug logging to understand what we got
+            logger.info(f"API call result type: {type(api_call_result).__name__}, module: {type(api_call_result).__module__}")
+            
+            # Check if we got a streaming response or a regular message/coroutine
+            # AsyncStream is from anthropic module and is for streaming
+            is_streaming = (
+                type(api_call_result).__name__ == 'AsyncStream' or
+                (hasattr(api_call_result, '__module__') and 'anthropic' in str(api_call_result.__module__))
+            )
             
             if is_streaming:
                 logger.info(f"[STREAMING] Processing streaming response for request {request_id}")
                 # Store the stream for potential cancellation
                 if redis_managers and "local_objects" in redis_managers:
-                    await redis_managers["local_objects"].add_stream(request_id, api_response)
+                    await redis_managers["local_objects"].add_stream(request_id, api_call_result)
                 
                 # Process streaming response
                 full_response = ""
                 response = None
                 
                 try:
-                    async for chunk in api_response:
+                    async for chunk in api_call_result:
                         # Check for cancellation
                         if asyncio.current_task().cancelled():
                             logger.info(f"Stream cancelled for request {request_id}")
@@ -4041,7 +4049,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             else:
                 logger.info(f"[NON-STREAMING] Processing coroutine response for request {request_id}")
                 # For non-streaming (tool calls), create a task to make it cancellable
-                task = asyncio.create_task(api_response)
+                # api_call_result is a coroutine when stream=False
+                task = asyncio.create_task(api_call_result)
                 
                 # Store the task for potential cancellation
                 if redis_managers and "local_objects" in redis_managers:
