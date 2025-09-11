@@ -4033,13 +4033,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                                 text_chunk = chunk.delta.text if hasattr(chunk.delta, 'text') else ""
                                 full_response += text_chunk
                                 
-                                # Send chunk to client immediately for real-time experience
-                                chunk_payload = {
-                                    "type": "stream_chunk",
-                                    "content": text_chunk,
-                                    "request_id": request_id
-                                }
-                                await safe_websocket_send(chunk_payload)
+                                # Don't send chunks to client - streaming is only for cancellation support
+                                # The complete response will be sent once streaming finishes
                             elif chunk.type == 'message_stop':
                                 # Stream complete, create a response object for compatibility
                                 response = type('Response', (), {
