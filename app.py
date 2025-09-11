@@ -4003,11 +4003,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Now check if we got a streaming response or a regular message
             # AsyncStream is from anthropic module and is for streaming
+            # BetaMessage is for non-streaming responses (including tool calls)
             is_streaming = (
                 type(api_result).__name__ == 'AsyncStream' or
                 'AsyncStream' in str(type(api_result)) or
-                (hasattr(type(api_result), '__module__') and 'anthropic' in str(type(api_result).__module__))
-            )
+                'AsyncMessageStream' in str(type(api_result))
+            ) and type(api_result).__name__ != 'BetaMessage'
             
             if is_streaming:
                 logger.info(f"[STREAMING] Processing streaming response for request {request_id}")
