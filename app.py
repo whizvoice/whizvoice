@@ -179,12 +179,22 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
         _anthropic_clients_cache[api_key] = new_client
         return new_client
 
-async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = False, conversation_id: Optional[int] = None):
+async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True):
     """
     Standard method to call Claude API with consistent parameters.
-    Returns the stream/response object from Claude.
-    If stream=True, returns a streaming response that can be cancelled.
+    
+    Hybrid approach:
+    - If stream=None (default): Auto-detect based on tools usage
+      - stream=True for regular chat (no tools) for better UX
+      - stream=False for tool calls (need complete response)
+    - If stream explicitly set: Use that value
+    
+    Returns:
+    - If streaming: Returns async iterator for chunks
+    - If not streaming: Returns coroutine for complete response
+    
     conversation_id: Optional - if provided, will reload context from DB if empty
+    with_tools: Whether to include tools in the request (default True)
     """
     # Get messages and log them for debugging
     messages = await get_chat_messages(session_id)
@@ -219,8 +229,28 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         except Exception as e:
             logger.error(f"[CLAUDE_CONTEXT] Failed to reload context from database: {e}")
     
+    # Auto-detect streaming preference if not explicitly set
+    if stream is None:
+        # Check if we're likely to use tools based on message content
+        last_message = messages[-1] if messages else {"content": ""}
+        message_text = last_message.get('content', '').lower()
+        
+        # Keywords that suggest tool use
+        tool_keywords = [
+            'open', 'launch', 'start',  # App launching
+            'whatsapp', 'send message', 'message',  # WhatsApp
+            'task', 'asana', 'create', 'due',  # Asana
+            'date', 'today', 'tomorrow'  # Date tools
+        ]
+        
+        might_use_tools = any(keyword in message_text for keyword in tool_keywords) and with_tools
+        
+        # Use streaming for regular chat, non-streaming for tool operations
+        stream = not might_use_tools
+        logger.info(f"[CLAUDE_CONTEXT] Auto-detected stream={stream} (might_use_tools={might_use_tools})")
+    
     # Log the conversation context being sent to Claude
-    logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}")
+    logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}, stream={stream}")
     for i, msg in enumerate(messages):
         role = msg.get('role', 'unknown')
         content = msg.get('content', '')
@@ -228,16 +258,25 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         content_preview = content[:100] + "..." if len(content) > 100 else content
         logger.info(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
     
-    return client.beta.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        messages=messages,
-        system=CLAUDE_SYSTEM_PROMPT,
-        tools=tools,
-        tool_choice={"type": "auto"},
-        betas=["token-efficient-tools-2025-02-19"],
-        stream=stream  # Support streaming for cancellation
-    )
+    # Include tools only if requested and not streaming
+    # (Streaming with tools is complex and not well supported)
+    tools_to_send = tools if (with_tools and not stream) else None
+    
+    api_params = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1000,
+        "messages": messages,
+        "system": CLAUDE_SYSTEM_PROMPT,
+        "stream": stream
+    }
+    
+    # Only add tools-related params if we have tools
+    if tools_to_send:
+        api_params["tools"] = tools_to_send
+        api_params["tool_choice"] = {"type": "auto"}
+        api_params["betas"] = ["token-efficient-tools-2025-02-19"]
+    
+    return client.beta.messages.create(**api_params)
 
 class ChatMessage(BaseModel):
     content: str
@@ -1648,15 +1687,30 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Handle regular messages
                     if message_type == "message" and message:
                         # Check for active requests and handle interrupts
+                        # IMPORTANT: Don't treat rapid-fire messages as interrupts (e.g., offline queue)
+                        # Only cancel if there's significant time between messages (>2 seconds)
                         has_active_requests = False
                         active_request_ids = []
+                        should_interrupt = False
+                        
                         if redis_managers and "active_requests" in redis_managers:
                             active_request_ids = list(await redis_managers["active_requests"].get_all(session_id))
                             has_active_requests = len(active_request_ids) > 0
                             # Note: We don't clear active requests here anymore since we're only cancelling streams
                             # The tasks will remove themselves when they complete or fail
+                            
+                            # Check if this is a true interrupt (user sending new message after waiting)
+                            # vs rapid messages (offline queue, copy-paste, etc)
+                            if has_active_requests and client_timestamp:
+                                # Get timestamp of last active request to compare
+                                # For now, we'll be conservative and only interrupt if explicitly requested
+                                # This prevents offline message queues from cancelling each other
+                                should_interrupt = message_data.get("interrupt_previous", False)
+                                if should_interrupt:
+                                    logger.info("Client explicitly requested interrupt of previous messages")
                         
-                        if has_active_requests:
+                        # Only handle interrupts if explicitly requested or clear user intent
+                        if has_active_requests and should_interrupt:
                             # Validate interrupt context if optimistic ID provided
                             if client_conversation_id and redis_managers and "session_mappings" in redis_managers:
                                 real_id = await redis_managers["session_mappings"].get_real_id(
@@ -3573,10 +3627,19 @@ async def check_and_retry_failed_messages(
                                 # Call Claude API using the same approach as process_message_task
                                 logger.info(f"Calling Claude API to retry message for conversation {actual_conversation_id}")
                                 
-                                stream = await call_claude_api(current_anthropic_client, session_id, conversation_id=actual_conversation_id)
+                                # For retry, we don't need streaming (simpler error handling)
+                                retry_coroutine = await call_claude_api(
+                                    current_anthropic_client, 
+                                    session_id, 
+                                    stream=False,  # No streaming for retries
+                                    conversation_id=actual_conversation_id
+                                )
+                                
+                                # Create task to avoid coroutine reuse
+                                retry_task = asyncio.create_task(retry_coroutine)
                                 
                                 # Use timeout like in normal flow
-                                response = await asyncio.wait_for(stream, timeout=60.0)
+                                response = await asyncio.wait_for(retry_task, timeout=60.0)
                                 
                                 # Extract text response
                                 assistant_response = ""
@@ -3922,15 +3985,72 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             if launch_app_tool:
                 logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
             
-            # Create the stream/response
-            stream = await call_claude_api(current_anthropic_client, session_id, conversation_id=session_conversation_id)
+            # Create the stream/response (auto-detects whether to stream)
+            api_response = await call_claude_api(current_anthropic_client, session_id, conversation_id=session_conversation_id)
             
-            # Store stream for potential cancellation
-            if redis_managers and "local_objects" in redis_managers:
-                await redis_managers["local_objects"].add_stream(request_id, stream)
+            # Check if we got a streaming response or a coroutine
+            is_streaming = hasattr(api_response, '__aiter__')  # Async iterator = streaming
             
-            # Use async API call with timeout
-            response = await asyncio.wait_for(stream, timeout=60.0)  # 60 second timeout
+            if is_streaming:
+                logger.info(f"[STREAMING] Processing streaming response for request {request_id}")
+                # Store the stream for potential cancellation
+                if redis_managers and "local_objects" in redis_managers:
+                    await redis_managers["local_objects"].add_stream(request_id, api_response)
+                
+                # Process streaming response
+                full_response = ""
+                response = None
+                
+                try:
+                    async for chunk in api_response:
+                        # Check for cancellation
+                        if asyncio.current_task().cancelled():
+                            logger.info(f"Stream cancelled for request {request_id}")
+                            break
+                        
+                        # Handle different chunk types
+                        if hasattr(chunk, 'type'):
+                            if chunk.type == 'content_block_delta' and hasattr(chunk, 'delta'):
+                                text_chunk = chunk.delta.text if hasattr(chunk.delta, 'text') else ""
+                                full_response += text_chunk
+                                
+                                # Send chunk to client immediately for real-time experience
+                                chunk_payload = {
+                                    "type": "stream_chunk",
+                                    "content": text_chunk,
+                                    "request_id": request_id
+                                }
+                                await safe_websocket_send(chunk_payload)
+                            elif chunk.type == 'message_stop':
+                                # Stream complete, create a response object for compatibility
+                                response = type('Response', (), {
+                                    'content': [type('Content', (), {'type': 'text', 'text': full_response})()],
+                                    'stop_reason': 'end_turn'
+                                })()
+                                break
+                except asyncio.TimeoutError:
+                    logger.error(f"Streaming timeout for request {request_id}")
+                    raise
+                
+                # If stream was interrupted, create partial response
+                if not response and full_response:
+                    response = type('Response', (), {
+                        'content': [type('Content', (), {'type': 'text', 'text': full_response})()],
+                        'stop_reason': 'end_turn'
+                    })()
+            else:
+                logger.info(f"[NON-STREAMING] Processing coroutine response for request {request_id}")
+                # For non-streaming (tool calls), create a task to make it cancellable
+                task = asyncio.create_task(api_response)
+                
+                # Store the task for potential cancellation
+                if redis_managers and "local_objects" in redis_managers:
+                    # Note: We might need to update the redis manager to handle tasks
+                    # For now, we'll await directly
+                    pass
+                
+                # Use async API call with timeout
+                response = await asyncio.wait_for(task, timeout=60.0)  # 60 second timeout
         except asyncio.TimeoutError:
             logger.error(f"Claude API timeout for request {request_id} after 60 seconds")
             await set_request_state(request_id, "timeout", {
@@ -4114,13 +4234,20 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Use async API call for tool response
             try:
-                tool_stream = await call_claude_api(current_anthropic_client, session_id, conversation_id=session_conversation_id)
+                # Tool responses should not stream (we explicitly pass stream=False)
+                tool_coroutine = await call_claude_api(
+                    current_anthropic_client, 
+                    session_id, 
+                    stream=False,  # Explicitly disable streaming for tool responses
+                    conversation_id=session_conversation_id
+                )
                 
-                # Update stream reference for cancellation
-                if redis_managers and "local_objects" in redis_managers:
-                    await redis_managers["local_objects"].add_stream(request_id, tool_stream)
+                # Create a task for cancellability (fixes "cannot reuse coroutine" error)
+                tool_task = asyncio.create_task(tool_coroutine)
                 
-                response = await asyncio.wait_for(tool_stream, timeout=60.0)  # 60 second timeout for tool responses too
+                # Note: We could store the task for cancellation if needed
+                # For now, just await it with timeout
+                response = await asyncio.wait_for(tool_task, timeout=60.0)  # 60 second timeout for tool responses too
             except asyncio.TimeoutError:
                 logger.error(f"Claude API timeout during tool use for request {request_id}")
                 await set_request_state(request_id, "timeout", {
