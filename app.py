@@ -4185,13 +4185,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.error("Stop reason is tool_use but no tool_use block found.")
                 # Send some error or break, as this is an unexpected state
                 error_payload = {
-                    "error": "ServerError", 
+                    "error": "ServerError",
                     "detail": "Tool use indicated but no tool found.",
                     "request_id": request_id,
                     "client_conversation_id": client_conversation_id
                 }
                 await safe_websocket_send(error_payload)
-                raise StopIteration("ToolBlockMissingError")
+                return
 
             logger.info(f"AI attempting to execute tool: {tool_block.name}")
             logger.info(f"Tool input parameters: {json.dumps(tool_block.input, indent=2)}")
