@@ -4323,25 +4323,32 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             await add_chat_message(session_id, {"role": "assistant", "content": content_list})
         
         # Extract and save assistant response to database
+        # Look for text in ANY content block, not just the first one
         assistant_response_text = ""
-        if response.content and response.content[0].type == 'text':
-            assistant_response_text = response.content[0].text
-            
-            # Check if request was cancelled
-            request_cancelled = False
-            if redis_managers and "request_messages" in redis_managers:
-                request_data = await redis_managers["request_messages"].get_messages(request_id)
-                if request_data and request_data.get("status") == "cancelled":
-                    request_cancelled = True
-                    logger.info(f"Request {request_id} was cancelled, will save bot message as cancelled")
-            
-            # Save assistant message to database (always save, but mark as cancelled if needed)
+        if response.content:
+            for block in response.content:
+                if block.type == 'text':
+                    assistant_response_text = block.text
+                    break
+
+        # Check if request was cancelled
+        request_cancelled = False
+        if redis_managers and "request_messages" in redis_managers:
+            request_data = await redis_managers["request_messages"].get_messages(request_id)
+            if request_data and request_data.get("status") == "cancelled":
+                request_cancelled = True
+                logger.info(f"Request {request_id} was cancelled, will save bot message as cancelled")
+
+        # Save assistant message to database if there's text content (always save, but mark as cancelled if needed)
+        saved_conversation_id = session_conversation_id
+        save_result = None
+        if assistant_response_text:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
             save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
             if save_result:
                 saved_conversation_id, bot_message_id = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
-                
+
                 # If cancelled, update the message to mark it as cancelled
                 if request_cancelled:
                     try:
@@ -4354,73 +4361,63 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         logger.error(f"Failed to mark bot message {bot_message_id} as cancelled: {e}")
             else:
                 logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
-                saved_conversation_id = session_conversation_id
-            
-            if not request_cancelled:
-                # Send structured response with request_id and conversation_id
-                response_payload = {
-                    "response": assistant_response_text,
-                    "request_id": request_id,
-                    "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
-                    "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
-                    "client_message_id": client_message_id,  # Echo back optimistic message ID
-                    "type": "response"  # Indicate this is a direct response (vs broadcast)
-                }
-                if await safe_websocket_send(response_payload):
-                    logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
-                else:
-                    logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
-            
-            # Clean up old request tracking data
-            # Do this after saving the bot response to ensure we have the latest message IDs
-            if save_result and redis_managers and "request_messages" in redis_managers:
-                try:
-                    # Get all non-cancelled bot message IDs
-                    bot_message_ids = get_non_cancelled_bot_message_ids(saved_conversation_id)
-                    
-                    # Clean up requests that have 2+ bot messages after them
-                    cleaned_count = await redis_managers["request_messages"].cleanup_old_requests(
-                        saved_conversation_id, bot_message_ids
-                    )
-                    
-                    if cleaned_count > 0:
-                        logger.info(f"Cleaned up {cleaned_count} old request tracking entries for conversation {saved_conversation_id}")
-                except Exception as e:
-                    logger.warning(f"Error cleaning up old request tracking: {e}")
-            
-            # Mark request as completed successfully
-            await set_request_state(request_id, "completed", {
-                "session_id": session_id,
-                "conversation_id": session_conversation_id,
-                "response_sent": True,
-                "completion_time": time.time()
-            })
-            
-            # Broadcast to other WebSocket sessions for the same conversation
-            # Use same format as regular response so clients can process it correctly
-            broadcast_payload = {
+        else:
+            logger.info(f"No text content in Claude's response for request {request_id}, only tool calls. This is normal for tool-only responses.")
+
+        if not request_cancelled:
+            # Send structured response with request_id and conversation_id
+            # Even if assistant_response_text is empty, we send the response to acknowledge completion
+            response_payload = {
                 "response": assistant_response_text,
-                "request_id": request_id,  # Include request_id so clients can track the message
-                "conversation_id": session_conversation_id,
-                "client_conversation_id": client_conversation_id,  # Include for client validation
-                "client_message_id": client_message_id,  # Include for completeness
-                "type": "broadcast"  # Keep type to indicate it's a broadcast
-            }
-            # Bot responses should go to ALL sessions - they originate from the server, not from any client session
-            await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
-            logger.info(f"Broadcasted assistant message to all sessions for conversation {session_conversation_id}")
-            
-            # Opportunistically clean up expired cache entries after successful response
-        elif response.content: 
-            logger.info("Claude's response did not end with a text block but was not a tool use. Sending a status or nothing.")
-        else: 
-            error_payload = {
-                "error": "EmptyResponse", 
-                "detail": "Assistant provided no content.",
                 "request_id": request_id,
-                "client_conversation_id": client_conversation_id
+                "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
+                "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
+                "client_message_id": client_message_id,  # Echo back optimistic message ID
+                "type": "response"  # Indicate this is a direct response (vs broadcast)
             }
-            await safe_websocket_send(error_payload)
+            if await safe_websocket_send(response_payload):
+                logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
+            else:
+                logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
+
+        # Clean up old request tracking data
+        # Do this after saving the bot response to ensure we have the latest message IDs
+        if save_result and redis_managers and "request_messages" in redis_managers:
+            try:
+                # Get all non-cancelled bot message IDs
+                bot_message_ids = get_non_cancelled_bot_message_ids(saved_conversation_id)
+
+                # Clean up requests that have 2+ bot messages after them
+                cleaned_count = await redis_managers["request_messages"].cleanup_old_requests(
+                    saved_conversation_id, bot_message_ids
+                )
+
+                if cleaned_count > 0:
+                    logger.info(f"Cleaned up {cleaned_count} old request tracking entries for conversation {saved_conversation_id}")
+            except Exception as e:
+                logger.warning(f"Error cleaning up old request tracking: {e}")
+
+        # Mark request as completed successfully
+        await set_request_state(request_id, "completed", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "response_sent": True,
+            "completion_time": time.time()
+        })
+
+        # Broadcast to other WebSocket sessions for the same conversation
+        # Use same format as regular response so clients can process it correctly
+        broadcast_payload = {
+            "response": assistant_response_text,
+            "request_id": request_id,  # Include request_id so clients can track the message
+            "conversation_id": session_conversation_id,
+            "client_conversation_id": client_conversation_id,  # Include for client validation
+            "client_message_id": client_message_id,  # Include for completeness
+            "type": "broadcast"  # Keep type to indicate it's a broadcast
+        }
+        # Bot responses should go to ALL sessions - they originate from the server, not from any client session
+        await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
+        logger.info(f"Broadcasted assistant message to all sessions for conversation {session_conversation_id}")
 
         return session_conversation_id
     
