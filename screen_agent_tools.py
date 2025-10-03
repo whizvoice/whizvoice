@@ -442,7 +442,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "whatsapp_send_message",
-        "description": "Send a message in WhatsApp. CRITICAL: You MUST have already: 1) Opened WhatsApp (launch_app), 2) Selected a chat (whatsapp_select_chat), 3) Drafted the message (whatsapp_draft_message), 4) Asked the user for confirmation like 'Should I send this message?' and received approval. NEVER use this tool without completing ALL these steps first. This tool will actually send the message in WhatsApp.",
+        "description": "Send a message in WhatsApp. IMPORTANT: You MUST have already: 1) Opened WhatsApp (launch_app), 2) Selected a chat (whatsapp_select_chat), 3) Drafted the message (whatsapp_draft_message), 4) Asked the user for confirmation (e.g. 'Should I send this message?'). If the user responds with approval phrases like 'yes', 'send it', 'go ahead', 'that looks good send it', 'send that', or similar affirmative responses, you should use this tool to send the message. This tool will click the send button in WhatsApp.",
         "input_schema": {
             "type": "object",
             "properties": {
