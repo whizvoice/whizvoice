@@ -182,23 +182,19 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
 async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True):
     """
     Standard method to call Claude API with consistent parameters.
-    
-    Hybrid approach:
-    - If stream=None (default): Auto-detect based on tools usage
-      - stream=True for regular chat (no tools) for better UX
-      - stream=False for tool calls (need complete response)
-    - If stream explicitly set: Use that value
-    
+
+    Always uses stream=False with tools enabled for reliability.
+    This ensures tools are always available when needed.
+
     Returns:
-    - If streaming: Returns async iterator for chunks
-    - If not streaming: Returns coroutine for complete response
-    
+    - Coroutine for complete response (non-streaming)
+
     conversation_id: Optional - if provided, will reload context from DB if empty
     with_tools: Whether to include tools in the request (default True)
     """
     # Get messages and log them for debugging
     messages = await get_chat_messages(session_id)
-    
+
     # SAFETY NET: If context is empty but we have a conversation_id, try to load from database
     # This handles edge cases where Redis session might have been cleared unexpectedly
     if len(messages) == 0 and conversation_id:
@@ -209,10 +205,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 .select("id, content, message_type, timestamp, cancelled")\
                 .eq("conversation_id", conversation_id)\
                 .order("timestamp", desc=False)
-            
+
             response = query.execute()
             db_messages = response.data if response.data else []
-            
+
             redis_messages = []
             for msg in db_messages:
                 if msg.get('cancelled'):
@@ -221,34 +217,17 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                     redis_messages.append({"role": "user", "content": msg['content']})
                 elif msg['message_type'] == 'ASSISTANT':
                     redis_messages.append({"role": "assistant", "content": msg['content']})
-            
+
             if redis_messages:
                 await set_chat_messages(session_id, redis_messages)
                 messages = redis_messages
                 logger.info(f"[CLAUDE_CONTEXT] Reloaded {len(redis_messages)} messages from database")
         except Exception as e:
             logger.error(f"[CLAUDE_CONTEXT] Failed to reload context from database: {e}")
-    
-    # Auto-detect streaming preference if not explicitly set
-    if stream is None:
-        # Check if we're likely to use tools based on message content
-        last_message = messages[-1] if messages else {"content": ""}
-        message_text = last_message.get('content', '').lower()
-        
-        # Keywords that suggest tool use
-        tool_keywords = [
-            'open', 'launch', 'start',  # App launching
-            'whatsapp', 'send message', 'message',  # WhatsApp
-            'task', 'asana', 'create', 'due',  # Asana
-            'date', 'today', 'tomorrow'  # Date tools
-        ]
-        
-        might_use_tools = any(keyword in message_text for keyword in tool_keywords) and with_tools
-        
-        # Use streaming for regular chat, non-streaming for tool operations
-        stream = not might_use_tools
-        logger.info(f"[CLAUDE_CONTEXT] Auto-detected stream={stream} (might_use_tools={might_use_tools})")
-    
+
+    # Always use non-streaming mode
+    stream = False
+
     # Log the conversation context being sent to Claude
     logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}, stream={stream}")
     for i, msg in enumerate(messages):
@@ -257,11 +236,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         # Truncate content for logging
         content_preview = content[:100] + "..." if len(content) > 100 else content
         logger.info(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
-    
-    # Include tools only if requested and not streaming
-    # (Streaming with tools is complex and not well supported)
-    tools_to_send = tools if (with_tools and not stream) else None
-    
+
+    # Always include tools when requested
+    tools_to_send = tools if with_tools else None
+
     api_params = {
         "model": "claude-sonnet-4-20250514",
         "max_tokens": 1000,
@@ -269,13 +247,13 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         "system": CLAUDE_SYSTEM_PROMPT,
         "stream": stream
     }
-    
+
     # Only add tools-related params if we have tools
     if tools_to_send:
         api_params["tools"] = tools_to_send
         api_params["tool_choice"] = {"type": "auto"}
         api_params["betas"] = ["token-efficient-tools-2025-02-19"]
-    
+
     return client.beta.messages.create(**api_params)
 
 class ChatMessage(BaseModel):
