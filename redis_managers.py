@@ -154,7 +154,9 @@ class SessionTimestampManager:
                 cursor, match="session_timestamp:*", count=100
             )
             for key in keys:
-                session_id = key.replace("session_timestamp:", "")
+                # Handle both bytes (old redis-py) and str (new redis-py)
+                key_str = key.decode() if isinstance(key, bytes) else key
+                session_id = key_str.replace("session_timestamp:", "")
                 value = await self.redis.get(key)
                 if value:
                     timestamps[session_id] = float(value)
@@ -346,7 +348,9 @@ class RequestMessageTracker:
                 if data:
                     parsed = json.loads(data)
                     if parsed.get("conversation_id") == conversation_id:
-                        request_id = key.decode().replace("request_messages:", "")
+                        # Handle both bytes (old redis-py) and str (new redis-py)
+                        key_str = key.decode() if isinstance(key, bytes) else key
+                        request_id = key_str.replace("request_messages:", "")
                         result[request_id] = parsed
             if cursor == 0:
                 break
