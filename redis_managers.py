@@ -74,7 +74,11 @@ class ChatSessionManager:
     async def delete(self, session_id: str):
         """Delete a session"""
         await self.redis.delete(f"chat_session:{session_id}")
-    
+
+    async def clear(self, session_id: str):
+        """Alias for delete() method - for backward compatibility"""
+        await self.delete(session_id)
+
     async def exists(self, session_id: str) -> bool:
         """Check if session exists"""
         return await self.redis.exists(f"chat_session:{session_id}")
