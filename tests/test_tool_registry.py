@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import sys
 import os
+import asyncio
 
 # Add the parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -137,18 +138,18 @@ class TestToolRegistry(unittest.TestCase):
         # Test public tool without user_id
         with patch('app.get_current_date') as mock_func:
             mock_func.return_value = '2024-03-15'
-            result = execute_tool("get_current_date", {}, user_id=None)
+            result = asyncio.run(execute_tool("get_current_date", {}, user_id=None))
             self.assertEqual(result, '2024-03-15')
             mock_func.assert_called_once_with(None)
         
         # Test protected tool without user_id (should return error)
-        result = execute_tool("get_asana_workspaces", {}, user_id=None)
+        result = asyncio.run(execute_tool("get_asana_workspaces", {}, user_id=None))
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
         self.assertIn("User authentication required", result["error"])
         
         # Test validation error
-        result = execute_tool("create_asana_task", {"due_date": "2024-03-15"}, self.test_user_id)
+        result = asyncio.run(execute_tool("create_asana_task", {"due_date": "2024-03-15"}, self.test_user_id))
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
         self.assertEqual(result["error"], "Task name is required.")

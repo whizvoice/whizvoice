@@ -19,6 +19,8 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
 from about_me_tool import about_me_tools, get_app_info
+from screen_agent_tools import screen_agent_tools, launch_app, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
+from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 from supabase_client import supabase
@@ -60,10 +62,19 @@ logger = logging.getLogger(__name__)
 stripe.api_key = STRIPE_SECRET_KEY
 
 # System prompt for Claude
-CLAUDE_SYSTEM_PROMPT = "You are Whiz Voice, a friendly AI chatbot that can help with anything. If the user mentions Asana or tasks, please use the tools provided to answer the user's question, using multiple tools at once if necessary. Also, you have a get_app_info tool that can be used to get information about the Whiz Voice app, including its features, functionality, and how to use it. Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."
+CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can help with anything. You have access to various tools that you MUST use when appropriate:
+
+1. When the user asks to open/launch an app (like WhatsApp, YouTube, Maps, etc.), you MUST use the 'launch_app' tool
+2. For WhatsApp messaging, use the WhatsApp-specific tools (whatsapp_select_chat, whatsapp_draft_message, whatsapp_send_message)
+3. For Asana/task management, use the Asana tools
+4. For app information, use the get_app_info tool
+
+IMPORTANT: When a user asks you to open an app, DO NOT just say you opened it - you MUST actually use the launch_app tool to open it on their device. Similarly, use the appropriate tools for all actions rather than just describing what you would do.
+
+Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."""
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools
+tools = asana_tools + about_me_tools + screen_agent_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -78,6 +89,9 @@ async def startup_event():
     # Start the background task for cleaning up stale sessions
     asyncio.create_task(cleanup_stale_sessions())
     logger.info(f"Started stale session cleanup task (checking every {CLEANUP_INTERVAL_SECONDS} seconds for sessions older than {SESSION_TIMEOUT_SECONDS} seconds)")
+    # Start the background task for cleaning up abandoned tool executions
+    asyncio.create_task(cleanup_abandoned_tool_executions())
+    logger.info("Started abandoned tool execution cleanup task")
 
 # Clean up on app shutdown
 @app.on_event("shutdown")
@@ -164,6 +178,83 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
         new_client = AsyncAnthropic(api_key=api_key)
         _anthropic_clients_cache[api_key] = new_client
         return new_client
+
+async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True):
+    """
+    Standard method to call Claude API with consistent parameters.
+
+    Always uses stream=False with tools enabled for reliability.
+    This ensures tools are always available when needed.
+
+    Returns:
+    - Coroutine for complete response (non-streaming)
+
+    conversation_id: Optional - if provided, will reload context from DB if empty
+    with_tools: Whether to include tools in the request (default True)
+    """
+    # Get messages and log them for debugging
+    messages = await get_chat_messages(session_id)
+
+    # SAFETY NET: If context is empty but we have a conversation_id, try to load from database
+    # This handles edge cases where Redis session might have been cleared unexpectedly
+    if len(messages) == 0 and conversation_id:
+        logger.warning(f"[CLAUDE_CONTEXT] Empty context for conversation {conversation_id}, attempting to reload from database")
+        try:
+            from supabase_client import supabase
+            query = supabase.table("messages")\
+                .select("id, content, message_type, timestamp, cancelled")\
+                .eq("conversation_id", conversation_id)\
+                .order("timestamp", desc=False)
+
+            response = query.execute()
+            db_messages = response.data if response.data else []
+
+            redis_messages = []
+            for msg in db_messages:
+                if msg.get('cancelled'):
+                    continue
+                if msg['message_type'] == 'USER':
+                    redis_messages.append({"role": "user", "content": msg['content']})
+                elif msg['message_type'] == 'ASSISTANT':
+                    redis_messages.append({"role": "assistant", "content": msg['content']})
+
+            if redis_messages:
+                await set_chat_messages(session_id, redis_messages)
+                messages = redis_messages
+                logger.info(f"[CLAUDE_CONTEXT] Reloaded {len(redis_messages)} messages from database")
+        except Exception as e:
+            logger.error(f"[CLAUDE_CONTEXT] Failed to reload context from database: {e}")
+
+    # Always use non-streaming mode
+    stream = False
+
+    # Log the conversation context being sent to Claude
+    logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}, stream={stream}")
+    for i, msg in enumerate(messages):
+        role = msg.get('role', 'unknown')
+        content = msg.get('content', '')
+        # Truncate content for logging
+        content_preview = content[:100] + "..." if len(content) > 100 else content
+        logger.info(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
+
+    # Always include tools when requested
+    tools_to_send = tools if with_tools else None
+
+    api_params = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1000,
+        "messages": messages,
+        "system": CLAUDE_SYSTEM_PROMPT,
+        "stream": stream
+    }
+
+    # Only add tools-related params if we have tools
+    if tools_to_send:
+        api_params["tools"] = tools_to_send
+        api_params["tool_choice"] = {"type": "auto"}
+        api_params["betas"] = ["token-efficient-tools-2025-02-19"]
+
+    return client.beta.messages.create(**api_params)
 
 class ChatMessage(BaseModel):
     content: str
@@ -542,11 +633,75 @@ TOOL_REGISTRY = {
         "requires_auth": False,
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
+    },
+    "launch_app": {
+        "function_name": "launch_app",
+        "requires_auth": False,
+        "is_async": True,  # Mark this as an async tool
+        "needs_websocket": True,  # This tool needs WebSocket context
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('app_name'), 
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "App name is required."} if not args.get('app_name') else None
+    },
+    "whatsapp_select_chat": {
+        "function_name": "whatsapp_select_chat",
+        "requires_auth": False,
+        "is_async": True,  # Mark this as an async tool
+        "needs_websocket": True,  # This tool needs WebSocket context
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('chat_name'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Chat name is required."} if not args.get('chat_name') else None
+    },
+    "whatsapp_send_message": {
+        "function_name": "whatsapp_send_message",
+        "requires_auth": False,
+        "is_async": True,  # Mark this as an async tool
+        "needs_websocket": True,  # This tool needs WebSocket context
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('message'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
+    },
+    "whatsapp_draft_message": {
+        "function_name": "whatsapp_draft_message",
+        "requires_auth": False,
+        "is_async": True,  # Mark this as an async tool
+        "needs_websocket": True,  # This tool needs WebSocket context
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('message'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id'),
+            args.get('previous_text')  # Add previous_text parameter
+        ),
+        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     }
 }
 
-def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
-    """Execute a tool using the tool registry"""
+async def execute_tool(tool_name, tool_args, user_id: Optional[str] = None, **context):
+    """Execute a tool using the tool registry
+    
+    Args:
+        tool_name: Name of the tool to execute
+        tool_args: Arguments for the tool
+        user_id: User ID if authenticated
+        **context: Additional context (websocket, tool_result_handler, conversation_id, etc.)
+    """
     logger.info(f"Executing tool: {tool_name} with args: {tool_args} for user_id: {user_id}")
     
     # Check if tool exists
@@ -577,7 +732,13 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
     
     # Get function arguments using the mapping
     try:
-        func_args = tool_config["args_mapping"](tool_args, user_id)
+        # Check if this tool needs WebSocket context
+        if tool_config.get("needs_websocket", False):
+            # Pass additional context to the args mapping
+            func_args = tool_config["args_mapping"](tool_args, user_id, **context)
+        else:
+            # Legacy tools don't need extra context
+            func_args = tool_config["args_mapping"](tool_args, user_id)
         
         # Get the actual function using globals() for easy mocking
         function_name = tool_config["function_name"]
@@ -585,9 +746,19 @@ def execute_tool(tool_name, tool_args, user_id: Optional[str] = None):
             func = globals()[function_name]
         else:
             raise ValueError(f"Function {function_name} not found")
-            
-        # Call the function with the mapped arguments
-        return func(*func_args)
+        
+        # Check if this is an async tool
+        if tool_config.get("is_async", False):
+            # For async tools, await the result
+            import asyncio
+            if asyncio.iscoroutinefunction(func):
+                return await func(*func_args)
+            else:
+                logger.error(f"Tool {tool_name} marked as async but function is not async")
+                raise ValueError(f"Tool {tool_name} misconfigured: marked as async but function is not async")
+        else:
+            # For sync tools, call normally
+            return func(*func_args)
         
     except Exception as e:
         logger.error(f"Error executing tool {tool_name}: {str(e)}")
@@ -867,7 +1038,7 @@ async def set_user_api_key(
             logger.info(f"  Clear result: {result}")
             
             # Return the updated token status immediately
-            from preferences import get_decrypted_preference_key
+            # get_decrypted_preference_key is already imported at the top
             claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
             asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
             
@@ -902,7 +1073,7 @@ async def set_user_api_key(
             logger.info(f"  Bool evaluation: {bool(retrieved_value)}")
             
             # Return the updated token status immediately
-            from preferences import get_decrypted_preference_key
+            # get_decrypted_preference_key is already imported at the top
             claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
             asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
             
@@ -1450,6 +1621,26 @@ async def websocket_endpoint(websocket: WebSocket):
                         message = message_text
                         logger.info("Received legacy plain text message")
                     
+                    # Handle tool result messages from Android
+                    if message_type == "tool_result":
+                        tool_request_id = message_data.get("request_id")
+                        tool_result = message_data.get("result", {})
+                        
+                        logger.info(f"Received tool_result for request_id: {tool_request_id}")
+                        logger.info(f"Tool result content: {json.dumps(tool_result)}")
+                        
+                        # Pass the result to the handler which will complete the waiting Future
+                        if tool_request_id:
+                            success = tool_result_handler.handle_tool_result(tool_request_id, tool_result)
+                            if success:
+                                logger.info(f"Successfully delivered tool result for request {tool_request_id}")
+                            else:
+                                logger.warning(f"No pending execution found for tool result {tool_request_id}")
+                        else:
+                            logger.warning("Received tool_result without request_id")
+                        
+                        continue  # Don't process as a regular message
+                    
                     # Handle cancellation requests
                     if message_type == "cancel":
                         cancel_request_id = message_data.get("cancel_request_id")
@@ -1474,16 +1665,30 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Handle regular messages
                     if message_type == "message" and message:
                         # Check for active requests and handle interrupts
+                        # IMPORTANT: Don't treat rapid-fire messages as interrupts (e.g., offline queue)
+                        # Only cancel if there's significant time between messages (>2 seconds)
                         has_active_requests = False
                         active_request_ids = []
+                        should_interrupt = False
+                        
                         if redis_managers and "active_requests" in redis_managers:
                             active_request_ids = list(await redis_managers["active_requests"].get_all(session_id))
                             has_active_requests = len(active_request_ids) > 0
-                            if has_active_requests:
-                                # Clear all active requests for this session in Redis
-                                await redis_managers["active_requests"].clear(session_id)
+                            # Note: We don't clear active requests here anymore since we're only cancelling streams
+                            # The tasks will remove themselves when they complete or fail
+                            
+                            # Check if this is a true interrupt (user sending new message after waiting)
+                            # vs rapid messages (offline queue, copy-paste, etc)
+                            if has_active_requests and client_timestamp:
+                                # Get timestamp of last active request to compare
+                                # For now, we'll be conservative and only interrupt if explicitly requested
+                                # This prevents offline message queues from cancelling each other
+                                should_interrupt = message_data.get("interrupt_previous", False)
+                                if should_interrupt:
+                                    logger.info("Client explicitly requested interrupt of previous messages")
                         
-                        if has_active_requests:
+                        # Only handle interrupts if explicitly requested or clear user intent
+                        if has_active_requests and should_interrupt:
                             # Validate interrupt context if optimistic ID provided
                             if client_conversation_id and redis_managers and "session_mappings" in redis_managers:
                                 real_id = await redis_managers["session_mappings"].get_real_id(
@@ -1497,10 +1702,23 @@ async def websocket_endpoint(websocket: WebSocket):
                                 logger.info(f"Validated interrupt: optimistic {client_conversation_id} → real {real_id}")
                             
                             logger.info(f"Interrupt detected. Cancelling {len(active_request_ids)} active requests")
-                            # Cancel all active requests for this session
+                            # Try to cancel Claude streams first, if that fails, cancel the task
+                            # The task will keep running until it checks for cancellation
+                            stream_cancelled_count = 0
+                            task_cancelled_count = 0
                             if redis_managers and "local_objects" in redis_managers:
-                                cancelled_count = await redis_managers["local_objects"].cancel_tasks_by_ids(list(active_request_ids))
-                                logger.info(f"Cancelled {cancelled_count} tasks")
+                                for req_id in active_request_ids:
+                                    # First try to cancel the stream (if Claude has been called)
+                                    if await redis_managers["local_objects"].cancel_stream(req_id):
+                                        stream_cancelled_count += 1
+                                        logger.debug(f"Cancelled Claude stream for request {req_id}")
+                                    else:
+                                        # No stream yet, cancel the task instead
+                                        # The task will continue until it checks cancellation status
+                                        if await redis_managers["local_objects"].cancel_task(req_id):
+                                            task_cancelled_count += 1
+                                            logger.debug(f"Marked task for cancellation: {req_id}")
+                                logger.info(f"Cancelled {stream_cancelled_count} Claude streams and marked {task_cancelled_count} tasks for cancellation")
                             
                             # Send interrupt notification with client context
                             interrupt_response = {
@@ -1515,6 +1733,40 @@ async def websocket_endpoint(websocket: WebSocket):
                         # We'll get the message IDs after the message is saved in process_message_task
                         # But we need to do detection after the task starts to get the correct message IDs
                         # So we'll move the detection into process_message_task itself
+                        
+                        # Define a callback to handle task completion
+                        async def handle_task_completion(task_future):
+                            try:
+                                updated_session_conversation_id = await task_future
+                                if updated_session_conversation_id is not None:
+                                    # Register WebSocket with new conversation ID if it changed
+                                    if updated_session_conversation_id != session_conversation_id:
+                                        # Use the safe update function that creates new listener before destroying old one
+                                        try:
+                                            await update_websocket_conversation(session_id, session_conversation_id, updated_session_conversation_id, websocket)
+                                        except Exception as e:
+                                            logger.error(f"Failed to update WebSocket conversation in task completion: {str(e)}")
+                                        
+                                        # Note: We can't update session_conversation_id here as it's in the outer scope
+                                        # This might need additional handling if conversation ID changes are critical
+                                        logger.info(f"Conversation ID changed from {session_conversation_id} to {updated_session_conversation_id}")
+                            except asyncio.CancelledError:
+                                # This shouldn't happen anymore since we only cancel streams, not tasks
+                                logger.warning(f"Unexpected task cancellation for request {request_id}")
+                                # Clean up tracking
+                                if request_id and redis_managers:
+                                    if "local_objects" in redis_managers:
+                                        await redis_managers["local_objects"].remove_task(request_id)
+                                    if "active_requests" in redis_managers:
+                                        await redis_managers["active_requests"].remove(session_id, request_id)
+                            except Exception as e:
+                                logger.error(f"Error in task completion handler: {e}")
+                                # Clean up tracking
+                                if request_id and redis_managers:
+                                    if "local_objects" in redis_managers:
+                                        await redis_managers["local_objects"].remove_task(request_id)
+                                    if "active_requests" in redis_managers:
+                                        await redis_managers["active_requests"].remove(session_id, request_id)
                         
                         # Create task for processing this message
                         task = asyncio.create_task(
@@ -1538,37 +1790,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             if "active_requests" in redis_managers:
                                 await redis_managers["active_requests"].add(session_id, request_id)
                         
-                        # Wait for task completion and update session_conversation_id
-                        try:
-                            updated_session_conversation_id = await task
-                            if updated_session_conversation_id is not None:
-                                # Register WebSocket with new conversation ID if it changed
-                                if updated_session_conversation_id != session_conversation_id:
-                                    # Use the safe update function that creates new listener before destroying old one
-                                    try:
-                                        await update_websocket_conversation(session_id, session_conversation_id, updated_session_conversation_id, websocket)
-                                    except Exception as e:
-                                        logger.error(f"Failed to update WebSocket conversation in main loop: {str(e)}")
-                                        # Continue with the current conversation ID if update fails
-                                
-                                session_conversation_id = updated_session_conversation_id
-                        except asyncio.CancelledError:
-                            logger.info(f"Request {request_id} was cancelled")
-                            # Clean up tracking
-                            if request_id and redis_managers:
-                                if "local_objects" in redis_managers:
-                                    await redis_managers["local_objects"].remove_task(request_id)
-                                if "active_requests" in redis_managers:
-                                    await redis_managers["active_requests"].remove(session_id, request_id)
-                        except Exception as e:
-                            logger.error(f"Error processing message: {e}")
-                            # Clean up tracking
-                            if request_id and redis_managers:
-                                if "local_objects" in redis_managers:
-                                    await redis_managers["local_objects"].remove_task(request_id)
-                                if "active_requests" in redis_managers:
-                                    await redis_managers["active_requests"].remove(session_id, request_id)
-                            raise
+                        # Create a separate task to handle completion without blocking
+                        # This allows the WebSocket loop to continue receiving messages
+                        asyncio.create_task(handle_task_completion(task))
+                        
+                        logger.info(f"Started background processing for request {request_id}, continuing to listen for messages")
 
                 except AuthenticationError as claude_auth_exc: # MODIFIED: Use AuthenticationError directly
                     logger.warning(f"Anthropic authentication error for user {user_id} in session {session_id}: {claude_auth_exc}")
@@ -2083,6 +2309,20 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
         # Clean up the evicted session
         await cleanup_session(eviction_candidate, user_id, evicted_conversation_id)
 
+async def cleanup_abandoned_tool_executions():
+    """Periodically clean up abandoned tool executions that were never completed"""
+    while True:
+        try:
+            await asyncio.sleep(60)  # Run every minute
+            tool_result_handler.cleanup_old_executions(max_age_seconds=60)
+            
+            pending_count = tool_result_handler.get_pending_count()
+            if pending_count > 0:
+                logger.debug(f"Currently {pending_count} tool executions pending")
+                
+        except Exception as e:
+            logger.error(f"Error in tool execution cleanup task: {str(e)}")
+
 async def cleanup_stale_sessions():
     """Periodically clean up stale sessions that haven't been active"""
     while True:
@@ -2283,9 +2523,12 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                 await redis_managers["request_messages"].mark_cancelled(request_id)
                 cancelled_requests.append(request_id)
                 
-                # Cancel the asyncio task if it exists
+                # Cancel only the Claude stream, not the entire task
+                # This preserves the message in Redis while stopping Claude generation
                 if redis_managers and "local_objects" in redis_managers:
-                    await redis_managers["local_objects"].cancel_task(request_id)
+                    stream_cancelled = await redis_managers["local_objects"].cancel_stream(request_id)
+                    if stream_cancelled:
+                        logger.info(f"Cancelled Claude stream for subset request {request_id}")
         
         if cancelled_requests:
             logger.info(f"Cancelled {len(cancelled_requests)} subset requests: {cancelled_requests}")
@@ -3270,6 +3513,210 @@ async def get_message_count(
         logger.error(f"Error getting message count for conversation {conversation_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get message count")
 
+@app.post("/conversations/{conversation_id}/check-retry")
+async def check_and_retry_failed_messages(
+    conversation_id: int,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Check for error messages and retry getting assistant response from Claude"""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    
+    try:
+        # Resolve the actual conversation ID (handles optimistic IDs)
+        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        if actual_conversation_id is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Get all messages for this conversation
+        result = supabase.table("messages")\
+            .select("*")\
+            .eq("conversation_id", actual_conversation_id)\
+            .order("timestamp", desc=False)\
+            .execute()
+        
+        if not result.data:
+            return {"retried": False, "reason": "No messages in conversation"}
+        
+        messages = result.data
+        
+        # Find the last message
+        if messages:
+            last_message = messages[-1]
+            
+            # Check if it's an error message (ASSISTANT type with JSON error content)
+            if last_message.get("message_type") == "ASSISTANT":
+                try:
+                    content = json.loads(last_message.get("content", ""))
+                    if content.get("type") == "error":
+                        error_code = content.get("code")
+                        request_id = content.get("request_id")
+                        
+                        logger.info(f"Found error message with code {error_code}, will retry getting assistant response")
+                        
+                        # Find the user message before this error
+                        user_message_content = None
+                        for i in range(len(messages) - 2, -1, -1):
+                            if messages[i].get("message_type") == "USER":
+                                user_message_content = messages[i].get("content")
+                                break
+                        
+                        if user_message_content:
+                            # Delete the error message immediately to prevent duplicate retries
+                            logger.info(f"Deleting error message {last_message.get('id')} before retry")
+                            supabase.table("messages")\
+                                .delete()\
+                                .eq("id", last_message.get("id"))\
+                                .execute()
+                            
+                            # Create a temporary session ID for this retry
+                            session_id = f"retry_{actual_conversation_id}_{int(time.time())}"
+                            
+                            # Build conversation history in chat session (exclude the error message)
+                            chat_messages = []
+                            for msg in messages[:-1]:  # Exclude the last error message
+                                if msg.get("message_type") == "USER":
+                                    chat_messages.append({"role": "user", "content": msg.get("content")})
+                                elif msg.get("message_type") == "ASSISTANT":
+                                    # Skip if it's an error message
+                                    try:
+                                        msg_content = json.loads(msg.get("content", ""))
+                                        if msg_content.get("type") != "error":
+                                            chat_messages.append({"role": "assistant", "content": msg.get("content")})
+                                    except:
+                                        # Regular assistant message
+                                        chat_messages.append({"role": "assistant", "content": msg.get("content")})
+                            
+                            # Set up the chat session for retry
+                            await set_chat_messages(session_id, chat_messages)
+                            
+                            # Get the anthropic client using the standard method
+                            current_anthropic_client = await get_anthropic_client(user_id)
+                            if not current_anthropic_client:
+                                logger.warning(f"No Claude API key configured for user {user_id}")
+                                return {
+                                    "retried": False,
+                                    "reason": "No Claude API key configured",
+                                    "error_code": "CLAUDE_API_KEY_MISSING"
+                                }
+                            
+                            try:
+                                # Call Claude API using the same approach as process_message_task
+                                logger.info(f"Calling Claude API to retry message for conversation {actual_conversation_id}")
+                                
+                                # For retry, we don't need streaming (simpler error handling)
+                                retry_coroutine = await call_claude_api(
+                                    current_anthropic_client, 
+                                    session_id, 
+                                    stream=False,  # No streaming for retries
+                                    conversation_id=actual_conversation_id
+                                )
+                                
+                                # Create task to avoid coroutine reuse
+                                retry_task = asyncio.create_task(retry_coroutine)
+                                
+                                # Use timeout like in normal flow
+                                response = await asyncio.wait_for(retry_task, timeout=60.0)
+                                
+                                # Extract text response
+                                assistant_response = ""
+                                if response.content and response.content[0].type == 'text':
+                                    assistant_response = response.content[0].text
+                                
+                                if assistant_response:
+                                    # Save the new assistant response (error message already deleted)
+                                    logger.info(f"Saving new assistant response for conversation {actual_conversation_id}")
+                                    save_result = save_message_to_db(
+                                        user_id=user_id,
+                                        conversation_id=actual_conversation_id,
+                                        content=assistant_response,
+                                        message_type="ASSISTANT",
+                                        request_id=request_id
+                                    )
+                                    
+                                    if save_result:
+                                        saved_conversation_id, message_id = save_result
+                                        logger.info(f"Successfully saved assistant response as message {message_id}")
+                                        
+                                        return {
+                                            "retried": True,
+                                            "reason": "Successfully got assistant response",
+                                            "response": assistant_response,
+                                            "message_id": message_id
+                                        }
+                                    else:
+                                        logger.error(f"Failed to save assistant response to database")
+                                        return {
+                                            "retried": False,
+                                            "reason": "Failed to save response to database"
+                                        }
+                                else:
+                                    logger.warning(f"Got empty response from Claude")
+                                    return {
+                                        "retried": False,
+                                        "reason": "Got empty response from Claude"
+                                    }
+                                    
+                            except AuthenticationError as auth_error:
+                                logger.warning(f"Claude authentication failed during retry: {str(auth_error)}")
+                                # Re-save the error message since we deleted it
+                                error_content = json.dumps({
+                                    "type": "error",
+                                    "code": "CLAUDE_AUTHENTICATION_ERROR",
+                                    "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
+                                    "request_id": request_id
+                                })
+                                save_message_to_db(
+                                    user_id=user_id,
+                                    conversation_id=actual_conversation_id,
+                                    content=error_content,
+                                    message_type="ASSISTANT",
+                                    request_id=request_id
+                                )
+                                return {
+                                    "retried": False,
+                                    "reason": "Claude authentication still failing",
+                                    "error": str(auth_error)
+                                }
+                            except Exception as api_error:
+                                logger.error(f"Claude API error during retry: {str(api_error)}")
+                                # Re-save error message with new error (since we deleted the old one)
+                                new_error_content = json.dumps({
+                                    "type": "error",
+                                    "code": "CLAUDE_API_ERROR",
+                                    "message": f"Claude API error: {str(api_error)}",
+                                    "request_id": request_id
+                                })
+                                
+                                save_message_to_db(
+                                    user_id=user_id,
+                                    conversation_id=actual_conversation_id,
+                                    content=new_error_content,
+                                    message_type="ASSISTANT",
+                                    request_id=request_id
+                                )
+                                
+                                return {
+                                    "retried": False,
+                                    "reason": "Claude API error",
+                                    "error": str(api_error)
+                                }
+                        else:
+                            return {"retried": False, "reason": "No user message found to retry"}
+                            
+                except json.JSONDecodeError:
+                    # Not a JSON error message, it's a regular assistant message
+                    pass
+        
+        return {"retried": False, "reason": "No error message found"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking for retry in conversation {conversation_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to check for retry")
+
 @app.get("/requests/{request_id}/state")
 async def get_request_state_endpoint(
     request_id: str,
@@ -3297,10 +3744,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
     async def safe_websocket_send(payload):
         """Send payload to WebSocket, handling disconnection gracefully"""
         try:
-            await websocket.send_text(json.dumps(payload))
+            message_json = json.dumps(payload)
+            logger.debug(f"Attempting to send WebSocket message (type: {payload.get('type', 'unknown')}, size: {len(message_json)} bytes)")
+            await websocket.send_text(message_json)
+            logger.debug(f"Successfully sent WebSocket message of type: {payload.get('type', 'unknown')}")
             return True
         except Exception as e:
-            logger.warning(f"WebSocket send failed for session {session_id}: {str(e)} - Response will be available on reconnect")
+            logger.warning(f"WebSocket send failed for session {session_id}: {str(e)} - Message type: {payload.get('type', 'unknown')}")
             return False
     
     try:
@@ -3314,6 +3764,45 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         })
         
         messages = await get_chat_messages(session_id)
+        
+        # If we have an existing conversation but no messages in Redis, populate from database
+        # This handles reconnection scenarios where multiple messages were sent while offline
+        # IMPORTANT: Also check for optimistic conversations (negative IDs) that may have messages in DB
+        if len(messages) == 0 and session_conversation_id:
+            logger.info(f"Redis session empty for conversation {session_conversation_id}, loading history from database")
+            try:
+                # Get all messages from database for this conversation
+                query = supabase.table("messages")\
+                    .select("id, content, message_type, timestamp, request_id, cancelled")\
+                    .eq("conversation_id", session_conversation_id)\
+                    .order("timestamp", desc=False)
+                
+                response = query.execute()
+                db_messages = response.data if response.data else []
+                
+                # Build Redis session from database messages
+                redis_messages = []
+                for msg in db_messages:
+                    # Skip cancelled messages
+                    if msg.get('cancelled'):
+                        continue
+                    
+                    # Format for Redis (same as Claude API format)
+                    if msg['message_type'] == 'USER':
+                        redis_messages.append({"role": "user", "content": msg['content']})
+                    elif msg['message_type'] == 'ASSISTANT':
+                        redis_messages.append({"role": "assistant", "content": msg['content']})
+                
+                # Populate Redis session with conversation history
+                if redis_messages:
+                    await set_chat_messages(session_id, redis_messages)
+                    messages = redis_messages
+                    logger.info(f"Populated Redis session with {len(redis_messages)} messages from database")
+                
+            except Exception as e:
+                logger.error(f"Error loading conversation history from database: {str(e)}")
+                # Continue with empty context if database load fails
+        
         logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(messages)}")
         
         # Save user message to database and update session_conversation_id
@@ -3371,6 +3860,52 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Use real conversation ID for rest of processing
         session_conversation_id = real_conversation_id
         
+        # Add message to Redis IMMEDIATELY after getting real conversation ID
+        # Use asyncio.shield to protect this from cancellation - MUST complete even if task is cancelled
+        try:
+            async with chat_sessions_lock:
+                # CRITICAL: For new conversations, check if we need to load existing messages first
+                # This handles the case where multiple messages were queued offline
+                current_messages = await get_chat_messages(session_id)
+                if len(current_messages) == 0 and session_conversation_id:
+                    # Try to load any existing messages from the database
+                    logger.info(f"Loading existing messages for conversation {session_conversation_id} before adding new message")
+                    try:
+                        query = supabase.table("messages")\
+                            .select("id, content, message_type, timestamp, request_id, cancelled")\
+                            .eq("conversation_id", session_conversation_id)\
+                            .order("timestamp", desc=False)
+                        
+                        response = query.execute()
+                        db_messages = response.data if response.data else []
+                        
+                        # Build Redis session from database messages (excluding current message)
+                        redis_messages = []
+                        for msg in db_messages:
+                            # Skip cancelled messages and the current message (by request_id)
+                            if msg.get('cancelled') or msg.get('request_id') == request_id:
+                                continue
+                            
+                            # Format for Redis (same as Claude API format)
+                            if msg['message_type'] == 'USER':
+                                redis_messages.append({"role": "user", "content": msg['content']})
+                            elif msg['message_type'] == 'ASSISTANT':
+                                redis_messages.append({"role": "assistant", "content": msg['content']})
+                        
+                        if redis_messages:
+                            await set_chat_messages(session_id, redis_messages)
+                            logger.info(f"Pre-loaded {len(redis_messages)} existing messages into Redis session")
+                    except Exception as e:
+                        logger.error(f"Failed to pre-load existing messages: {e}")
+                        # Continue without context rather than fail
+                
+                # Now add the current message
+                await asyncio.shield(add_chat_message(session_id, {"role": "user", "content": message}))
+            logger.info(f"Added current message to Redis session for conversation {session_conversation_id}")
+        except Exception as e:
+            logger.error(f"Failed to add message to Redis: {e}")
+            # Continue anyway - better to process without full context than to fail
+        
         # Track which message IDs this request is responding to
         user_message_ids = get_user_message_ids_since_last_bot(session_conversation_id)
         if redis_managers and "request_messages" in redis_managers:
@@ -3386,8 +3921,16 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         if cancelled_requests:
             logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {session_conversation_id}")
 
-        async with chat_sessions_lock:
-            await add_chat_message(session_id, {"role": "user", "content": message})
+        # Check if this task has been marked for cancellation AFTER critical housekeeping
+        # All important work (DB save, Redis add) is done, safe to exit if cancelled
+        if asyncio.current_task().cancelled():
+            logger.info(f"Task for request {request_id} was cancelled after housekeeping")
+            await set_request_state(request_id, "cancelled", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "cancelled_before_api": True
+            })
+            return session_conversation_id
 
         current_anthropic_client = await get_anthropic_client(user_id)
         if not current_anthropic_client:
@@ -3403,13 +3946,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
             return session_conversation_id
 
-        # Check for cancellation before making API call
-        if asyncio.current_task().cancelled():
-            await set_request_state(request_id, "cancelled", {
-                "session_id": session_id,
-                "conversation_id": session_conversation_id
-            })
-            return session_conversation_id
 
         # Update state to processing
         await set_request_state(request_id, "processing", {
@@ -3419,23 +3955,85 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         })
 
         try:
-            # Create the stream/response
-            stream = current_anthropic_client.beta.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=1000,
-                messages=await get_chat_messages(session_id),
-                system=CLAUDE_SYSTEM_PROMPT,
-                tools=tools,
-                tool_choice={"type": "auto"},
-                betas=["token-efficient-tools-2025-02-19"]
-            )
+            # Log the tools being sent to Claude for debugging
+            logger.info(f"Sending {len(tools)} tools to Claude")
+            logger.debug(f"Tool names: {[tool.get('name') for tool in tools]}")
+            # Log specifically the launch_app tool structure
+            launch_app_tool = next((t for t in tools if t.get('name') == 'launch_app'), None)
+            if launch_app_tool:
+                logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
             
-            # Store stream for potential cancellation
-            if redis_managers and "local_objects" in redis_managers:
-                await redis_managers["local_objects"].add_stream(request_id, stream)
+            # Create the stream/response (auto-detects whether to stream)
+            # call_claude_api returns a coroutine that when awaited gives us either:
+            # - AsyncStream (when stream=True)
+            # - Message response (when stream=False)
+            api_coroutine = await call_claude_api(current_anthropic_client, session_id, conversation_id=session_conversation_id)
             
-            # Use async API call with timeout
-            response = await asyncio.wait_for(stream, timeout=60.0)  # 60 second timeout
+            # The coroutine needs to be awaited to get the actual response
+            # Create a task so it can be cancelled if needed
+            api_task = asyncio.create_task(api_coroutine)
+            
+            # Await the task with timeout to get the actual stream or response
+            api_result = await asyncio.wait_for(api_task, timeout=60.0)
+            
+            # Debug logging to understand what we got
+            logger.info(f"API result type after awaiting: {type(api_result).__name__}, module: {getattr(type(api_result), '__module__', 'unknown')}")
+            
+            # Now check if we got a streaming response or a regular message
+            # AsyncStream is from anthropic module and is for streaming
+            # BetaMessage is for non-streaming responses (including tool calls)
+            is_streaming = (
+                type(api_result).__name__ == 'AsyncStream' or
+                'AsyncStream' in str(type(api_result)) or
+                'AsyncMessageStream' in str(type(api_result))
+            ) and type(api_result).__name__ != 'BetaMessage'
+            
+            if is_streaming:
+                logger.info(f"[STREAMING] Processing streaming response for request {request_id}")
+                # Store the stream for potential cancellation
+                if redis_managers and "local_objects" in redis_managers:
+                    await redis_managers["local_objects"].add_stream(request_id, api_result)
+                
+                # Process streaming response
+                full_response = ""
+                response = None
+                
+                try:
+                    async for chunk in api_result:
+                        # Check for cancellation
+                        if asyncio.current_task().cancelled():
+                            logger.info(f"Stream cancelled for request {request_id}")
+                            break
+                        
+                        # Handle different chunk types
+                        if hasattr(chunk, 'type'):
+                            if chunk.type == 'content_block_delta' and hasattr(chunk, 'delta'):
+                                text_chunk = chunk.delta.text if hasattr(chunk.delta, 'text') else ""
+                                full_response += text_chunk
+                                
+                                # Don't send chunks to client - streaming is only for cancellation support
+                                # The complete response will be sent once streaming finishes
+                            elif chunk.type == 'message_stop':
+                                # Stream complete, create a response object for compatibility
+                                response = type('Response', (), {
+                                    'content': [type('Content', (), {'type': 'text', 'text': full_response})()],
+                                    'stop_reason': 'end_turn'
+                                })()
+                                break
+                except asyncio.TimeoutError:
+                    logger.error(f"Streaming timeout for request {request_id}")
+                    raise
+                
+                # If stream was interrupted, create partial response
+                if not response and full_response:
+                    response = type('Response', (), {
+                        'content': [type('Content', (), {'type': 'text', 'text': full_response})()],
+                        'stop_reason': 'end_turn'
+                    })()
+            else:
+                logger.info(f"[NON-STREAMING] Processing message response for request {request_id}")
+                # For non-streaming (tool calls), we already have the response from awaiting the coroutine
+                response = api_result
         except asyncio.TimeoutError:
             logger.error(f"Claude API timeout for request {request_id} after 60 seconds")
             await set_request_state(request_id, "timeout", {
@@ -3454,8 +4052,77 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
+        except AuthenticationError as auth_error:
+            # Handle Claude API authentication errors (401 Unauthorized)
+            logger.warning(f"Claude API authentication error for request {request_id}: {str(auth_error)}")
+            await set_request_state(request_id, "auth_failed", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id,
+                "error": str(auth_error)
+            })
+            
+            # Create error payload
+            error_payload = {
+                "type": "error",
+                "code": "CLAUDE_AUTHENTICATION_ERROR",
+                "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
+                "request_id": request_id,
+                "conversation_id": session_conversation_id,
+                "client_conversation_id": client_conversation_id
+            }
+            
+            # Save error as ASSISTANT message to database (persists even if WebSocket fails)
+            error_json_content = json.dumps(error_payload)
+            logger.info(f"Saving authentication error as ASSISTANT message for conversation {session_conversation_id}")
+            save_result = save_message_to_db(
+                user_id=user_id,
+                conversation_id=session_conversation_id,
+                content=error_json_content,
+                message_type="ASSISTANT",
+                request_id=request_id
+            )
+            if save_result:
+                saved_conversation_id, error_message_id = save_result
+                logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
+            else:
+                logger.error(f"Failed to save authentication error message to database")
+            
+            # Try to send via WebSocket (may fail, but error is persisted in DB)
+            await safe_websocket_send(error_payload)
+            
+            # Don't raise - let the client handle the error gracefully
+            return session_conversation_id
+        except asyncio.CancelledError:
+            # Handle explicit task cancellation
+            logger.info(f"Task for request {request_id} was cancelled")
+            await set_request_state(request_id, "cancelled", {
+                "session_id": session_id,
+                "conversation_id": session_conversation_id
+            })
+            raise
         except Exception as api_error:
+            # Check if this is a stream cancellation (from interrupt or subset detection)
+            if "stream" in str(api_error).lower() or "cancelled" in str(api_error).lower() or "closed" in str(api_error).lower():
+                logger.info(f"Claude stream cancelled for request {request_id} (likely due to interrupt)")
+                await set_request_state(request_id, "interrupted", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "reason": "Stream cancelled by newer request"
+                })
+                
+                # Clean up the stream tracking
+                if redis_managers and "local_objects" in redis_managers:
+                    await redis_managers["local_objects"].remove_stream(request_id)
+                
+                # Don't send error to client - they already got an interrupt notification
+                return session_conversation_id
+            
             logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
+            logger.error(f"Error type: {type(api_error).__name__}")
+            logger.error(f"Error details: {repr(api_error)}")
+            # Log if this is a tool-related error
+            if "tool" in str(api_error).lower():
+                logger.error(f"TOOL ERROR DETECTED: This appears to be a tool-related error")
             await set_request_state(request_id, "failed", {
                 "session_id": session_id,
                 "conversation_id": session_conversation_id,
@@ -3471,6 +4138,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             })
             return session_conversation_id
 
+        # Log the initial response to see if Claude is trying to use tools
+        logger.info(f"Claude response stop_reason: {response.stop_reason}")
+        if hasattr(response, 'content'):
+            logger.info(f"Claude response content: {[{'type': getattr(block, 'type', 'unknown'), 'text': getattr(block, 'text', None)[:100] if hasattr(block, 'text') else None} for block in response.content]}")
+        
         # Handle tool calls
         while response.stop_reason == 'tool_use':
             # Check for cancellation before each tool iteration
@@ -3482,21 +4154,36 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 })
                 return session_conversation_id
             
+            # Log all content blocks from AI response
+            logger.info(f"AI response stop_reason: {response.stop_reason}")
+            logger.info(f"AI response content blocks: {[{'type': block.type, 'name': getattr(block, 'name', None)} for block in response.content]}")
+            
             tool_block = next((block for block in response.content if block.type == 'tool_use'), None)
             if not tool_block:
                 logger.error("Stop reason is tool_use but no tool_use block found.")
                 # Send some error or break, as this is an unexpected state
                 error_payload = {
-                    "error": "ServerError", 
+                    "error": "ServerError",
                     "detail": "Tool use indicated but no tool found.",
                     "request_id": request_id,
                     "client_conversation_id": client_conversation_id
                 }
                 await safe_websocket_send(error_payload)
-                raise StopIteration("ToolBlockMissingError")
+                return
 
+            logger.info(f"AI attempting to execute tool: {tool_block.name}")
+            logger.info(f"Tool input parameters: {json.dumps(tool_block.input, indent=2)}")
             logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
-            tool_execution_result = execute_tool(tool_block.name, tool_block.input, user_id)
+            
+            # Pass WebSocket context for tools that need it (like launch_app)
+            tool_execution_result = await execute_tool(
+                tool_block.name, 
+                tool_block.input, 
+                user_id,
+                websocket=websocket,
+                tool_result_handler=tool_result_handler,
+                conversation_id=session_conversation_id
+            )
             
             # Check if the tool_execution_result is our specific Asana auth error
             if isinstance(tool_execution_result, dict) and \
@@ -3508,8 +4195,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 tool_execution_result["client_conversation_id"] = client_conversation_id
                 await safe_websocket_send(tool_execution_result)
                 raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
+            
+            # The launch_app tool now handles WebSocket communication directly,
+            # so we don't need special handling here anymore
 
-            # If not the specific Asana auth error, proceed as before with Claude:
+            # If not the specific Asana auth error or WebSocket action, proceed as before with Claude:
             async with chat_sessions_lock:
                 # Convert tool_block to a serializable dict
                 tool_block_dict = {
@@ -3527,21 +4217,20 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Use async API call for tool response
             try:
-                tool_stream = current_anthropic_client.beta.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=1000,
-                    messages=await get_chat_messages(session_id),
-                    system=CLAUDE_SYSTEM_PROMPT,
-                    tools=tools,
-                    tool_choice={"type": "auto"},
-                    betas=["token-efficient-tools-2025-02-19"]
+                # Tool responses should not stream (we explicitly pass stream=False)
+                tool_coroutine = await call_claude_api(
+                    current_anthropic_client, 
+                    session_id, 
+                    stream=False,  # Explicitly disable streaming for tool responses
+                    conversation_id=session_conversation_id
                 )
                 
-                # Update stream reference for cancellation
-                if redis_managers and "local_objects" in redis_managers:
-                    await redis_managers["local_objects"].add_stream(request_id, tool_stream)
+                # Create a task for cancellability (fixes "cannot reuse coroutine" error)
+                tool_task = asyncio.create_task(tool_coroutine)
                 
-                response = await asyncio.wait_for(tool_stream, timeout=60.0)  # 60 second timeout for tool responses too
+                # Note: We could store the task for cancellation if needed
+                # For now, just await it with timeout
+                response = await asyncio.wait_for(tool_task, timeout=60.0)  # 60 second timeout for tool responses too
             except asyncio.TimeoutError:
                 logger.error(f"Claude API timeout during tool use for request {request_id}")
                 await set_request_state(request_id, "timeout", {
@@ -3550,6 +4239,50 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": "Claude API timed out during tool use"
                 })
                 raise
+            except AuthenticationError as auth_error:
+                # Handle Claude API authentication errors during tool use
+                logger.warning(f"Claude API authentication error during tool use for request {request_id}: {str(auth_error)}")
+                await set_request_state(request_id, "auth_failed", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "error": str(auth_error)
+                })
+                
+                # Create error payload
+                error_payload = {
+                    "type": "error",
+                    "code": "CLAUDE_AUTHENTICATION_ERROR",
+                    "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
+                    "request_id": request_id,
+                    "conversation_id": session_conversation_id,
+                    "client_conversation_id": client_conversation_id
+                }
+                
+                # Save error as ASSISTANT message to database (persists even if WebSocket fails)
+                error_json_content = json.dumps(error_payload)
+                logger.info(f"Saving authentication error (during tool use) as ASSISTANT message for conversation {session_conversation_id}")
+                save_result = save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content=error_json_content,
+                    message_type="ASSISTANT",
+                    request_id=request_id
+                )
+                if save_result:
+                    saved_conversation_id, error_message_id = save_result
+                    logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
+                else:
+                    logger.error(f"Failed to save authentication error message to database")
+                
+                # Try to send via WebSocket (may fail, but error is persisted in DB)
+                await safe_websocket_send(error_payload)
+                
+                # Don't raise - let the client handle the error gracefully
+                return session_conversation_id
+        
+        # Log final response details
+        logger.info(f"Final AI response - stop_reason: {response.stop_reason}")
+        logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': getattr(block, 'text', '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
         
         # Add assistant final response to session history (if not an intercepted error)
         async with chat_sessions_lock:
@@ -3568,25 +4301,32 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             await add_chat_message(session_id, {"role": "assistant", "content": content_list})
         
         # Extract and save assistant response to database
+        # Look for text in ANY content block, not just the first one
         assistant_response_text = ""
-        if response.content and response.content[0].type == 'text':
-            assistant_response_text = response.content[0].text
-            
-            # Check if request was cancelled
-            request_cancelled = False
-            if redis_managers and "request_messages" in redis_managers:
-                request_data = await redis_managers["request_messages"].get_messages(request_id)
-                if request_data and request_data.get("status") == "cancelled":
-                    request_cancelled = True
-                    logger.info(f"Request {request_id} was cancelled, will save bot message as cancelled")
-            
-            # Save assistant message to database (always save, but mark as cancelled if needed)
+        if response.content:
+            for block in response.content:
+                if block.type == 'text':
+                    assistant_response_text = block.text
+                    break
+
+        # Check if request was cancelled
+        request_cancelled = False
+        if redis_managers and "request_messages" in redis_managers:
+            request_data = await redis_managers["request_messages"].get_messages(request_id)
+            if request_data and request_data.get("status") == "cancelled":
+                request_cancelled = True
+                logger.info(f"Request {request_id} was cancelled, will save bot message as cancelled")
+
+        # Save assistant message to database if there's text content (always save, but mark as cancelled if needed)
+        saved_conversation_id = session_conversation_id
+        save_result = None
+        if assistant_response_text:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
             save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
             if save_result:
                 saved_conversation_id, bot_message_id = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
-                
+
                 # If cancelled, update the message to mark it as cancelled
                 if request_cancelled:
                     try:
@@ -3599,85 +4339,77 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         logger.error(f"Failed to mark bot message {bot_message_id} as cancelled: {e}")
             else:
                 logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
-                saved_conversation_id = session_conversation_id
-            
-            if not request_cancelled:
-                # Send structured response with request_id and conversation_id
-                response_payload = {
-                    "response": assistant_response_text,
-                    "request_id": request_id,
-                    "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
-                    "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
-                    "client_message_id": client_message_id,  # Echo back optimistic message ID
-                    "type": "response"  # Indicate this is a direct response (vs broadcast)
-                }
-                if await safe_websocket_send(response_payload):
-                    logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
-                else:
-                    logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
-            
-            # Clean up old request tracking data
-            # Do this after saving the bot response to ensure we have the latest message IDs
-            if save_result and redis_managers and "request_messages" in redis_managers:
-                try:
-                    # Get all non-cancelled bot message IDs
-                    bot_message_ids = get_non_cancelled_bot_message_ids(saved_conversation_id)
-                    
-                    # Clean up requests that have 2+ bot messages after them
-                    cleaned_count = await redis_managers["request_messages"].cleanup_old_requests(
-                        saved_conversation_id, bot_message_ids
-                    )
-                    
-                    if cleaned_count > 0:
-                        logger.info(f"Cleaned up {cleaned_count} old request tracking entries for conversation {saved_conversation_id}")
-                except Exception as e:
-                    logger.warning(f"Error cleaning up old request tracking: {e}")
-            
-            # Mark request as completed successfully
-            await set_request_state(request_id, "completed", {
-                "session_id": session_id,
-                "conversation_id": session_conversation_id,
-                "response_sent": True,
-                "completion_time": time.time()
-            })
-            
-            # Broadcast to other WebSocket sessions for the same conversation
-            # Use same format as regular response so clients can process it correctly
-            broadcast_payload = {
+        else:
+            logger.info(f"No text content in Claude's response for request {request_id}, only tool calls. This is normal for tool-only responses.")
+
+        if not request_cancelled:
+            # Send structured response with request_id and conversation_id
+            # Even if assistant_response_text is empty, we send the response to acknowledge completion
+            response_payload = {
                 "response": assistant_response_text,
-                "request_id": request_id,  # Include request_id so clients can track the message
-                "conversation_id": session_conversation_id,
-                "client_conversation_id": client_conversation_id,  # Include for client validation
-                "client_message_id": client_message_id,  # Include for completeness
-                "type": "broadcast"  # Keep type to indicate it's a broadcast
-            }
-            # Bot responses should go to ALL sessions - they originate from the server, not from any client session
-            await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
-            logger.info(f"Broadcasted assistant message to all sessions for conversation {session_conversation_id}")
-            
-            # Opportunistically clean up expired cache entries after successful response
-        elif response.content: 
-            logger.info("Claude's response did not end with a text block but was not a tool use. Sending a status or nothing.")
-        else: 
-            error_payload = {
-                "error": "EmptyResponse", 
-                "detail": "Assistant provided no content.",
                 "request_id": request_id,
-                "client_conversation_id": client_conversation_id
+                "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
+                "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
+                "client_message_id": client_message_id,  # Echo back optimistic message ID
+                "type": "response"  # Indicate this is a direct response (vs broadcast)
             }
-            await safe_websocket_send(error_payload)
+            if await safe_websocket_send(response_payload):
+                logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
+            else:
+                logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
+
+        # Clean up old request tracking data
+        # Do this after saving the bot response to ensure we have the latest message IDs
+        if save_result and redis_managers and "request_messages" in redis_managers:
+            try:
+                # Get all non-cancelled bot message IDs
+                bot_message_ids = get_non_cancelled_bot_message_ids(saved_conversation_id)
+
+                # Clean up requests that have 2+ bot messages after them
+                cleaned_count = await redis_managers["request_messages"].cleanup_old_requests(
+                    saved_conversation_id, bot_message_ids
+                )
+
+                if cleaned_count > 0:
+                    logger.info(f"Cleaned up {cleaned_count} old request tracking entries for conversation {saved_conversation_id}")
+            except Exception as e:
+                logger.warning(f"Error cleaning up old request tracking: {e}")
+
+        # Mark request as completed successfully
+        await set_request_state(request_id, "completed", {
+            "session_id": session_id,
+            "conversation_id": session_conversation_id,
+            "response_sent": True,
+            "completion_time": time.time()
+        })
+
+        # Broadcast to other WebSocket sessions for the same conversation
+        # Use same format as regular response so clients can process it correctly
+        broadcast_payload = {
+            "response": assistant_response_text,
+            "request_id": request_id,  # Include request_id so clients can track the message
+            "conversation_id": session_conversation_id,
+            "client_conversation_id": client_conversation_id,  # Include for client validation
+            "client_message_id": client_message_id,  # Include for completeness
+            "type": "broadcast"  # Keep type to indicate it's a broadcast
+        }
+        # Bot responses should go to ALL sessions - they originate from the server, not from any client session
+        await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
+        logger.info(f"Broadcasted assistant message to all sessions for conversation {session_conversation_id}")
 
         return session_conversation_id
     
     except asyncio.CancelledError:
-        # Handle task cancellation
-        logger.info(f"Request {request_id} was cancelled")
+        # Handle task cancellation gracefully
+        # The task was cancelled before reaching Claude (interrupt detected early)
+        logger.info(f"Request {request_id} was cancelled (task cancellation)")
         await set_request_state(request_id, "cancelled", {
             "session_id": session_id,
             "conversation_id": session_conversation_id,
             "cancelled_at": time.time()
         })
-        raise
+        # Don't re-raise - let the finally block run for cleanup
+        return session_conversation_id
     
     except Exception as e:
         # Track any other errors

@@ -165,9 +165,25 @@ def clear_and_verify_encrypted_token(user_id, key_name):
             'p_encryption_key': PGCRYPTO_KEY
         }).execute()
         
-        if result.data:
-            logger.info(f"RPC clear_and_verify_encrypted_token result: {result.data}")
-            return result.data
+        # The RPC returns the result directly in data, which should be a dict
+        if result and hasattr(result, 'data'):
+            result_data = result.data
+            # Check if data is a list with one element (Supabase sometimes returns list)
+            if isinstance(result_data, list) and len(result_data) > 0:
+                result_data = result_data[0]
+            
+            logger.info(f"RPC clear_and_verify_encrypted_token result: {result_data}")
+            
+            # The RPC returns success=true when it works
+            if isinstance(result_data, dict) and result_data.get('success'):
+                return result_data
+            else:
+                # If the result indicates failure, return it as-is
+                return result_data if isinstance(result_data, dict) else {
+                    'success': False,
+                    'token_cleared': False,
+                    'message': f'Unexpected result format: {result_data}'
+                }
         else:
             logger.warning(f"RPC clear_and_verify_encrypted_token returned no data for user {user_id}, key '{key_name}'")
             return {
@@ -176,11 +192,31 @@ def clear_and_verify_encrypted_token(user_id, key_name):
                 'message': 'No data returned from RPC'
             }
     except Exception as e:
-        logger.error(f"Exception in clear_and_verify_encrypted_token for user {user_id}, key '{key_name}': {str(e)}", exc_info=True)
+        # Don't treat successful responses as exceptions
+        error_str = str(e)
+        # Check if this is actually a successful response being misinterpreted
+        if "{'success': True" in error_str:
+            # Extract the dict from the error message
+            import ast
+            try:
+                # Find the dict part of the error message
+                dict_start = error_str.find("{'success':")
+                if dict_start != -1:
+                    dict_str = error_str[dict_start:]
+                    # Find the end of the dict
+                    dict_end = dict_str.find('}') + 1
+                    dict_str = dict_str[:dict_end]
+                    result_dict = ast.literal_eval(dict_str)
+                    logger.info(f"Extracted successful result from exception: {result_dict}")
+                    return result_dict
+            except:
+                pass
+        
+        logger.error(f"Exception in clear_and_verify_encrypted_token for user {user_id}, key '{key_name}': {error_str}")
         return {
             'success': False,
             'token_cleared': False,
-            'message': f'Error: {str(e)}'
+            'message': f'Error: {error_str}'
         }
 
 def get_user_timezone(user_id: str) -> tuple[bool, pytz.timezone]:

@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import patch, MagicMock
+import asyncio
 import sys
 import os
 
@@ -28,7 +29,7 @@ class TestExecuteTool(unittest.TestCase):
         
         for tool_name in protected_tools:
             with self.subTest(tool=tool_name):
-                result = execute_tool(tool_name, {}, user_id=None)
+                result = asyncio.run(execute_tool(tool_name, {}, user_id=None))
                 self.assertIsInstance(result, dict)
                 self.assertIn("error", result)
                 self.assertIn("User authentication required", result["error"])
@@ -39,7 +40,7 @@ class TestExecuteTool(unittest.TestCase):
         mock_workspaces = [{'gid': 'ws1', 'name': 'Workspace 1'}]
         mock_get_workspaces.return_value = mock_workspaces
         
-        result = execute_tool("get_asana_workspaces", {}, self.test_user_id)
+        result = asyncio.run(execute_tool("get_asana_workspaces", {}, self.test_user_id))
         
         self.assertEqual(result, mock_workspaces)
         mock_get_workspaces.assert_called_once_with(self.test_user_id)
@@ -52,7 +53,7 @@ class TestExecuteTool(unittest.TestCase):
         
         # Test with date parameters
         args = {'start_date': '2024-03-15', 'end_date': '2024-03-20'}
-        result = execute_tool("get_asana_tasks", args, self.test_user_id)
+        result = asyncio.run(execute_tool("get_asana_tasks", args, self.test_user_id))
         
         self.assertEqual(result, mock_tasks)
         mock_get_tasks.assert_called_once_with(self.test_user_id, '2024-03-15', '2024-03-20')
@@ -63,7 +64,7 @@ class TestExecuteTool(unittest.TestCase):
         mock_tasks = [{'gid': 'task1', 'name': 'Task 1'}]
         mock_get_tasks.return_value = mock_tasks
         
-        result = execute_tool("get_asana_tasks", {}, self.test_user_id)
+        result = asyncio.run(execute_tool("get_asana_tasks", {}, self.test_user_id))
         
         self.assertEqual(result, mock_tasks)
         mock_get_tasks.assert_called_once_with(self.test_user_id, None, None)
@@ -73,7 +74,7 @@ class TestExecuteTool(unittest.TestCase):
         """Test execute_tool with get_current_date"""
         mock_get_date.return_value = '2024-03-15'
         
-        result = execute_tool("get_current_date", {}, self.test_user_id)
+        result = asyncio.run(execute_tool("get_current_date", {}, self.test_user_id))
         
         self.assertEqual(result, '2024-03-15')
         mock_get_date.assert_called_once_with(self.test_user_id)
@@ -84,7 +85,7 @@ class TestExecuteTool(unittest.TestCase):
         mock_tasks = [{'gid': 'parent1', 'name': 'Parent Task', 'num_subtasks': 3}]
         mock_get_parent_tasks.return_value = mock_tasks
         
-        result = execute_tool("get_parent_tasks", {}, self.test_user_id)
+        result = asyncio.run(execute_tool("get_parent_tasks", {}, self.test_user_id))
         
         self.assertEqual(result, mock_tasks)
         mock_get_parent_tasks.assert_called_once_with(self.test_user_id)
@@ -95,7 +96,7 @@ class TestExecuteTool(unittest.TestCase):
         mock_task = {'gid': 'new_task1', 'name': 'Test Task'}
         mock_create_task.return_value = mock_task
         
-        result = execute_tool("create_asana_task", self.test_task_args, self.test_user_id)
+        result = asyncio.run(execute_tool("create_asana_task", self.test_task_args, self.test_user_id))
         
         self.assertEqual(result, mock_task)
         mock_create_task.assert_called_once_with(
@@ -110,7 +111,7 @@ class TestExecuteTool(unittest.TestCase):
         """Test execute_tool with create_asana_task missing required name"""
         args = {'due_date': '2024-03-20'}
         
-        result = execute_tool("create_asana_task", args, self.test_user_id)
+        result = asyncio.run(execute_tool("create_asana_task", args, self.test_user_id))
         
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
@@ -122,7 +123,7 @@ class TestExecuteTool(unittest.TestCase):
         mock_set_pref.return_value = True
         args = {'workspace_gid': 'workspace123'}
         
-        result = execute_tool("set_workspace_preference", args, self.test_user_id)
+        result = asyncio.run(execute_tool("set_workspace_preference", args, self.test_user_id))
         
         self.assertTrue(result)
         mock_set_pref.assert_called_once_with(self.test_user_id, 'asana_workspace_preference', 'workspace123')
@@ -130,7 +131,7 @@ class TestExecuteTool(unittest.TestCase):
     def test_execute_tool_set_workspace_preference_missing_gid(self):
         """Test execute_tool with set_workspace_preference missing workspace_gid"""
         with self.assertRaises(ValueError) as context:
-            execute_tool("set_workspace_preference", {}, self.test_user_id)
+            asyncio.run(execute_tool("set_workspace_preference", {}, self.test_user_id))
         
         self.assertIn("Workspace GID is required", str(context.exception))
 
@@ -139,14 +140,14 @@ class TestExecuteTool(unittest.TestCase):
         """Test execute_tool with get_workspace_preference"""
         mock_get_pref.return_value = 'workspace123'
         
-        result = execute_tool("get_workspace_preference", {}, self.test_user_id)
+        result = asyncio.run(execute_tool("get_workspace_preference", {}, self.test_user_id))
         
         self.assertEqual(result, 'workspace123')
         mock_get_pref.assert_called_once_with(self.test_user_id, 'asana_workspace_preference')
 
     def test_execute_tool_get_workspace_preference_no_user(self):
         """Test execute_tool with get_workspace_preference without user_id"""
-        result = execute_tool("get_workspace_preference", {}, user_id=None)
+        result = asyncio.run(execute_tool("get_workspace_preference", {}, user_id=None))
         
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
@@ -159,7 +160,7 @@ class TestExecuteTool(unittest.TestCase):
         mock_change_parent.return_value = mock_response
         
         args = {'task_gid': 'task123', 'new_parent_gid': 'parent456'}
-        result = execute_tool("change_task_parent", args, self.test_user_id)
+        result = asyncio.run(execute_tool("change_task_parent", args, self.test_user_id))
         
         self.assertEqual(result, mock_response)
         mock_change_parent.assert_called_once_with(self.test_user_id, 'task123', 'parent456')
@@ -171,7 +172,7 @@ class TestExecuteTool(unittest.TestCase):
         mock_update_date.return_value = mock_response
         
         args = {'task_gid': 'task123', 'new_due_date': '2024-03-25'}
-        result = execute_tool("update_task_due_date", args, self.test_user_id)
+        result = asyncio.run(execute_tool("update_task_due_date", args, self.test_user_id))
         
         self.assertEqual(result, mock_response)
         mock_update_date.assert_called_once_with(self.test_user_id, 'task123', '2024-03-25')
@@ -180,7 +181,7 @@ class TestExecuteTool(unittest.TestCase):
         """Test execute_tool with update_task_due_date missing task_gid"""
         args = {'new_due_date': '2024-03-25'}
         
-        result = execute_tool("update_task_due_date", args, self.test_user_id)
+        result = asyncio.run(execute_tool("update_task_due_date", args, self.test_user_id))
         
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
@@ -190,7 +191,7 @@ class TestExecuteTool(unittest.TestCase):
         """Test execute_tool with update_task_due_date missing new_due_date"""
         args = {'task_gid': 'task123'}
         
-        result = execute_tool("update_task_due_date", args, self.test_user_id)
+        result = asyncio.run(execute_tool("update_task_due_date", args, self.test_user_id))
         
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
@@ -202,7 +203,7 @@ class TestExecuteTool(unittest.TestCase):
         mock_info = "WhizVoice is an AI chatbot..."
         mock_get_app_info.return_value = mock_info
         
-        result = execute_tool("get_app_info", {}, self.test_user_id)
+        result = asyncio.run(execute_tool("get_app_info", {}, self.test_user_id))
         
         self.assertEqual(result, mock_info)
         mock_get_app_info.assert_called_once_with(self.test_user_id)
@@ -210,7 +211,7 @@ class TestExecuteTool(unittest.TestCase):
     def test_execute_tool_unknown_tool(self):
         """Test execute_tool with unknown tool name"""
         with self.assertRaises(ValueError) as context:
-            execute_tool("unknown_tool", {}, self.test_user_id)
+            asyncio.run(execute_tool("unknown_tool", {}, self.test_user_id))
         
         self.assertIn("Unknown tool: unknown_tool", str(context.exception))
 
@@ -219,7 +220,7 @@ class TestExecuteTool(unittest.TestCase):
         with patch('app.get_current_date') as mock_get_date:
             mock_get_date.return_value = '2024-03-15'
             
-            result = execute_tool("get_current_date", {}, user_id=None)
+            result = asyncio.run(execute_tool("get_current_date", {}, user_id=None))
             
             self.assertEqual(result, '2024-03-15')
             mock_get_date.assert_called_once_with(None)
@@ -230,7 +231,7 @@ class TestExecuteTool(unittest.TestCase):
             mock_info = "WhizVoice is an AI chatbot..."
             mock_get_app_info.return_value = mock_info
             
-            result = execute_tool("get_app_info", {}, user_id=None)
+            result = asyncio.run(execute_tool("get_app_info", {}, user_id=None))
             
             self.assertEqual(result, mock_info)
             mock_get_app_info.assert_called_once_with(None)
