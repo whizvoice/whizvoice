@@ -634,7 +634,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "disable_continuous_listening",
-        "description": "Turn off the microphone, also known as continuous listening mode, on the user's WhizVoice app. After calling this, the user will need to manually press the microphone button to speak again. Note that microphone/continuous listening state is completely indepedent of text to speech state.",
+        "description": "Turn off the microphone, also known as continuous listening mode, on the user's WhizVoice app. After calling this, the user will need to manually press the microphone button to speak again. Note that microphone/continuous listening mode is completely INDEPENDENT of text to speech mode. You do NOT need to toggle continuous listening to modify text to speech mode.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -644,7 +644,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "set_tts_enabled",
-        "description": "Enable or disable text-to-speech (TTS) for bot responses on the user's WhizVoice app. When enabled, bot responses will be spoken aloud. When disabled, responses will only be shown as text. Note that text to speech state is completely independent of microphone/continuous listening state.",
+        "description": "Enable or disable text-to-speech (TTS) for bot responses on the user's WhizVoice app. When enabled, bot responses will be spoken aloud. When disabled, responses will only be shown as text. Note that text to speech mode is completely INDEPENDENT of microphone/continuous listening mode. You do NOT need to toggle continuous listening first.",
         "input_schema": {
             "type": "object",
             "properties": {
