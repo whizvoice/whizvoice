@@ -19,7 +19,7 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
 from about_me_tool import about_me_tools, get_app_info
-from screen_agent_tools import screen_agent_tools, launch_app, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
+from screen_agent_tools import screen_agent_tools, launch_app, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message, disable_continuous_listening, set_tts_enabled
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -690,6 +690,33 @@ TOOL_REGISTRY = {
             args.get('previous_text')  # Add previous_text parameter
         ),
         "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
+    },
+    "disable_continuous_listening": {
+        "function_name": "disable_continuous_listening",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "set_tts_enabled": {
+        "function_name": "set_tts_enabled",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('enabled'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "enabled parameter is required."} if args.get('enabled') is None else None
     }
 }
 
