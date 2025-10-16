@@ -634,7 +634,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "disable_continuous_listening",
-        "description": "Turn off continuous listening mode on the user's Android device. Use this when the user wants to stop the microphone from continuously listening for voice input. After calling this, the user will need to manually press the microphone button to speak again.",
+        "description": "Turn off the microphone, also known as continuous listening mode, on the user's WhizVoice app. After calling this, the user will need to manually press the microphone button to speak again.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -644,13 +644,13 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "set_tts_enabled",
-        "description": "Enable or disable text-to-speech (TTS) for bot responses on the user's Android device. Use this when the user wants to turn on or turn off voice responses. When enabled, bot responses will be spoken aloud. When disabled, responses will only be shown as text.",
+        "description": "Enable or disable text-to-speech (TTS) for bot responses on the user's WhizVoice app. When enabled, bot responses will be spoken aloud. When disabled, responses will only be shown as text.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "enabled": {
                     "type": "boolean",
-                    "description": "true to enable TTS (voice responses), false to disable TTS (text-only responses)"
+                    "description": "true to enable Text To Speech (voice responses), false to disable Text To Speech (text-only responses)"
                 }
             },
             "required": ["enabled"]
