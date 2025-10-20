@@ -194,6 +194,9 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     """
     # Get messages and log them for debugging
     messages = await get_chat_messages(session_id)
+    logger.info(f"[REDIS_DEBUG] call_claude_api: session_id={session_id}, conversation_id={conversation_id}, got {len(messages)} messages from Redis")
+    if messages:
+        logger.info(f"[REDIS_DEBUG] First message preview: {messages[0].get('content', '')[:100]}")
 
     # SAFETY NET: If context is empty but we have a conversation_id, try to load from database
     # This handles edge cases where Redis session might have been cleared unexpectedly
@@ -2334,6 +2337,8 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
                 logger.warning(f"Failed to notify evicted session: {e}")
         
         # Clean up the evicted session
+        logger.info(f"[REDIS_DEBUG] Evicting session {eviction_candidate}, clearing chat history")
+        await clear_chat_session(eviction_candidate)  # Clear Redis chat history
         await cleanup_session(eviction_candidate, user_id, evicted_conversation_id)
 
 async def cleanup_abandoned_tool_executions():
