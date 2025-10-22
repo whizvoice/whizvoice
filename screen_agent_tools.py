@@ -565,6 +565,186 @@ async def set_tts_enabled(enabled: bool, user_id: str = None, websocket = None,
             "success": False
         }
 
+async def play_youtube_music(query: str, user_id: str = None, websocket = None,
+                            tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Play a song on YouTube Music by searching for it and playing the first result.
+
+    Args:
+        query: The song, artist, album, or playlist to search for
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the play operation
+    """
+    try:
+        # Generate a unique request ID for tracking
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Playing YouTube Music: '{query}' (user: {user_id}, request: {tool_request_id})")
+
+        # If no WebSocket provided, return error
+        if not websocket:
+            logger.error("No WebSocket connection available for YouTube Music play")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        # Create the WebSocket message for the Android app
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "play_youtube_music",
+            "request_id": tool_request_id,
+            "params": {
+                "query": query
+            },
+            "conversation_id": conversation_id
+        }
+
+        # Send to Android app via WebSocket
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending YouTube Music play message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent play_youtube_music command for '{query}'")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        # If we have a tool_result_handler, wait for the result
+        if tool_result_handler:
+            logger.info(f"Waiting for YouTube Music play result from Android device (request_id: {tool_request_id})")
+
+            try:
+                # Wait for tool result with timeout (15 seconds for searching and playing)
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=15.0
+                )
+
+                logger.info(f"YouTube Music play result for {tool_request_id}: {result}")
+                return result
+
+            except Exception as e:
+                logger.error(f"Error waiting for YouTube Music play result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            # If no handler, just return success after sending
+            return {
+                "status": "sent",
+                "message": f"Command to play '{query}' sent to device",
+                "request_id": tool_request_id
+            }
+
+    except Exception as e:
+        logger.error(f"Error in play_youtube_music for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to play YouTube Music: {str(e)}",
+            "success": False
+        }
+
+async def queue_youtube_music(query: str, user_id: str = None, websocket = None,
+                              tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Add a song to the queue in YouTube Music by searching for it and adding the first result.
+
+    Args:
+        query: The song, artist, album, or playlist to search for
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the queue operation
+    """
+    try:
+        # Generate a unique request ID for tracking
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Queueing YouTube Music: '{query}' (user: {user_id}, request: {tool_request_id})")
+
+        # If no WebSocket provided, return error
+        if not websocket:
+            logger.error("No WebSocket connection available for YouTube Music queue")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        # Create the WebSocket message for the Android app
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "queue_youtube_music",
+            "request_id": tool_request_id,
+            "params": {
+                "query": query
+            },
+            "conversation_id": conversation_id
+        }
+
+        # Send to Android app via WebSocket
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending YouTube Music queue message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent queue_youtube_music command for '{query}'")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        # If we have a tool_result_handler, wait for the result
+        if tool_result_handler:
+            logger.info(f"Waiting for YouTube Music queue result from Android device (request_id: {tool_request_id})")
+
+            try:
+                # Wait for tool result with timeout (15 seconds for searching and queueing)
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=15.0
+                )
+
+                logger.info(f"YouTube Music queue result for {tool_request_id}: {result}")
+                return result
+
+            except Exception as e:
+                logger.error(f"Error waiting for YouTube Music queue result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            # If no handler, just return success after sending
+            return {
+                "status": "sent",
+                "message": f"Command to queue '{query}' sent to device",
+                "request_id": tool_request_id
+            }
+
+    except Exception as e:
+        logger.error(f"Error in queue_youtube_music for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to queue YouTube Music: {str(e)}",
+            "success": False
+        }
+
 # Define the Screen Agent tools for Claude
 screen_agent_tools = [
     {
@@ -654,6 +834,36 @@ screen_agent_tools = [
                 }
             },
             "required": ["enabled"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "play_youtube_music",
+        "description": "Play a song, album, artist, or playlist on YouTube Music. IMPORTANT: YouTube Music must already be open - use launch_app tool first to open YouTube Music if needed. This will search for the query and play the first result. Use this when the user wants to play music.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The song name, artist, album, or playlist to play on YouTube Music. Examples: 'Bohemian Rhapsody', 'Taylor Swift', 'Abbey Road album', 'Chill playlist'"
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "queue_youtube_music",
+        "description": "Add a song, album, artist, or playlist to the queue in YouTube Music. IMPORTANT: YouTube Music must already be open - use launch_app tool first to open YouTube Music if needed. This will search for the query and add the first result to the queue. Use this when the user wants to add music to their queue without immediately playing it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The song name, artist, album, or playlist to add to the queue. Examples: 'Stairway to Heaven', 'The Beatles', 'Thriller album', 'Rock classics playlist'"
+                }
+            },
+            "required": ["query"]
         }
     }
 ]

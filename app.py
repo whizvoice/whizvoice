@@ -720,6 +720,34 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": lambda args: {"error": "enabled parameter is required."} if args.get('enabled') is None else None
+    },
+    "play_youtube_music": {
+        "function_name": "play_youtube_music",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('query'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Query is required."} if not args.get('query') else None
+    },
+    "queue_youtube_music": {
+        "function_name": "queue_youtube_music",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('query'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Query is required."} if not args.get('query') else None
     }
 }
 
