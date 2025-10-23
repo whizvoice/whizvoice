@@ -19,7 +19,9 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
 from about_me_tool import about_me_tools, get_app_info
-from screen_agent_tools import screen_agent_tools, launch_app, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message, disable_continuous_listening, set_tts_enabled
+from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
+from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
+from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -68,13 +70,18 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
 2. For WhatsApp messaging, use the WhatsApp-specific tools (whatsapp_select_chat, whatsapp_draft_message, whatsapp_send_message)
 3. For Asana/task management, use the Asana tools
 4. For app information, use the get_app_info tool
+5. For music playback:
+   - When the user asks to play music WITHOUT specifying an app, check their music app preference using get_music_app_preference
+   - If no preference is set, ask the user which music app they prefer (YouTube Music or Spotify) and save it using set_music_app_preference
+   - Use play_youtube_music or queue_youtube_music tools based on the user's preference
+   - If the user explicitly specifies an app in their request (e.g., "play on YouTube Music"), use that app and optionally save it as their preference
 
 IMPORTANT: When a user asks you to open an app, DO NOT just say you opened it - you MUST actually use the launch_app tool to open it on their device. Similarly, use the appropriate tools for all actions rather than just describing what you would do.
 
 Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."""
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + screen_agent_tools
+tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -720,6 +727,52 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": lambda args: {"error": "enabled parameter is required."} if args.get('enabled') is None else None
+    },
+    "play_youtube_music": {
+        "function_name": "play_youtube_music",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('query'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Query is required."} if not args.get('query') else None
+    },
+    "queue_youtube_music": {
+        "function_name": "queue_youtube_music",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('query'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Query is required."} if not args.get('query') else None
+    },
+    "get_music_app_preference": {
+        "function_name": "get_music_app_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "set_music_app_preference": {
+        "function_name": "set_music_app_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('music_app')),
+        "validation": lambda args: {"error": "music_app parameter is required."} if not args.get('music_app') else None
+    },
+    "set_user_timezone": {
+        "function_name": "set_user_timezone",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('timezone')),
+        "validation": lambda args: {"error": "timezone parameter is required."} if not args.get('timezone') else None
     }
 }
 
