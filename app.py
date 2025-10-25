@@ -22,7 +22,7 @@ from about_me_tool import about_me_tools, get_app_info
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
 from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
 from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
-from maps_tools import maps_tools, search_google_maps_location, get_google_maps_directions, recenter_google_maps, select_location_from_list
+from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, select_location_from_list
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -781,13 +781,27 @@ TOOL_REGISTRY = {
         "is_async": True,
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
-            args.get('address'),
+            args.get('address_keyword'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id')
         ),
-        "validation": lambda args: {"error": "Address is required."} if not args.get('address') else None
+        "validation": lambda args: {"error": "Address keyword is required."} if not args.get('address_keyword') else None
+    },
+    "search_google_maps_phrase": {
+        "function_name": "search_google_maps_phrase",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('search_phrase'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Search phrase is required."} if not args.get('search_phrase') else None
     },
     "get_google_maps_directions": {
         "function_name": "get_google_maps_directions",

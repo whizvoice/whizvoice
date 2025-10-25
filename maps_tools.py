@@ -11,13 +11,13 @@ from typing import Optional, Dict, Any
 # Configure logging
 logger = logging.getLogger(__name__)
 
-async def search_google_maps_location(address: str, user_id: str = None, websocket = None,
+async def search_google_maps_location(address_keyword: str, user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Search for a location/address in Google Maps and display the first result.
 
     Args:
-        address: The location, address, or place name to search for
+        address_keyword: The location, address, business name, or place to search for (e.g., "mcdonalds", "123 Main St", "trader joes")
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -30,7 +30,7 @@ async def search_google_maps_location(address: str, user_id: str = None, websock
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
-        logger.info(f"Searching Google Maps for location: '{address}' (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Searching Google Maps for location: '{address_keyword}' (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
@@ -46,7 +46,7 @@ async def search_google_maps_location(address: str, user_id: str = None, websock
             "tool": "search_google_maps_location",
             "request_id": tool_request_id,
             "params": {
-                "address": address
+                "address": address_keyword
             },
             "conversation_id": conversation_id
         }
@@ -56,7 +56,7 @@ async def search_google_maps_location(address: str, user_id: str = None, websock
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending Google Maps search message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent search_google_maps_location command for '{address}'")
+            logger.info(f"Successfully sent search_google_maps_location command for '{address_keyword}'")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -90,12 +90,104 @@ async def search_google_maps_location(address: str, user_id: str = None, websock
             # If no handler, just return success after sending
             return {
                 "status": "sent",
-                "message": f"Command to search for '{address}' sent to device",
+                "message": f"Command to search for '{address_keyword}' sent to device",
                 "request_id": tool_request_id
             }
 
     except Exception as e:
         logger.error(f"Error in search_google_maps_location for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to search Google Maps: {str(e)}",
+            "success": False
+        }
+
+
+async def search_google_maps_phrase(search_phrase: str, user_id: str = None, websocket = None,
+                                     tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Search Google Maps with a discovery phrase and display the search results list without selecting any.
+    Use this for browsing/discovery searches like "korean food", "cafes near me", "pizza", etc.
+
+    Args:
+        search_phrase: The search phrase for discovery (e.g., "korean food", "cafes near me", "pizza restaurants")
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the search operation
+    """
+    try:
+        # Generate a unique request ID for tracking
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Searching Google Maps with phrase: '{search_phrase}' (user: {user_id}, request: {tool_request_id})")
+
+        # If no WebSocket provided, return error
+        if not websocket:
+            logger.error("No WebSocket connection available for Google Maps phrase search")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        # Create the WebSocket message for the Android app
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "search_google_maps_phrase",
+            "request_id": tool_request_id,
+            "params": {
+                "search_phrase": search_phrase
+            },
+            "conversation_id": conversation_id
+        }
+
+        # Send to Android app via WebSocket
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending Google Maps phrase search message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent search_google_maps_phrase command for '{search_phrase}'")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        # If we have a tool_result_handler, wait for the result
+        if tool_result_handler:
+            logger.info(f"Waiting for Google Maps phrase search result from Android device (request_id: {tool_request_id})")
+
+            try:
+                # Wait for tool result with timeout (15 seconds for search operations)
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=15.0
+                )
+
+                logger.info(f"Google Maps phrase search result for {tool_request_id}: {result}")
+                return result
+
+            except Exception as e:
+                logger.error(f"Error waiting for Google Maps phrase search result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            # If no handler, just return success after sending
+            return {
+                "status": "sent",
+                "message": f"Command to search for '{search_phrase}' sent to device",
+                "request_id": tool_request_id
+            }
+
+    except Exception as e:
+        logger.error(f"Error in search_google_maps_phrase for user {user_id}: {str(e)}")
         return {
             "error": f"Failed to search Google Maps: {str(e)}",
             "success": False
@@ -193,10 +285,12 @@ async def recenter_google_maps(user_id: str = None, websocket = None,
 async def select_location_from_list(selection: Optional[str] = None, user_id: str = None, websocket = None,
                                    tool_result_handler = None, conversation_id: str = None) -> dict:
     """
-    Select a specific location from the Google Maps 'See locations' list.
+    Select a specific location from a Google Maps search results list. Works for both:
+    1. "See locations" list (multiple locations for the same business)
+    2. General search results (from search_google_maps_phrase)
 
     Args:
-        selection: How to select - ordinal ('first', 'second', 'third') or address fragment to match. Defaults to 'first'.
+        selection: How to select - ordinal ('first', 'second', 'third') or address/name fragment to match. Defaults to 'first'.
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -391,16 +485,31 @@ maps_tools = [
     {
         "type": "custom",
         "name": "search_google_maps_location",
-        "description": "Search for a location, address, or place in Google Maps and display the first result. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed. This will search for the location and show it on the map.",
+        "description": "Search for a SPECIFIC location in Google Maps and automatically select the first result. Use this when the user wants to navigate to a specific place like an address ('1885 Mission St'), cross streets ('Mission and 5th'), or a specific business location ('Trader Joes on Fulton'). This tool clicks the first search suggestion automatically and displays that location on the map. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "address": {
+                "address_keyword": {
                     "type": "string",
-                    "description": "The location, address, or place name to search for in Google Maps"
+                    "description": "The specific location, address, or place to navigate to (e.g., '1885 Mission St', 'Mission and 5th', 'Trader Joes on Fulton Street')"
                 }
             },
-            "required": ["address"]
+            "required": ["address_keyword"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "search_google_maps_phrase",
+        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list and waits for the user to choose one. After calling this, the user can use select_location_from_list to pick a specific result. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "search_phrase": {
+                    "type": "string",
+                    "description": "The discovery search phrase (e.g., 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations nearby')"
+                }
+            },
+            "required": ["search_phrase"]
         }
     },
     {
@@ -432,13 +541,13 @@ maps_tools = [
     {
         "type": "custom",
         "name": "select_location_from_list",
-        "description": "Select a specific location from the Google Maps 'See locations' list. Use this after searching for a business name that returned multiple locations. You can select by position (e.g., 'first', 'second', 'third') or by matching part of the address.",
+        "description": "Select a specific location from a Google Maps search results list. Use this after: (1) search_google_maps_location when 'See locations' appears for a business with multiple locations, OR (2) search_google_maps_phrase to choose from discovery search results. You can select by position (e.g., 'first', 'second', 'third') or by matching part of the business name or address.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "selection": {
                     "type": "string",
-                    "description": "How to select the location. Can be an ordinal like 'first', 'second', 'third' or a part of the address to match (e.g., 'Market St', 'Daly City'). Defaults to 'first' if not specified."
+                    "description": "How to select the location. Can be an ordinal like 'first', 'second', 'third' or a fragment of the business name or address to match (e.g., 'Market St', 'Daly City', 'Mandalay'). Defaults to 'first' if not specified."
                 }
             },
             "required": []
