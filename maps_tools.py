@@ -14,10 +14,14 @@ logger = logging.getLogger(__name__)
 async def search_google_maps_location(address_keyword: str, user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
     """
-    Search for a location/address in Google Maps and display the first result.
+    Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and automatically select the first result.
+
+    This tool is fully automatic: it clicks the first search suggestion. If that suggestion happens to be
+    'See locations' (which can occur if a business name was accidentally used instead of an address),
+    it automatically selects the first location from that list as a fallback.
 
     Args:
-        address_keyword: The location, address, business name, or place to search for (e.g., "mcdonalds", "123 Main St", "trader joes")
+        address_keyword: A specific address or location (e.g., "1885 Mission St", "Mission and 5th", "Golden Gate Bridge")
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -282,15 +286,15 @@ async def recenter_google_maps(user_id: str = None, websocket = None,
         }
 
 
-async def select_location_from_list(selection: Optional[str] = None, user_id: str = None, websocket = None,
+async def select_location_from_list(position: Optional[int] = None, fragment: Optional[str] = None,
+                                   user_id: str = None, websocket = None,
                                    tool_result_handler = None, conversation_id: str = None) -> dict:
     """
-    Select a specific location from a Google Maps search results list. Works for both:
-    1. "See locations" list (multiple locations for the same business)
-    2. General search results (from search_google_maps_phrase)
+    Select a specific location from a Google Maps search results list.
 
     Args:
-        selection: How to select - ordinal ('first', 'second', 'third') or address/name fragment to match. Defaults to 'first'.
+        position: Select by position number (1 for first, 2 for second, etc.). Takes precedence over fragment.
+        fragment: Select by matching part of the business name or address (e.g., "Market St", "Mandalay").
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -303,11 +307,12 @@ async def select_location_from_list(selection: Optional[str] = None, user_id: st
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
-        # Default to 'first' if not specified
-        if not selection:
-            selection = 'first'
+        # Default to position 1 if neither specified
+        if position is None and fragment is None:
+            position = 1
 
-        logger.info(f"Selecting location from list: '{selection}' (user: {user_id}, request: {tool_request_id})")
+        selection_desc = f"position {position}" if position else f"fragment '{fragment}'"
+        logger.info(f"Selecting location from list: {selection_desc} (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
@@ -318,13 +323,17 @@ async def select_location_from_list(selection: Optional[str] = None, user_id: st
             }
 
         # Create the WebSocket message for the Android app
+        params = {}
+        if position is not None:
+            params["position"] = position
+        if fragment is not None:
+            params["fragment"] = fragment
+
         tool_execution_message = {
             "type": "tool_execution",
             "tool": "select_location_from_list",
             "request_id": tool_request_id,
-            "params": {
-                "selection": selection
-            },
+            "params": params,
             "conversation_id": conversation_id
         }
 
@@ -333,7 +342,7 @@ async def select_location_from_list(selection: Optional[str] = None, user_id: st
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending location selection message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent select_location_from_list command for '{selection}'")
+            logger.info(f"Successfully sent select_location_from_list command: {selection_desc}")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -385,7 +394,7 @@ async def get_google_maps_directions(mode: Optional[str] = None, user_id: str = 
     Get directions to a location that's currently displayed in Google Maps.
 
     Args:
-        mode: Optional. Mode of transportation - 'drive', 'walk', 'bike', or 'transit'. Defaults to 'drive' if not specified.
+        mode: Optional. Mode of transportation - 'drive', 'walk', 'bike', or 'transit'. If not specified, uses Google Maps' currently selected mode (usually the user's last used mode).
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -398,15 +407,13 @@ async def get_google_maps_directions(mode: Optional[str] = None, user_id: str = 
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
-        # Normalize mode
-        valid_modes = ['drive', 'walk', 'bike', 'transit']
+        # Normalize mode if provided
         if mode:
+            valid_modes = ['drive', 'walk', 'bike', 'transit']
             mode = mode.lower()
             if mode not in valid_modes:
-                logger.warning(f"Invalid transportation mode '{mode}', defaulting to 'drive'")
-                mode = 'drive'
-        else:
-            mode = 'drive'
+                logger.warning(f"Invalid transportation mode '{mode}', will use default")
+                mode = None
 
         logger.info(f"Getting Google Maps directions with mode '{mode}' (user: {user_id}, request: {tool_request_id})")
 
@@ -485,13 +492,13 @@ maps_tools = [
     {
         "type": "custom",
         "name": "search_google_maps_location",
-        "description": "Search for a SPECIFIC location in Google Maps and automatically select the first result. Use this when the user wants to navigate to a specific place like an address ('1885 Mission St'), cross streets ('Mission and 5th'), or a specific business location ('Trader Joes on Fulton'). This tool clicks the first search suggestion automatically and displays that location on the map. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and automatically select the first result. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. This tool is FULLY AUTOMATIC and always results in a single location displayed on the map. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "address_keyword": {
                     "type": "string",
-                    "description": "The specific location, address, or place to navigate to (e.g., '1885 Mission St', 'Mission and 5th', 'Trader Joes on Fulton Street')"
+                    "description": "A specific address or location (e.g., '1885 Mission St', 'Mission and 5th', 'Golden Gate Bridge', 'Dolores Park')"
                 }
             },
             "required": ["address_keyword"]
@@ -500,7 +507,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "search_google_maps_phrase",
-        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list and waits for the user to choose one. After calling this, the user can use select_location_from_list to pick a specific result. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list and waits for the user to choose one. After calling this, prompt the user to find out which item on the results list they prefer, and use select_location_from_list to pick a specific result. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -515,13 +522,13 @@ maps_tools = [
     {
         "type": "custom",
         "name": "get_google_maps_directions",
-        "description": "Get directions to a location that's currently displayed in Google Maps. IMPORTANT: A location must already be displayed in Google Maps - use search_google_maps_location first if needed. This will show the directions to the currently displayed location.",
+        "description": "Get directions to a location that's currently displayed in Google Maps. IMPORTANT: A location must already be displayed in Google Maps - this tool is menat to be used after search_google_maps_location or select_location_from_list. This will show the directions to the currently displayed location.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "mode": {
                     "type": "string",
-                    "description": "Mode of transportation. Valid options: 'drive' (car), 'walk' (walking), 'bike' (bicycle), or 'transit' (public transportation). Defaults to 'drive' if not specified.",
+                    "description": "Mode of transportation. Valid options: 'drive' (car), 'walk' (walking), 'bike' (bicycle), or 'transit' (public transportation). No specific mode of transporation is selected if not provided, which defaults to the mode last used by Google Maps.",
                     "enum": ["drive", "walk", "bike", "transit"]
                 }
             },
@@ -541,13 +548,17 @@ maps_tools = [
     {
         "type": "custom",
         "name": "select_location_from_list",
-        "description": "Select a specific location from a Google Maps search results list. Use this after: (1) search_google_maps_location when 'See locations' appears for a business with multiple locations, OR (2) search_google_maps_phrase to choose from discovery search results. You can select by position (e.g., 'first', 'second', 'third') or by matching part of the business name or address.",
+        "description": "Select a specific location from a Google Maps search results list. Use this after search_google_maps_phrase to choose from discovery search results. You can select by position (1 for first item, 2 for second, etc.) or by matching part of the business name or address.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "selection": {
+                "position": {
+                    "type": "integer",
+                    "description": "Select by position number: 1 for first item, 2 for second, etc. Takes precedence over fragment if both provided."
+                },
+                "fragment": {
                     "type": "string",
-                    "description": "How to select the location. Can be an ordinal like 'first', 'second', 'third' or a fragment of the business name or address to match (e.g., 'Market St', 'Daly City', 'Mandalay'). Defaults to 'first' if not specified."
+                    "description": "Select by matching part of the business name or address (e.g., 'Market St', 'Daly City', 'Mandalay'). Used if position not provided."
                 }
             },
             "required": []

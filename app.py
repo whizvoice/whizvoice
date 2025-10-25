@@ -836,7 +836,8 @@ TOOL_REGISTRY = {
         "is_async": True,
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
-            args.get('selection'),
+            args.get('position'),
+            args.get('fragment'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
