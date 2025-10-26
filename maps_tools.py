@@ -492,7 +492,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "search_google_maps_location",
-        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and automatically select the first result. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. This tool is FULLY AUTOMATIC and always results in a single location displayed on the map. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and automatically select the first result. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. This tool results in a single location displayed on the map. After calling this tool, you can call get_google_maps_directions if the user wants directions to the place. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -507,7 +507,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "search_google_maps_phrase",
-        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list and waits for the user to choose one. After calling this, prompt the user to find out which item on the results list they prefer, and use select_location_from_list to pick a specific result. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list. After using this tool, ask the user to select one and call select_location_from_list with the user's choice. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -548,7 +548,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "select_location_from_list",
-        "description": "Select a specific location from a Google Maps search results list. Use this after search_google_maps_phrase to choose from discovery search results. You can select by position (1 for first item, 2 for second, etc.) or by matching part of the business name or address.",
+        "description": "Select a specific location from a Google Maps search results list. This must be used after user responds to search_google_maps_phrase results, to select the user's choice. This function can select by position (1 for first item, 2 for second, etc.) or by matching part of the business name or address. After calling this tool, you can call get_google_maps_directions if the user wants directions to the place.",
         "input_schema": {
             "type": "object",
             "properties": {
