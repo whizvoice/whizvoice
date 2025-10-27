@@ -87,14 +87,12 @@ def ensure_user_and_prefs(user_id, email=None):
 def get_preference(user_id, key):
     """Get a specific unencrypted preference value using RPC."""
     try:
-        logger.debug(f"Calling RPC get_preference_value for user {user_id}, key {key}")
         result = supabase.rpc('get_preference_value', {
             'p_user_id': user_id,
             'p_target_key': key
         }).execute()
         # RPC functions in Supabase might return the value directly in result.data
         # If the key doesn't exist or value is null, the SQL function should return NULL, which might be None in Python.
-        logger.debug(f"RPC get_preference_value result for user {user_id}, key {key}: {result.data}")
         return result.data # Assuming direct data is the value or None
     except Exception as e:
         logger.error(f"Error calling RPC get_preference_value for user {user_id}, key {key}: {str(e)}", exc_info=True)

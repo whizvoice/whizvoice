@@ -53,8 +53,6 @@ async def get_chat_messages(session_id: str) -> List[Dict]:
 
 async def add_chat_message(session_id: str, message: Dict):
     """Add a chat message to a session in Redis or local storage"""
-    content_preview = message.get('content', '')[:100] if message.get('content') else 'N/A'
-    logger.info(f"[REDIS_DEBUG] add_chat_message: session_id={session_id}, role={message.get('role')}, content={content_preview}")
     if redis_managers:
         await redis_managers["chat_sessions"].add_message(session_id, message)
     else:
@@ -66,10 +64,6 @@ async def add_chat_message(session_id: str, message: Dict):
 
 async def set_chat_messages(session_id: str, messages: List[Dict]):
     """Set all chat messages for a session in Redis or local storage"""
-    logger.info(f"[REDIS_DEBUG] set_chat_messages: session_id={session_id}, setting {len(messages)} messages")
-    if messages:
-        first_content = messages[0].get('content', '')[:100] if messages[0].get('content') else 'N/A'
-        logger.info(f"[REDIS_DEBUG] First message: role={messages[0].get('role')}, content={first_content}")
     if redis_managers:
         await redis_managers["chat_sessions"].set(session_id, messages)
     else:
@@ -79,15 +73,12 @@ async def set_chat_messages(session_id: str, messages: List[Dict]):
 
 async def clear_chat_session(session_id: str):
     """Clear chat session from Redis or local storage"""
-    logger.info(f"[REDIS_DEBUG] clear_chat_session: Clearing session {session_id}")
     if redis_managers:
         await redis_managers["chat_sessions"].clear(session_id)
-        logger.info(f"[REDIS_DEBUG] clear_chat_session: Redis key deleted for {session_id}")
     else:
         async with chat_sessions_lock:
             if session_id in chat_sessions:
                 del chat_sessions[session_id]
-                logger.info(f"[REDIS_DEBUG] clear_chat_session: Local session deleted for {session_id}")
 
 
 # User Session Management

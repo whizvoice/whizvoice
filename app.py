@@ -126,7 +126,6 @@ async def shutdown_event():
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info(f"Incoming request: {request.method} {request.url.path}")
-    logger.info(f"Headers: {dict(request.headers)}")
     response = await call_next(request)
     return response
 
@@ -138,18 +137,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Middleware to log request headers
-@app.middleware("http")
-async def log_request_headers(request: Request, call_next):
-    # Log all headers
-    header_log_str = f"Incoming request to {request.url.path} with headers:\n"
-    for name, value in request.headers.items():
-        header_log_str += f"  {name}: {value}\n"
-    logger.info(header_log_str)
-    
-    response = await call_next(request)
-    return response
 
 # Placeholder for the actual preference key name for Claude API key
 
@@ -200,11 +187,8 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     conversation_id: Optional - if provided, will reload context from DB if empty
     with_tools: Whether to include tools in the request (default True)
     """
-    # Get messages and log them for debugging
+    # Get messages from session
     messages = await get_chat_messages(session_id)
-    logger.info(f"[REDIS_DEBUG] call_claude_api: session_id={session_id}, conversation_id={conversation_id}, got {len(messages)} messages from Redis")
-    if messages:
-        logger.info(f"[REDIS_DEBUG] First message preview: {messages[0].get('content', '')[:100]}")
 
     # SAFETY NET: If context is empty but we have a conversation_id, try to load from database
     # This handles edge cases where Redis session might have been cleared unexpectedly
@@ -453,9 +437,7 @@ async def subscribe_to_conversation(session_id: str, conversation_id: int, webso
             await redis_managers["local_objects"].add_pubsub(session_id, pubsub)
         else:
             logger.warning(f"Redis managers not available, pubsub for {session_id} not stored")
-        
-        logger.info(f"Session {session_id} subscribed to Redis channel {channel_name}")
-        
+
         # Start listening for messages in the background and track the task
         listener_task = asyncio.create_task(redis_message_listener(session_id, pubsub, websocket))
         if redis_managers and "local_objects" in redis_managers:
@@ -1497,8 +1479,6 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Get conversation_id from query parameters if provided
         conversation_id = None
-        # Debug log all query parameters
-        logger.info(f"WebSocket query params: {dict(websocket.query_params)}")
         if "conversation_id" in websocket.query_params:
             try:
                 conversation_id = int(websocket.query_params["conversation_id"])
@@ -1513,8 +1493,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 # Verify token using our server's algorithm (HS256)
                 from jose import jwt, JWTError
-                
-                logger.debug(f"WebSocket attempting to verify token (first 15 chars): {token[:15]}...")
+
                 payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
                 user_id = payload.get("sub")
                 user_email = payload.get("email")
@@ -1582,11 +1561,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Use actual_conversation_id for loading history (it already handles optimistic IDs internally,
                 # but we've already resolved it so we can pass the real ID directly)
                 conversation_history = load_conversation_history(user_id, actual_conversation_id)
-                
+
                 await set_chat_messages(session_id, conversation_history)
-                
-                logger.info(f"Created session {session_id} with {len(conversation_history)} messages")
-                
+
                 # Track the actual conversation_id for this session (not the optimistic one)
                 session_conversation_id = actual_conversation_id
                 
@@ -1606,13 +1583,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # 🔧 CRITICAL FIX: Don't modify session_id after creation
                 # The session_id should remain consistent throughout the WebSocket connection
                 # The original session_id is already correctly formatted based on conversation_id
-                
-                # Don't send welcome message for new chats - let the UI show placeholder text instead
-                if conversation_history:
-                    logger.info(f"Loaded {len(conversation_history)} messages from conversation history for user {user_id}")
-                else:
-                    logger.info(f"New chat session - no conversation history, UI will show placeholder text")
-                
+
                 # Log the resolution if it happened
                 if conversation_id != actual_conversation_id:
                     logger.info(f"WebSocket connected with optimistic ID {conversation_id}, resolved to real ID {actual_conversation_id}")
@@ -2461,7 +2432,6 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
                 logger.warning(f"Failed to notify evicted session: {e}")
         
         # Clean up the evicted session
-        logger.info(f"[REDIS_DEBUG] Evicting session {eviction_candidate}, clearing chat history")
         await clear_chat_session(eviction_candidate)  # Clear Redis chat history
         await cleanup_session(eviction_candidate, user_id, evicted_conversation_id)
 
@@ -2551,8 +2521,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
             if not conv_result.data:
                 logger.warning(f"Conversation {actual_conversation_id} not found or not owned by user {user_id}")
                 return []
-            logger.info(f"Loading specified conversation {actual_conversation_id} for user {user_id}")
-        
+
         # Get messages for the conversation
         result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
         
@@ -2564,8 +2533,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 "role": message_role,
                 "content": row["content"]
             })
-        
-        logger.info(f"Loaded {len(claude_messages)} messages from conversation {actual_conversation_id} for user {user_id}")
+
         return claude_messages
         
     except Exception as e:
@@ -3000,7 +2968,7 @@ async def set_user_timezone_api(
 
     success, message = set_user_timezone(user_id, request.timezone)
     if success:
-        logger.info(f"Successfully set timezone for user {user_id} via API: {request.timezone}")
+        logger.debug(f"Successfully set timezone for user {user_id} via API: {request.timezone}")
         return {"status": "success", "message": message}
     else:
         # set_user_timezone already logs detailed errors
