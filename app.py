@@ -792,6 +792,7 @@ TOOL_REGISTRY = {
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
             args.get('mode'),
+            args.get('already_in_directions', False),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
