@@ -388,13 +388,15 @@ async def select_location_from_list(position: Optional[int] = None, fragment: Op
         }
 
 
-async def get_google_maps_directions(mode: Optional[str] = None, user_id: str = None, websocket = None,
+async def get_google_maps_directions(mode: Optional[str] = None, already_in_directions: bool = False,
+                                     user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Get directions to a location that's currently displayed in Google Maps.
 
     Args:
         mode: Optional. Mode of transportation - 'drive', 'walk', 'bike', or 'transit'. If not specified, uses Google Maps' currently selected mode (usually the user's last used mode).
+        already_in_directions: Optional. Set to true if already viewing directions and want to get directions to a different place. This will press back first before getting new directions.
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -415,7 +417,7 @@ async def get_google_maps_directions(mode: Optional[str] = None, user_id: str = 
                 logger.warning(f"Invalid transportation mode '{mode}', will use default")
                 mode = None
 
-        logger.info(f"Getting Google Maps directions with mode '{mode}' (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Getting Google Maps directions with mode '{mode}', already_in_directions={already_in_directions} (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
@@ -431,7 +433,8 @@ async def get_google_maps_directions(mode: Optional[str] = None, user_id: str = 
             "tool": "get_google_maps_directions",
             "request_id": tool_request_id,
             "params": {
-                "mode": mode
+                "mode": mode,
+                "already_in_directions": already_in_directions
             },
             "conversation_id": conversation_id
         }
@@ -522,7 +525,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "get_google_maps_directions",
-        "description": "Get directions to a location that's currently displayed in Google Maps. IMPORTANT: A location must already be displayed in Google Maps - this tool is menat to be used after search_google_maps_location or select_location_from_list. This will show the directions to the currently displayed location.",
+        "description": "Get directions to a location that's currently displayed in Google Maps. IMPORTANT: A location must already be displayed in Google Maps - this tool is menat to be used after search_google_maps_location or select_location_from_list. This tool can also be used after get_google_maps_directions has just been called, to change the mode of transportation to the same destination. This will show the directions to the currently displayed location.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -530,6 +533,10 @@ maps_tools = [
                     "type": "string",
                     "description": "Mode of transportation. Valid options: 'drive' (car), 'walk' (walking), 'bike' (bicycle), or 'transit' (public transportation). No specific mode of transporation is selected if not provided, which defaults to the mode last used by Google Maps.",
                     "enum": ["drive", "walk", "bike", "transit"]
+                },
+                "already_in_directions": {
+                    "type": "boolean",
+                    "description": "Set to true if already viewing directions. This will press back first before getting new directions. Defaults to false."
                 }
             },
             "required": []
