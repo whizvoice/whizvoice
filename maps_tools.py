@@ -555,7 +555,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "select_location_from_list",
-        "description": "Select a specific location from a Google Maps search results list. This must be used after user responds to search_google_maps_phrase results, to select the user's choice. This function can select by position (1 for first item, 2 for second, etc.) or by matching part of the business name or address. After calling this tool, you can call get_google_maps_directions if the user wants directions to the place.",
+        "description": "Select a specific location from a Google Maps search results list. This must be used after user responds to search_google_maps_phrase results, to select the user's choice. This function can select by position (1 for first item, 2 for second, etc.) or by matching part of the business name or address. If your goal was to get directions for the location, you MUST call get_google_maps_directions afterwards.",
         "input_schema": {
             "type": "object",
             "properties": {
