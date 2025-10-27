@@ -510,7 +510,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "search_google_maps_phrase",
-        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list. After using this tool, ask the user to select one and call select_location_from_list with the user's choice. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list. After using this tool, you MUST ask the user to select one. Based on what they say, you can use the select_location_from_list tool to actually select an item from the list of results. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
         "input_schema": {
             "type": "object",
             "properties": {
