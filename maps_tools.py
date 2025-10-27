@@ -525,7 +525,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "get_google_maps_directions",
-        "description": "Get directions to a location that's currently displayed in Google Maps. IMPORTANT: A location must already be displayed in Google Maps - this tool is menat to be used after search_google_maps_location or select_location_from_list. This tool can also be used after get_google_maps_directions has just been called, to change the mode of transportation to the same destination. This will show the directions to the currently displayed location.",
+        "description": "Get directions to a location that's currently displayed in Google Maps.IMPORTANT: A location must already be displayed in Google Maps - this tool is menat to be used after search_google_maps_location or select_location_from_list. If you have JUST already called get_google_maps_directions and are just changing the mode of transportation, you will have to set already_in_directions to true, otherwise, make sure it is set to false or leave it as its default value.",
         "input_schema": {
             "type": "object",
             "properties": {
