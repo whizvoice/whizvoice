@@ -396,7 +396,7 @@ async def get_google_maps_directions(mode: Optional[str] = None, already_in_dire
 
     Args:
         mode: Optional. Mode of transportation - 'drive', 'walk', 'bike', or 'transit'. If not specified, uses Google Maps' currently selected mode (usually the user's last used mode).
-        already_in_directions: Optional. Set to true if already viewing directions and want to get directions to a different place. This will press back first before getting new directions.
+        already_in_directions: Optional. Set to true if already viewing directions for the SAME DESTINATION and want to get directions to a different place. This will press back first before getting new directions.
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
