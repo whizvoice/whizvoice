@@ -19,7 +19,7 @@ class TestColorTools(unittest.TestCase):
             "Purple",
             "Black",
             "Pink",
-            "Multi-color / pattern print"
+            "Multi-color"
         ]
 
         result = pick_random_color()
