@@ -23,6 +23,7 @@ from screen_agent_tools import screen_agent_tools, launch_app, disable_continuou
 from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
 from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, select_location_from_list
+from color_tools import color_tools, pick_random_color
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -82,7 +83,7 @@ IMPORTANT: When a user asks you to open an app, DO NOT just say you opened it - 
 Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."""
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools
+tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -826,6 +827,12 @@ TOOL_REGISTRY = {
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id')
         ),
+        "validation": None
+    },
+    "pick_random_color": {
+        "function_name": "pick_random_color",
+        "requires_auth": False,
+        "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
     }
 }
