@@ -1267,19 +1267,30 @@ async def refresh_access_token(request_data: RefreshTokenRequest):
         # For stateless refresh, we assume if it decodes and is type 'refresh', it's valid.
         # If we had a revocation list or stored refresh tokens, we'd check that here.
 
-        # Create a new access token - payload might need more than just sub for access tokens
-        # Re-fetch user details or ensure access token payload is consistent
-        # For simplicity, if access_token_data in /auth/google was just {"sub": user_id, "email": ..., "name": ...}
-        # we need to ensure that info is still available or decide what goes into a refreshed access token.
-        # Let's assume for now the access token only strictly needs 'sub' for get_current_user, 
-        # but it's better if it matches the original structure.
-        # Since we don't have email/name from refresh token, we keep new access token minimal.
-        new_access_token_data = {
-            "sub": user_id,
-            # If you need email/name in access tokens and they aren't in refresh token,
-            # you might need to fetch them from DB or adjust what `get_current_user` relies on.
-            # For now, this will make the access token a bit simpler than the login one.
-        }
+        # Fetch user details from database to include in the new access token
+        # This ensures the refreshed token has all the necessary fields (email, name, etc.)
+        # that subscription and other endpoints might require
+        try:
+            user_data = supabase.table("users").select("email, user_id").eq("user_id", user_id).execute()
+            if not user_data.data or len(user_data.data) == 0:
+                logger.error(f"User {user_id} not found in database during token refresh")
+                raise HTTPException(status_code=401, detail="User not found")
+
+            user_email = user_data.data[0].get("email")
+
+            # Create a new access token with complete user information
+            new_access_token_data = {
+                "sub": user_id,
+                "email": user_email,
+                # Include name if it was in the original token (check what /auth/google includes)
+            }
+            logger.info(f"Creating refreshed access token for user {user_id} with email {user_email}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching user data during token refresh: {str(e)}")
+            raise HTTPException(status_code=500, detail="Failed to fetch user data")
+
         new_access_token = create_access_token(new_access_token_data)
         
         logger.info(f"Successfully refreshed access token for user {user_id}.")
