@@ -3432,12 +3432,18 @@ async def delete_all_conversations(current_user: Dict = Depends(get_current_user
     user_id = current_user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
-    
+
     try:
-        # Delete all conversations for user (messages will cascade delete)
-        result = supabase.table("conversations").delete().eq("user_id", user_id).execute()
-        
-        return {"message": "All conversations deleted successfully"}
+        # Soft delete all conversations for user by setting deleted_at timestamp
+        # This is consistent with single conversation delete behavior
+        result = supabase.table("conversations").update({
+            "deleted_at": "now()"
+        }).eq("user_id", user_id).is_("deleted_at", "null").execute()
+
+        deleted_count = len(result.data) if result.data else 0
+        logger.info(f"Successfully soft-deleted {deleted_count} conversations for user {user_id}")
+
+        return {"message": "All conversations deleted successfully", "deleted_count": deleted_count}
     except Exception as e:
         logger.error(f"Error deleting all conversations for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete conversations")
