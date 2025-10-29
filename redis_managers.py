@@ -544,7 +544,6 @@ class LocalObjectManager:
                 except Exception as e:
                     logger.warning(f"Error while cancelling old listener task for {session_id}: {e}")
             self.redis_listener_tasks[session_id] = task
-            logger.info(f"Added Redis listener task for session {session_id}")
     
     async def get_listener_task(self, session_id: str) -> Optional[asyncio.Task]:
         """Get the Redis listener task for a session"""
@@ -638,11 +637,9 @@ class LocalObjectManager:
                 if session_id not in self.session_conversations:
                     self.session_conversations[session_id] = set()
                 self.session_conversations[session_id].add(conversation_id)
-                
+
                 # Update session -> websocket mapping
                 self.session_websocket[session_id] = websocket
-                
-                logger.info(f"Registered WebSocket session {session_id} for conversation {conversation_id}")
     
     async def unregister_conversation_websocket(self, session_id: str, conversation_id: Optional[int] = None):
         """Unregister a WebSocket from conversations"""

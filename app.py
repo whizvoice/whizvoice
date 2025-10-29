@@ -22,6 +22,7 @@ from about_me_tool import about_me_tools, get_app_info
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
 from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
 from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
+from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, select_location_from_list
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -81,7 +82,7 @@ IMPORTANT: When a user asks you to open an app, DO NOT just say you opened it - 
 Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."""
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools
+tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -125,7 +126,6 @@ async def shutdown_event():
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info(f"Incoming request: {request.method} {request.url.path}")
-    logger.info(f"Headers: {dict(request.headers)}")
     response = await call_next(request)
     return response
 
@@ -137,18 +137,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Middleware to log request headers
-@app.middleware("http")
-async def log_request_headers(request: Request, call_next):
-    # Log all headers
-    header_log_str = f"Incoming request to {request.url.path} with headers:\n"
-    for name, value in request.headers.items():
-        header_log_str += f"  {name}: {value}\n"
-    logger.info(header_log_str)
-    
-    response = await call_next(request)
-    return response
 
 # Placeholder for the actual preference key name for Claude API key
 
@@ -199,11 +187,8 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     conversation_id: Optional - if provided, will reload context from DB if empty
     with_tools: Whether to include tools in the request (default True)
     """
-    # Get messages and log them for debugging
+    # Get messages from session
     messages = await get_chat_messages(session_id)
-    logger.info(f"[REDIS_DEBUG] call_claude_api: session_id={session_id}, conversation_id={conversation_id}, got {len(messages)} messages from Redis")
-    if messages:
-        logger.info(f"[REDIS_DEBUG] First message preview: {messages[0].get('content', '')[:100]}")
 
     # SAFETY NET: If context is empty but we have a conversation_id, try to load from database
     # This handles edge cases where Redis session might have been cleared unexpectedly
@@ -452,9 +437,7 @@ async def subscribe_to_conversation(session_id: str, conversation_id: int, webso
             await redis_managers["local_objects"].add_pubsub(session_id, pubsub)
         else:
             logger.warning(f"Redis managers not available, pubsub for {session_id} not stored")
-        
-        logger.info(f"Session {session_id} subscribed to Redis channel {channel_name}")
-        
+
         # Start listening for messages in the background and track the task
         listener_task = asyncio.create_task(redis_message_listener(session_id, pubsub, websocket))
         if redis_managers and "local_objects" in redis_managers:
@@ -773,6 +756,77 @@ TOOL_REGISTRY = {
         "requires_auth": True,
         "args_mapping": lambda args, user_id: (user_id, args.get('timezone')),
         "validation": lambda args: {"error": "timezone parameter is required."} if not args.get('timezone') else None
+    },
+    "search_google_maps_location": {
+        "function_name": "search_google_maps_location",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('address_keyword'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Address keyword is required."} if not args.get('address_keyword') else None
+    },
+    "search_google_maps_phrase": {
+        "function_name": "search_google_maps_phrase",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('search_phrase'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Search phrase is required."} if not args.get('search_phrase') else None
+    },
+    "get_google_maps_directions": {
+        "function_name": "get_google_maps_directions",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('mode'),
+            args.get('already_in_directions', False),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "recenter_google_maps": {
+        "function_name": "recenter_google_maps",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "select_location_from_list": {
+        "function_name": "select_location_from_list",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('position'),
+            args.get('fragment'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
     }
 }
 
@@ -1426,8 +1480,6 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Get conversation_id from query parameters if provided
         conversation_id = None
-        # Debug log all query parameters
-        logger.info(f"WebSocket query params: {dict(websocket.query_params)}")
         if "conversation_id" in websocket.query_params:
             try:
                 conversation_id = int(websocket.query_params["conversation_id"])
@@ -1442,8 +1494,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 # Verify token using our server's algorithm (HS256)
                 from jose import jwt, JWTError
-                
-                logger.debug(f"WebSocket attempting to verify token (first 15 chars): {token[:15]}...")
+
                 payload = jwt.decode(token, AUTH_SECRET_KEY, algorithms=[AUTH_ALGORITHM])
                 user_id = payload.get("sub")
                 user_email = payload.get("email")
@@ -1511,11 +1562,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Use actual_conversation_id for loading history (it already handles optimistic IDs internally,
                 # but we've already resolved it so we can pass the real ID directly)
                 conversation_history = load_conversation_history(user_id, actual_conversation_id)
-                
+
                 await set_chat_messages(session_id, conversation_history)
-                
-                logger.info(f"Created session {session_id} with {len(conversation_history)} messages")
-                
+
                 # Track the actual conversation_id for this session (not the optimistic one)
                 session_conversation_id = actual_conversation_id
                 
@@ -1535,13 +1584,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # 🔧 CRITICAL FIX: Don't modify session_id after creation
                 # The session_id should remain consistent throughout the WebSocket connection
                 # The original session_id is already correctly formatted based on conversation_id
-                
-                # Don't send welcome message for new chats - let the UI show placeholder text instead
-                if conversation_history:
-                    logger.info(f"Loaded {len(conversation_history)} messages from conversation history for user {user_id}")
-                else:
-                    logger.info(f"New chat session - no conversation history, UI will show placeholder text")
-                
+
                 # Log the resolution if it happened
                 if conversation_id != actual_conversation_id:
                     logger.info(f"WebSocket connected with optimistic ID {conversation_id}, resolved to real ID {actual_conversation_id}")
@@ -2390,7 +2433,6 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
                 logger.warning(f"Failed to notify evicted session: {e}")
         
         # Clean up the evicted session
-        logger.info(f"[REDIS_DEBUG] Evicting session {eviction_candidate}, clearing chat history")
         await clear_chat_session(eviction_candidate)  # Clear Redis chat history
         await cleanup_session(eviction_candidate, user_id, evicted_conversation_id)
 
@@ -2480,8 +2522,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
             if not conv_result.data:
                 logger.warning(f"Conversation {actual_conversation_id} not found or not owned by user {user_id}")
                 return []
-            logger.info(f"Loading specified conversation {actual_conversation_id} for user {user_id}")
-        
+
         # Get messages for the conversation
         result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
         
@@ -2493,8 +2534,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 "role": message_role,
                 "content": row["content"]
             })
-        
-        logger.info(f"Loaded {len(claude_messages)} messages from conversation {actual_conversation_id} for user {user_id}")
+
         return claude_messages
         
     except Exception as e:
@@ -2929,7 +2969,7 @@ async def set_user_timezone_api(
 
     success, message = set_user_timezone(user_id, request.timezone)
     if success:
-        logger.info(f"Successfully set timezone for user {user_id} via API: {request.timezone}")
+        logger.debug(f"Successfully set timezone for user {user_id} via API: {request.timezone}")
         return {"status": "success", "message": message}
     else:
         # set_user_timezone already logs detailed errors
