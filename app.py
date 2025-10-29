@@ -23,6 +23,7 @@ from screen_agent_tools import screen_agent_tools, launch_app, disable_continuou
 from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
 from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, select_location_from_list
+from color_tools import color_tools, pick_random_color
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -82,7 +83,7 @@ IMPORTANT: When a user asks you to open an app, DO NOT just say you opened it - 
 Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud."""
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools
+tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -827,6 +828,12 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": None
+    },
+    "pick_random_color": {
+        "function_name": "pick_random_color",
+        "requires_auth": False,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
     }
 }
 
@@ -1260,19 +1267,30 @@ async def refresh_access_token(request_data: RefreshTokenRequest):
         # For stateless refresh, we assume if it decodes and is type 'refresh', it's valid.
         # If we had a revocation list or stored refresh tokens, we'd check that here.
 
-        # Create a new access token - payload might need more than just sub for access tokens
-        # Re-fetch user details or ensure access token payload is consistent
-        # For simplicity, if access_token_data in /auth/google was just {"sub": user_id, "email": ..., "name": ...}
-        # we need to ensure that info is still available or decide what goes into a refreshed access token.
-        # Let's assume for now the access token only strictly needs 'sub' for get_current_user, 
-        # but it's better if it matches the original structure.
-        # Since we don't have email/name from refresh token, we keep new access token minimal.
-        new_access_token_data = {
-            "sub": user_id,
-            # If you need email/name in access tokens and they aren't in refresh token,
-            # you might need to fetch them from DB or adjust what `get_current_user` relies on.
-            # For now, this will make the access token a bit simpler than the login one.
-        }
+        # Fetch user details from database to include in the new access token
+        # This ensures the refreshed token has all the necessary fields (email, name, etc.)
+        # that subscription and other endpoints might require
+        try:
+            user_data = supabase.table("users").select("email, user_id").eq("user_id", user_id).execute()
+            if not user_data.data or len(user_data.data) == 0:
+                logger.error(f"User {user_id} not found in database during token refresh")
+                raise HTTPException(status_code=401, detail="User not found")
+
+            user_email = user_data.data[0].get("email")
+
+            # Create a new access token with complete user information
+            new_access_token_data = {
+                "sub": user_id,
+                "email": user_email,
+                # Include name if it was in the original token (check what /auth/google includes)
+            }
+            logger.info(f"Creating refreshed access token for user {user_id} with email {user_email}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching user data during token refresh: {str(e)}")
+            raise HTTPException(status_code=500, detail="Failed to fetch user data")
+
         new_access_token = create_access_token(new_access_token_data)
         
         logger.info(f"Successfully refreshed access token for user {user_id}.")
