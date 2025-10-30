@@ -401,7 +401,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "change_task_parent",
-        "description": "Change the parent task of an existing task. If new_parent_gid is None, the task will become a standalone task (no parent).",
+        "description": "Change the parent task of an existing task. If new_parent_gid is None, the task will become a standalone task (no parent). You MUST use this tool if you are changing the parent task of an existing task, or else you will end up creating a duplicate task by accident.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -439,7 +439,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "delete_asana_task",
-        "description": "Delete an Asana task. This action is permanent and cannot be undone. Use this tool when the user explicitly asks to delete a task.",
+        "description": "Delete an Asana task. This action is permanent and cannot be undone. Use this tool when the user explicitly asks to delete a task. You can also use this tool if you recreate a task, to clean up the old one.",
         "input_schema": {
             "type": "object",
             "properties": {
