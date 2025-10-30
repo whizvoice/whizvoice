@@ -627,5 +627,54 @@ messaging_tools = [
             },
             "required": ["message"]
         }
+    },
+    {
+        "type": "custom",
+        "name": "sms_select_chat",
+        "description": "Select a specific SMS conversation by contact name or phone number in Google Messages. IMPORTANT: Google Messages app must already be open - use launch_app tool first to open 'Messages' if needed. Use this when the user wants to open an SMS/text message conversation with a specific contact or phone number.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "contact_name": {
+                    "type": "string",
+                    "description": "The name or phone number of the contact to select in Google Messages app"
+                }
+            },
+            "required": ["contact_name"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "sms_draft_message",
+        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. IMPORTANT: SMS conversation must be open first (use launch_app to open Messages, then sms_select_chat to open the conversation). Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The SMS/text message text to draft for user review before sending"
+                },
+                "previous_text": {
+                    "type": "string",
+                    "description": "Optional. The previous version of the message text. When provided, the overlay will show tracked changes (deletions in red strikethrough, additions in blue)"
+                }
+            },
+            "required": ["message"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "sms_send_message",
+        "description": "Send an SMS/text message in Google Messages. IMPORTANT: You MUST have already: 1) Opened Messages app (launch_app), 2) Selected a conversation (sms_select_chat), 3) Drafted the message (sms_draft_message), 4) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in Google Messages.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The exact SMS/text message text that was drafted and confirmed by the user"
+                }
+            },
+            "required": ["message"]
+        }
     }
 ]
