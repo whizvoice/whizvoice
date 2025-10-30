@@ -18,7 +18,7 @@ from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date, delete_asana_task
-from about_me_tool import about_me_tools, get_app_info
+from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
 from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
 from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
@@ -631,6 +631,12 @@ TOOL_REGISTRY = {
     "get_app_info": {
         "function_name": "get_app_info",
         "requires_auth": False,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "get_user_data": {
+        "function_name": "get_user_data",
+        "requires_auth": True,
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
     },
