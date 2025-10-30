@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from asana_tools import (
     get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date,
-    get_parent_tasks, create_asana_task, change_task_parent
+    get_parent_tasks, create_asana_task, change_task_parent, delete_asana_task
 )
 
 class TestAsanaTools(unittest.TestCase):
@@ -361,6 +361,44 @@ class TestAsanaTools(unittest.TestCase):
             task_gid='task123',
             opts={'opt_fields': 'name,due_on,completed,projects.name'}
         )
+
+    @patch('asana_tools.get_decrypted_preference_key')
+    @patch('asana.TasksApi')
+    @patch('asana.ApiClient')
+    def test_delete_asana_task(self, mock_client, mock_tasks_api, mock_get_token):
+        """Test deleting an Asana task"""
+        # Setup mocks
+        mock_get_token.return_value = "fake_token"
+
+        # Mock task API
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+
+        # Mock delete_task to return None (successful deletion)
+        mock_task_api.delete_task.return_value = None
+
+        # Test deleting a task
+        result = delete_asana_task(self.test_user_id, 'task123')
+
+        # Assert - The function returns a success message
+        self.assertTrue(result['success'])
+        self.assertIn('deleted successfully', result['message'])
+        self.assertIn('task123', result['message'])
+
+        # Verify correct API calls
+        mock_task_api.delete_task.assert_called_once_with(task_gid='task123')
+
+    @patch('asana_tools.get_decrypted_preference_key')
+    def test_delete_asana_task_no_token(self, mock_get_token):
+        """Test deleting a task when no access token is available"""
+        # Mock no token
+        mock_get_token.return_value = None
+
+        # Call function
+        result = delete_asana_task(self.test_user_id, 'task123')
+
+        # Assert
+        self.assertEqual(result, "Error: Asana access token not found in user preferences.")
 
 if __name__ == '__main__':
     unittest.main() 

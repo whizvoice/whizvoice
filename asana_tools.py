@@ -251,7 +251,7 @@ def update_task_due_date(user_id: str, task_gid, new_due_date):
     try:
         api_client = get_asana_client(user_id)
         tasks_api = asana.TasksApi(api_client)
-        
+
         # Update the task's due date
         updated_task = tasks_api.update_task(
             body={'data': {'due_on': new_due_date}},
@@ -259,6 +259,31 @@ def update_task_due_date(user_id: str, task_gid, new_due_date):
             opts={'opt_fields': 'name,due_on,completed,projects.name'}
         )
         return updated_task
+    except ValueError as e:
+        # Re-raise the token error to be handled by the WebSocket endpoint
+        raise
+    except AsanaError as e:
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
+
+def delete_asana_task(user_id: str, task_gid):
+    """Delete an Asana task by its GID."""
+    configuration = asana.Configuration()
+    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
+    if not asana_access_token:
+        return "Error: Asana access token not found in user preferences."
+    configuration.access_token = asana_access_token
+    api_client = asana.ApiClient(configuration)
+    try:
+        api_client = get_asana_client(user_id)
+        tasks_api = asana.TasksApi(api_client)
+
+        # Delete the task
+        tasks_api.delete_task(task_gid=task_gid)
+        return {"success": True, "message": f"Task {task_gid} has been deleted successfully."}
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
@@ -376,7 +401,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "change_task_parent",
-        "description": "Change the parent task of an existing task. If new_parent_gid is None, the task will become a standalone task (no parent).",
+        "description": "Change the parent task of an existing task. If new_parent_gid is None, the task will become a standalone task (no parent). You MUST use this tool if you are changing the parent task of an existing task, or else you will end up creating a duplicate task by accident.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -409,6 +434,21 @@ asana_tools = [
                 }
             },
             "required": ["task_gid", "new_due_date"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "delete_asana_task",
+        "description": "Delete an Asana task. This action is permanent and cannot be undone. Use this tool when the user explicitly asks to delete a task. You can also use this tool if you recreate a task, to clean up the old one.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_gid": {
+                    "type": "string",
+                    "description": "The GID of the task to delete"
+                }
+            },
+            "required": ["task_gid"]
         }
     }
 ] 
