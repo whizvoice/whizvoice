@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date, delete_asana_task
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
-from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
+from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message, sms_select_chat, sms_draft_message, sms_send_message
 from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, select_location_from_list
 from color_tools import color_tools, pick_random_color
@@ -70,9 +70,10 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
 
 1. When the user asks to open/launch an app (like WhatsApp, YouTube, Maps, etc.), you MUST use the 'launch_app' tool
 2. For WhatsApp messaging, use the WhatsApp-specific tools (whatsapp_select_chat, whatsapp_draft_message, whatsapp_send_message)
-3. For Asana/task management, use the Asana tools
-4. For app information, use the get_app_info tool
-5. For music playback:
+3. For SMS texting, use the SMS-specific tools (sms_select_chat, sms_draft_message, sms_send_message)
+4. For Asana/task management, use the Asana tools
+5. For app information, use the get_app_info tool
+6. For music playback:
    - When the user asks to play music WITHOUT specifying an app, check their music app preference using get_music_app_preference
    - If no preference is set, ask the user which music app they prefer (YouTube Music or Spotify) and save it using set_music_app_preference
    - Use play_youtube_music or queue_youtube_music tools based on the user's preference
@@ -696,6 +697,49 @@ TOOL_REGISTRY = {
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id'),
             args.get('previous_text')  # Add previous_text parameter
+        ),
+        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
+    },
+    "sms_select_chat": {
+        "function_name": "sms_select_chat",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('contact_name'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Contact name is required."} if not args.get('contact_name') else None
+    },
+    "sms_draft_message": {
+        "function_name": "sms_draft_message",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('message'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id'),
+            args.get('previous_text')
+        ),
+        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
+    },
+    "sms_send_message": {
+        "function_name": "sms_send_message",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('message'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
         ),
         "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     },
