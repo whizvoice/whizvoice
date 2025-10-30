@@ -17,7 +17,7 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date, delete_asana_task
 from about_me_tool import about_me_tools, get_app_info
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
 from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
@@ -621,6 +621,12 @@ TOOL_REGISTRY = {
             {"error": "New due date is required."} if not args.get('new_due_date') else
             None
         )
+    },
+    "delete_asana_task": {
+        "function_name": "delete_asana_task",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('task_gid')),
+        "validation": lambda args: {"error": "Task GID is required."} if not args.get('task_gid') else None
     },
     "get_app_info": {
         "function_name": "get_app_info",
