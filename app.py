@@ -2611,27 +2611,27 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
     Returns list of cancelled request IDs.
     """
     cancelled_requests = []
-    cancelled_bot_messages = []  # Track bot messages that need delete notifications
-    
+    cancelled_bot_messages = []  # Track (bot_message_id, request_id) tuples for delete notifications
+
     if not redis_managers or "request_messages" not in redis_managers:
         return cancelled_requests
-    
+
     try:
         # Get all requests for this conversation
         all_requests = await redis_managers["request_messages"].get_by_conversation(conversation_id)
-        
+
         for request_id, request_data in all_requests.items():
             # Skip if already cancelled
             if request_data.get("status") == "cancelled":
                 continue
-            
+
             old_message_ids = set(request_data.get("message_ids", []))
             new_message_ids_set = set(new_message_ids)
-            
+
             # Check if old request is a subset of new request
             if old_message_ids and old_message_ids.issubset(new_message_ids_set) and old_message_ids != new_message_ids_set:
                 logger.info(f"Request {request_id} (messages {old_message_ids}) is subset of new request (messages {new_message_ids_set})")
-                
+
                 # Check if this request has already sent a bot response
                 # Query the database for bot messages with this request_id
                 try:
@@ -2641,12 +2641,12 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                         .eq("message_type", "ASSISTANT")\
                         .is_("cancelled", "null")\
                         .execute()
-                    
+
                     if bot_msg_result.data:
                         for bot_msg in bot_msg_result.data:
                             bot_message_id = bot_msg["id"]
-                            cancelled_bot_messages.append(bot_message_id)
-                            
+                            cancelled_bot_messages.append((bot_message_id, request_id))  # Store both ID and request_id
+
                             # Mark the bot message as cancelled in the database
                             supabase.table("messages")\
                                 .update({"cancelled": "now()"})\
@@ -2678,16 +2678,17 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
         
         # Send delete notifications for cancelled bot messages
         if cancelled_bot_messages and websocket and session_id:
-            for bot_message_id in cancelled_bot_messages:
+            for bot_message_id, request_id in cancelled_bot_messages:
                 delete_notification = {
                     "type": "delete_message",
                     "message_id": bot_message_id,
                     "conversation_id": conversation_id,
+                    "request_id": request_id,  # Include request_id so client can match and delete local message
                     "reason": "superseded_by_new_request"
                 }
                 try:
                     await websocket.send_text(json.dumps(delete_notification))
-                    logger.info(f"Sent delete notification for bot message {bot_message_id} to session {session_id}")
+                    logger.info(f"Sent delete notification for bot message {bot_message_id} (request {request_id}) to session {session_id}")
                 except Exception as e:
                     logger.warning(f"Failed to send delete notification for message {bot_message_id}: {e}")
             
