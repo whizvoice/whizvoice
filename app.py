@@ -82,7 +82,10 @@ IMPORTANT: When a user asks you to open an app, DO NOT just say you opened it - 
 
 Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud.
 
-FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *italic*, `code`, code blocks with triple backticks, lists, etc.) to improve readability. The app will render markdown appropriately."""
+FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *italic*, `code`, code blocks with triple backticks, lists, etc.) to improve readability. The app will render markdown appropriately.
+
+DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. If you, for example, sucessfully sent a message or made a task in Asana, DO NOT do the same thing again so the user does not see duplicates.
+"""
 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools
