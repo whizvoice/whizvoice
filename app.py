@@ -1616,6 +1616,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         .select("id")\
                         .eq("user_id", user_id)\
                         .eq("optimistic_chat_id", str(conversation_id))\
+                        .is_("deleted_at", "null")\
                         .execute()
                     
                     if opt_result.data and len(opt_result.data) > 0:
@@ -2587,6 +2588,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                     .select("id")\
                     .eq("user_id", user_id)\
                     .eq("optimistic_chat_id", str(conversation_id))\
+                    .is_("deleted_at", "null")\
                     .execute()
                 
                 if opt_result.data and len(opt_result.data) > 0:
@@ -2604,24 +2606,53 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
 
         # Get messages for the conversation
         result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
-        
+
         # Convert database messages to Claude format
+        # Group messages by request_id to combine text + tool content in same message
         claude_messages = []
+        messages_by_request = {}  # request_id -> list of rows
+
         for row in result.data:
-            message_role = "user" if row["message_sender"] == "USER" else "assistant"
-
-            # Check if this is a tool message with structured content
-            if row.get("tool_content"):
-                # Tool messages have structured content in tool_content field
-                content = row["tool_content"]
+            req_id = row.get("request_id")
+            if req_id:
+                if req_id not in messages_by_request:
+                    messages_by_request[req_id] = []
+                messages_by_request[req_id].append(row)
             else:
-                # Regular text messages - wrap in Claude's content format
-                content = [{"type": "text", "text": row["content"]}]
+                # No request_id - treat as standalone message
+                message_role = "user" if row["message_sender"] == "USER" else "assistant"
+                if row.get("tool_content"):
+                    content = row["tool_content"]
+                else:
+                    content = [{"type": "text", "text": row["content"]}]
 
-            claude_messages.append({
-                "role": message_role,
-                "content": content
-            })
+                claude_messages.append({
+                    "role": message_role,
+                    "content": content
+                })
+
+        # Process grouped messages
+        for req_id in sorted(messages_by_request.keys(), key=lambda r: messages_by_request[r][0]["timestamp"]):
+            rows = messages_by_request[req_id]
+
+            # All rows with same request_id should have same role
+            message_role = "user" if rows[0]["message_sender"] == "USER" else "assistant"
+
+            # Combine all content blocks from all rows with this request_id
+            combined_content = []
+            for row in rows:
+                if row.get("tool_content"):
+                    # Tool content is already a list of content blocks
+                    combined_content.extend(row["tool_content"])
+                elif row.get("content") and row["content"].strip():
+                    # Text content needs to be wrapped
+                    combined_content.append({"type": "text", "text": row["content"]})
+
+            if combined_content:
+                claude_messages.append({
+                    "role": message_role,
+                    "content": combined_content
+                })
 
         return claude_messages
         
@@ -2794,6 +2825,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 .select("id")\
                 .eq("optimistic_chat_id", str(conversation_id))\
                 .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
                 .execute()
             
             if conv_result.data:
@@ -2827,6 +2859,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 .select("id")\
                 .eq("optimistic_chat_id", str(client_conversation_id))\
                 .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
                 .execute()
             
             if conv_result.data:
@@ -3666,6 +3699,7 @@ async def create_message(
                 .select("id")\
                 .eq("optimistic_chat_id", str(message.conversation_id))\
                 .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
                 .execute()
             
             if conv_result.data:
