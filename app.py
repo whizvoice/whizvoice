@@ -215,9 +215,9 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             for msg in db_messages:
                 if msg.get('cancelled'):
                     continue
-                if msg['message_type'] == 'USER':
+                if msg['message_sender'] == 'USER':
                     redis_messages.append({"role": "user", "content": msg['content']})
-                elif msg['message_type'] == 'ASSISTANT':
+                elif msg['message_sender'] == 'ASSISTANT':
                     redis_messages.append({"role": "assistant", "content": msg['content']})
 
             if redis_messages:
@@ -2608,10 +2608,19 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         # Convert database messages to Claude format
         claude_messages = []
         for row in result.data:
-            message_role = "user" if row["message_type"] == "USER" else "assistant"
+            message_role = "user" if row["message_sender"] == "USER" else "assistant"
+
+            # Check if this is a tool message with structured content
+            if row.get("tool_content"):
+                # Tool messages have structured content in tool_content field
+                content = row["tool_content"]
+            else:
+                # Regular text messages - wrap in Claude's content format
+                content = [{"type": "text", "text": row["content"]}]
+
             claude_messages.append({
                 "role": message_role,
-                "content": row["content"]
+                "content": content
             })
 
         return claude_messages
@@ -2625,21 +2634,21 @@ def get_user_message_ids_since_last_bot(conversation_id: int) -> List[int]:
     try:
         # Get all messages ordered by timestamp
         result = supabase.table("messages")\
-            .select("id, message_type")\
+            .select("id, message_sender")\
             .eq("conversation_id", conversation_id)\
             .is_("cancelled", "null")\
             .order("timestamp", desc=False)\
             .execute()
-        
+
         if not result.data:
             return []
-        
+
         # Find user messages since last bot message
         user_message_ids = []
         for msg in reversed(result.data):  # Start from most recent
-            if msg["message_type"] == "ASSISTANT":
+            if msg["message_sender"] == "ASSISTANT":
                 break  # Stop at the most recent bot message
-            elif msg["message_type"] == "USER":
+            elif msg["message_sender"] == "USER":
                 user_message_ids.append(msg["id"])
         
         return list(reversed(user_message_ids))  # Return in chronological order
@@ -2653,7 +2662,7 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         result = supabase.table("messages")\
             .select("id")\
             .eq("conversation_id", conversation_id)\
-            .eq("message_type", "ASSISTANT")\
+            .eq("message_sender", "ASSISTANT")\
             .is_("cancelled", "null")\
             .order("id", desc=False)\
             .execute()
@@ -2699,7 +2708,7 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                     bot_msg_result = supabase.table("messages")\
                         .select("id")\
                         .eq("request_id", request_id)\
-                        .eq("message_type", "ASSISTANT")\
+                        .eq("message_sender", "ASSISTANT")\
                         .is_("cancelled", "null")\
                         .execute()
 
@@ -2758,11 +2767,23 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
     
     return cancelled_requests
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None) -> Optional[Tuple[int, int]]:
-    """Save a message to the database and return (conversation_id, message_id)"""
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None) -> Optional[Tuple[int, int]]:
+    """Save a message to the database and return (conversation_id, message_id)
+
+    Args:
+        user_id: User ID
+        conversation_id: Conversation ID (can be negative for optimistic IDs)
+        content: Text content of the message
+        message_sender: 'USER' or 'ASSISTANT' (renamed from message_type)
+        request_id: Optional request ID for tracking
+        client_conversation_id: Optional optimistic conversation ID from client
+        client_timestamp: Optional timestamp from client
+        content_type: Type of content - 'text', 'tool_use', 'tool_result', or 'mixed'
+        tool_content: Optional JSONB content for tool-related messages
+    """
     try:
-        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, client_conversation_id={client_conversation_id}, content='{content[:50]}...'")
-        
+        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_conversation_id={client_conversation_id}, content='{content[:50] if content else '(empty)'}...'")
+
         # Handle optimistic conversation IDs (negative IDs)
         original_optimistic_id = None
         if conversation_id is not None and conversation_id < 0:
@@ -2846,31 +2867,37 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
         # Save the message
-        logger.info(f"Attempting to save {message_type} message to conversation_id={conversation_id}, request_id={request_id}")
-        
+        logger.info(f"Attempting to save {message_sender} message to conversation_id={conversation_id}, request_id={request_id}, content_type={content_type}")
+
         # Prepare message data
         message_data = {
             "conversation_id": conversation_id,
             "content": content,
-            "message_type": message_type,
+            "message_sender": message_sender,
+            "content_type": content_type,
             "request_id": request_id
         }
-        
+
+        # Add tool_content if provided
+        if tool_content is not None:
+            message_data["tool_content"] = tool_content
+            logger.info(f"Including tool_content in message: {json.dumps(tool_content)[:100]}...")
+
         # For USER messages with client_timestamp, use the provided timestamp to preserve message order
-        if message_type == "USER" and client_timestamp:
+        if message_sender == "USER" and client_timestamp:
             # Client timestamp is already in ISO format from Android client
             message_data["timestamp"] = client_timestamp
             logger.info(f"Using client-provided timestamp for USER message: {client_timestamp}")
         
         # For ASSISTANT messages with request_id, set timestamp to be right after the USER message
         # This ensures the response appears immediately after the user message it's responding to
-        if message_type == "ASSISTANT" and request_id:
+        if message_sender == "ASSISTANT" and request_id:
             # Find the USER message with this request_id
             user_msg_result = supabase.table("messages")\
                 .select("timestamp")\
                 .eq("conversation_id", conversation_id)\
                 .eq("request_id", request_id)\
-                .eq("message_type", "USER")\
+                .eq("message_sender", "USER")\
                 .execute()
             
             if user_msg_result.data:
@@ -2927,16 +2954,16 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         actual_timestamp = saved_message.get("timestamp")
         logger.info(f"DEBUG: Message {message_id} saved with timestamp: {actual_timestamp}")
         saved_conv_id = saved_message.get("conversation_id")
-        logger.info(f"Successfully saved {message_type} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}")
-        
+        logger.info(f"Successfully saved {message_sender} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}, content_type={content_type}")
+
         # Update conversation last_message_time and updated_at for incremental sync
         update_result = supabase.table("conversations").update({
             "last_message_time": "now()",
             "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
         }).eq("id", conversation_id).execute()
-        
+
         if update_result.data:
-            logger.info(f"Updated conversation {conversation_id} timestamps for {message_type} message")
+            logger.info(f"Updated conversation {conversation_id} timestamps for {message_sender} message")
         else:
             logger.warning(f"Failed to update conversation {conversation_id} timestamps")
         
@@ -3568,9 +3595,12 @@ async def get_messages(
         
         # Build the messages query - explicitly select fields including cancelled
         # Include ALL messages (including cancelled ones) so client can handle them appropriately
+        # Filter out tool messages (tool_use, tool_result) - only send text messages to Android client
         query = supabase.table("messages")\
-            .select("id, conversation_id, content, message_type, timestamp, updated_at, request_id, cancelled")\
+            .select("id, conversation_id, content, message_sender, content_type, timestamp, updated_at, request_id, cancelled")\
             .eq("conversation_id", actual_conversation_id)\
+            .neq("content_type", "tool_use")\
+            .neq("content_type", "tool_result")\
             .order("timestamp", desc=False)
         
         # Add incremental sync filter if provided
@@ -3653,7 +3683,8 @@ async def create_message(
         message_data = {
             "conversation_id": actual_conversation_id,
             "content": message.content,
-            "message_type": message.message_type,
+            "message_sender": message.message_type,  # Note: message_type field from client maps to message_sender in DB
+            "content_type": "text",  # REST API only supports text messages for now
             "request_id": message.request_id
         }
         
@@ -3757,19 +3788,19 @@ async def check_and_retry_failed_messages(
             last_message = messages[-1]
             
             # Check if it's an error message (ASSISTANT type with JSON error content)
-            if last_message.get("message_type") == "ASSISTANT":
+            if last_message.get("message_sender") == "ASSISTANT":
                 try:
                     content = json.loads(last_message.get("content", ""))
                     if content.get("type") == "error":
                         error_code = content.get("code")
                         request_id = content.get("request_id")
-                        
+
                         logger.info(f"Found error message with code {error_code}, will retry getting assistant response")
-                        
+
                         # Find the user message before this error
                         user_message_content = None
                         for i in range(len(messages) - 2, -1, -1):
-                            if messages[i].get("message_type") == "USER":
+                            if messages[i].get("message_sender") == "USER":
                                 user_message_content = messages[i].get("content")
                                 break
                         
@@ -3787,9 +3818,9 @@ async def check_and_retry_failed_messages(
                             # Build conversation history in chat session (exclude the error message)
                             chat_messages = []
                             for msg in messages[:-1]:  # Exclude the last error message
-                                if msg.get("message_type") == "USER":
+                                if msg.get("message_sender") == "USER":
                                     chat_messages.append({"role": "user", "content": msg.get("content")})
-                                elif msg.get("message_type") == "ASSISTANT":
+                                elif msg.get("message_sender") == "ASSISTANT":
                                     # Skip if it's an error message
                                     try:
                                         msg_content = json.loads(msg.get("content", ""))
@@ -3842,8 +3873,9 @@ async def check_and_retry_failed_messages(
                                         user_id=user_id,
                                         conversation_id=actual_conversation_id,
                                         content=assistant_response,
-                                        message_type="ASSISTANT",
-                                        request_id=request_id
+                                        message_sender="ASSISTANT",
+                                        request_id=request_id,
+                                        content_type="text"
                                     )
                                     
                                     if save_result:
@@ -3882,8 +3914,9 @@ async def check_and_retry_failed_messages(
                                     user_id=user_id,
                                     conversation_id=actual_conversation_id,
                                     content=error_content,
-                                    message_type="ASSISTANT",
-                                    request_id=request_id
+                                    message_sender="ASSISTANT",
+                                    request_id=request_id,
+                                    content_type="text"
                                 )
                                 return {
                                     "retried": False,
@@ -3904,8 +3937,9 @@ async def check_and_retry_failed_messages(
                                     user_id=user_id,
                                     conversation_id=actual_conversation_id,
                                     content=new_error_content,
-                                    message_type="ASSISTANT",
-                                    request_id=request_id
+                                    message_sender="ASSISTANT",
+                                    request_id=request_id,
+                                    content_type="text"
                                 )
                                 
                                 return {
@@ -3999,9 +4033,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         continue
                     
                     # Format for Redis (same as Claude API format)
-                    if msg['message_type'] == 'USER':
+                    if msg['message_sender'] == 'USER':
                         redis_messages.append({"role": "user", "content": msg['content']})
-                    elif msg['message_type'] == 'ASSISTANT':
+                    elif msg['message_sender'] == 'ASSISTANT':
                         redis_messages.append({"role": "assistant", "content": msg['content']})
                 
                 # Populate Redis session with conversation history
@@ -4018,7 +4052,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp)
+        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp, content_type="text")
         if save_result is None:
             logger.error("Failed to save user message to database")
             error_payload = {
@@ -4083,7 +4117,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     logger.info(f"Loading existing messages for conversation {session_conversation_id} before adding new message")
                     try:
                         query = supabase.table("messages")\
-                            .select("id, content, message_type, timestamp, request_id, cancelled")\
+                            .select("id, content, message_sender, timestamp, request_id, cancelled")\
                             .eq("conversation_id", session_conversation_id)\
                             .order("timestamp", desc=False)
                         
@@ -4098,9 +4132,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                                 continue
                             
                             # Format for Redis (same as Claude API format)
-                            if msg['message_type'] == 'USER':
+                            if msg['message_sender'] == 'USER':
                                 redis_messages.append({"role": "user", "content": msg['content']})
-                            elif msg['message_type'] == 'ASSISTANT':
+                            elif msg['message_sender'] == 'ASSISTANT':
                                 redis_messages.append({"role": "assistant", "content": msg['content']})
                         
                         if redis_messages:
@@ -4289,8 +4323,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 user_id=user_id,
                 conversation_id=session_conversation_id,
                 content=error_json_content,
-                message_type="ASSISTANT",
-                request_id=request_id
+                message_sender="ASSISTANT",
+                request_id=request_id,
+                content_type="text"
             )
             if save_result:
                 saved_conversation_id, error_message_id = save_result
@@ -4420,11 +4455,38 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "input": tool_block.input
                 }
                 await add_chat_message(session_id, {"role": "assistant", "content": [tool_block_dict]})
-                await add_chat_message(session_id, {"role": "user", "content": [{
+
+                # Save tool_use message to database
+                save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content="",  # Tool messages don't have text content
+                    message_sender="ASSISTANT",
+                    request_id=request_id,
+                    content_type="tool_use",
+                    tool_content=[tool_block_dict]
+                )
+                logger.info(f"Saved tool_use message to database: {tool_block.name}")
+
+                # Create tool result message
+                tool_result_dict = {
                     "type": "tool_result",
                     "tool_use_id": tool_block.id,
-                    "content": json.dumps(tool_execution_result) 
-                }]})
+                    "content": json.dumps(tool_execution_result)
+                }
+                await add_chat_message(session_id, {"role": "user", "content": [tool_result_dict]})
+
+                # Save tool_result message to database
+                save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content="",  # Tool messages don't have text content
+                    message_sender="USER",
+                    request_id=request_id,
+                    content_type="tool_result",
+                    tool_content=[tool_result_dict]
+                )
+                logger.info(f"Saved tool_result message to database for tool: {tool_block.name}")
             
             # Use async API call for tool response
             try:
@@ -4476,8 +4538,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     user_id=user_id,
                     conversation_id=session_conversation_id,
                     content=error_json_content,
-                    message_type="ASSISTANT",
-                    request_id=request_id
+                    message_sender="ASSISTANT",
+                    request_id=request_id,
+                    content_type="text"
                 )
                 if save_result:
                     saved_conversation_id, error_message_id = save_result
@@ -4533,7 +4596,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         save_result = None
         if assistant_response_text:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
-            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
+            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text")
             if save_result:
                 saved_conversation_id, bot_message_id = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
