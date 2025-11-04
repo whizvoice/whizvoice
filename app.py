@@ -2608,51 +2608,51 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
 
         # Convert database messages to Claude format
-        # Group messages by request_id to combine text + tool content in same message
+        # Group consecutive messages by (request_id, role) to combine text + tool content
         claude_messages = []
-        messages_by_request = {}  # request_id -> list of rows
+        current_group = None  # (request_id, role, content_blocks)
 
         for row in result.data:
+            message_role = "user" if row["message_sender"] == "USER" else "assistant"
             req_id = row.get("request_id")
-            if req_id:
-                if req_id not in messages_by_request:
-                    messages_by_request[req_id] = []
-                messages_by_request[req_id].append(row)
-            else:
-                # No request_id - treat as standalone message
-                message_role = "user" if row["message_sender"] == "USER" else "assistant"
+
+            # Determine if this row belongs to current group
+            should_group = (
+                current_group is not None and
+                req_id is not None and
+                req_id == current_group[0] and
+                message_role == current_group[1]
+            )
+
+            if should_group:
+                # Add to current group
                 if row.get("tool_content"):
-                    content = row["tool_content"]
-                else:
-                    content = [{"type": "text", "text": row["content"]}]
-
-                claude_messages.append({
-                    "role": message_role,
-                    "content": content
-                })
-
-        # Process grouped messages
-        for req_id in sorted(messages_by_request.keys(), key=lambda r: messages_by_request[r][0]["timestamp"]):
-            rows = messages_by_request[req_id]
-
-            # All rows with same request_id should have same role
-            message_role = "user" if rows[0]["message_sender"] == "USER" else "assistant"
-
-            # Combine all content blocks from all rows with this request_id
-            combined_content = []
-            for row in rows:
-                if row.get("tool_content"):
-                    # Tool content is already a list of content blocks
-                    combined_content.extend(row["tool_content"])
+                    current_group[2].extend(row["tool_content"])
                 elif row.get("content") and row["content"].strip():
-                    # Text content needs to be wrapped
-                    combined_content.append({"type": "text", "text": row["content"]})
+                    current_group[2].append({"type": "text", "text": row["content"]})
+            else:
+                # Flush current group if exists
+                if current_group and current_group[2]:
+                    claude_messages.append({
+                        "role": current_group[1],
+                        "content": current_group[2]
+                    })
 
-            if combined_content:
-                claude_messages.append({
-                    "role": message_role,
-                    "content": combined_content
-                })
+                # Start new group
+                content_blocks = []
+                if row.get("tool_content"):
+                    content_blocks.extend(row["tool_content"])
+                elif row.get("content") and row["content"].strip():
+                    content_blocks.append({"type": "text", "text": row["content"]})
+
+                current_group = [req_id, message_role, content_blocks]
+
+        # Flush final group
+        if current_group and current_group[2]:
+            claude_messages.append({
+                "role": current_group[1],
+                "content": current_group[2]
+            })
 
         return claude_messages
         
