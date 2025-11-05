@@ -212,6 +212,15 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             db_messages = response.data if response.data else []
 
             redis_messages = []
+            # First pass: identify tool_use IDs that have corresponding tool_results
+            tool_use_ids_with_results = set()
+            for msg in db_messages:
+                if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                    for block in msg['tool_content']:
+                        if isinstance(block, dict) and block.get('tool_use_id'):
+                            tool_use_ids_with_results.add(block['tool_use_id'])
+
+            # Second pass: build messages, skipping incomplete tool_use blocks
             for msg in db_messages:
                 if msg.get('cancelled'):
                     continue
@@ -219,8 +228,18 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 content_type = msg.get('content_type', 'text')
                 tool_content = msg.get('tool_content')
 
-                # Handle tool_use and tool_result messages
+                # Handle tool_use messages - skip if no corresponding tool_result
                 if content_type == 'tool_use' and tool_content:
+                    tool_use_id = None
+                    for block in tool_content:
+                        if isinstance(block, dict) and block.get('id'):
+                            tool_use_id = block['id']
+                            break
+
+                    if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                        logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
+                        continue
+
                     redis_messages.append({"role": "assistant", "content": tool_content})
                 elif content_type == 'tool_result' and tool_content:
                     redis_messages.append({"role": "user", "content": tool_content})
@@ -379,6 +398,58 @@ SESSION_WARNING_THRESHOLD = 0.8  # Warn when at 80% capacity
 # Redis connection and managers
 redis_client: Optional[redis.Redis] = None
 redis_managers = None  # Will be initialized after Redis connection
+
+# Helper functions for managing pending tool execution counter
+async def increment_pending_tools(conversation_id: int):
+    """Increment the pending tool counter for a conversation"""
+    if redis_client:
+        key = f"conversation:{conversation_id}:pending_tools"
+        await redis_client.incr(key)
+        await redis_client.expire(key, 60)  # Auto-cleanup after 60s
+        logger.debug(f"Incremented pending tools for conversation {conversation_id}")
+
+async def decrement_pending_tools(conversation_id: int):
+    """Decrement the pending tool counter for a conversation"""
+    if redis_client:
+        key = f"conversation:{conversation_id}:pending_tools"
+        current = await redis_client.get(key)
+        if current and int(current) > 0:
+            await redis_client.decr(key)
+            logger.debug(f"Decremented pending tools for conversation {conversation_id}")
+
+async def get_pending_tools_count(conversation_id: int) -> int:
+    """Get the count of pending tool executions for a conversation"""
+    if redis_client:
+        key = f"conversation:{conversation_id}:pending_tools"
+        count = await redis_client.get(key)
+        return int(count) if count else 0
+    return 0
+
+async def wait_for_pending_tools(conversation_id: int, timeout_seconds: float = 5.0) -> bool:
+    """
+    Wait for pending tool executions to complete.
+    Returns True if all tools completed, False if timeout reached.
+    """
+    if not conversation_id:
+        return True
+
+    start_time = time.time()
+    max_attempts = int(timeout_seconds / 0.5)
+
+    for attempt in range(max_attempts):
+        pending_count = await get_pending_tools_count(conversation_id)
+        if pending_count == 0:
+            logger.info(f"All pending tools completed for conversation {conversation_id}")
+            return True
+
+        if time.time() - start_time >= timeout_seconds:
+            logger.warning(f"Timeout waiting for {pending_count} pending tools in conversation {conversation_id}")
+            return False
+
+        logger.debug(f"Waiting for {pending_count} pending tools (attempt {attempt + 1}/{max_attempts})")
+        await asyncio.sleep(0.5)
+
+    return False
 
 # Local-only data structures moved to LocalObjectManager in redis_managers
 
@@ -4068,12 +4139,50 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         })
         
         messages = await get_chat_messages(session_id)
-        
-        # If we have an existing conversation but no messages in Redis, populate from database
-        # This handles reconnection scenarios where multiple messages were sent while offline
+
+        # Check if conversation history is complete (every tool_use has a tool_result)
+        # This handles race conditions where a new message arrives while a tool is executing
+        has_incomplete_tool = False
+        if len(messages) > 0:
+            for i, msg in enumerate(messages):
+                if msg.get('role') == 'assistant' and isinstance(msg.get('content'), list):
+                    for block in msg['content']:
+                        if isinstance(block, dict) and block.get('type') == 'tool_use':
+                            # Check if next message is a tool_result for this tool_use
+                            tool_use_id = block.get('id')
+                            if i + 1 >= len(messages):
+                                has_incomplete_tool = True
+                                break
+                            next_msg = messages[i + 1]
+                            if next_msg.get('role') != 'user':
+                                has_incomplete_tool = True
+                                break
+                            next_content = next_msg.get('content', [])
+                            if not isinstance(next_content, list):
+                                has_incomplete_tool = True
+                                break
+                            # Check if any block in next message is a tool_result for our tool_use_id
+                            has_result = False
+                            for result_block in next_content:
+                                if isinstance(result_block, dict) and \
+                                   result_block.get('type') == 'tool_result' and \
+                                   result_block.get('tool_use_id') == tool_use_id:
+                                    has_result = True
+                                    break
+                            if not has_result:
+                                has_incomplete_tool = True
+                                break
+                if has_incomplete_tool:
+                    break
+
+        # If we have an existing conversation but no messages in Redis OR incomplete tool execution,
+        # populate from database. This handles reconnection scenarios and race conditions.
         # IMPORTANT: Also check for optimistic conversations (negative IDs) that may have messages in DB
-        if len(messages) == 0 and session_conversation_id:
-            logger.info(f"Redis session empty for conversation {session_conversation_id}, loading history from database")
+        if (len(messages) == 0 or has_incomplete_tool) and session_conversation_id:
+            if has_incomplete_tool:
+                logger.warning(f"Redis session for conversation {session_conversation_id} has incomplete tool execution, reloading from database")
+            elif len(messages) == 0:
+                logger.info(f"Redis session empty for conversation {session_conversation_id}, loading history from database")
             try:
                 # Get all messages from database for this conversation
                 query = supabase.table("messages")\
@@ -4086,6 +4195,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
                 # Build Redis session from database messages
                 redis_messages = []
+                # First pass: identify tool_use IDs that have corresponding tool_results
+                tool_use_ids_with_results = set()
+                for msg in db_messages:
+                    if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                        for block in msg['tool_content']:
+                            if isinstance(block, dict) and block.get('tool_use_id'):
+                                tool_use_ids_with_results.add(block['tool_use_id'])
+
+                # Second pass: build messages, skipping incomplete tool_use blocks
                 for msg in db_messages:
                     # Skip cancelled messages
                     if msg.get('cancelled'):
@@ -4094,8 +4212,18 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     content_type = msg.get('content_type', 'text')
                     tool_content = msg.get('tool_content')
 
-                    # Handle tool_use and tool_result messages
+                    # Handle tool_use messages - skip if no corresponding tool_result
                     if content_type == 'tool_use' and tool_content:
+                        tool_use_id = None
+                        for block in tool_content:
+                            if isinstance(block, dict) and block.get('id'):
+                                tool_use_id = block['id']
+                                break
+
+                        if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                            logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
+                            continue
+
                         redis_messages.append({"role": "assistant", "content": tool_content})
                     elif content_type == 'tool_result' and tool_content:
                         redis_messages.append({"role": "user", "content": tool_content})
@@ -4171,7 +4299,19 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Use real conversation ID for rest of processing
         session_conversation_id = real_conversation_id
-        
+
+        # Wait for any pending tool executions to complete before processing new message
+        # This prevents race conditions where new messages arrive while tools are still executing
+        if session_conversation_id:
+            pending_count = await get_pending_tools_count(session_conversation_id)
+            if pending_count > 0:
+                logger.info(f"Waiting for {pending_count} pending tool(s) to complete before processing new message")
+                tools_completed = await wait_for_pending_tools(session_conversation_id, timeout_seconds=5.0)
+                if tools_completed:
+                    logger.info(f"Pending tools completed, will reload history from database")
+                else:
+                    logger.warning(f"Timeout waiting for pending tools, proceeding anyway")
+
         # Add message to Redis IMMEDIATELY after getting real conversation ID
         # Use asyncio.shield to protect this from cancellation - MUST complete even if task is cancelled
         try:
@@ -4193,6 +4333,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
                         # Build Redis session from database messages (excluding current message)
                         redis_messages = []
+                        # First pass: identify tool_use IDs that have corresponding tool_results
+                        tool_use_ids_with_results = set()
+                        for msg in db_messages:
+                            if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                                for block in msg['tool_content']:
+                                    if isinstance(block, dict) and block.get('tool_use_id'):
+                                        tool_use_ids_with_results.add(block['tool_use_id'])
+
+                        # Second pass: build messages, skipping incomplete tool_use blocks
                         for msg in db_messages:
                             # Skip cancelled messages and the current message (by request_id)
                             if msg.get('cancelled') or msg.get('request_id') == request_id:
@@ -4201,8 +4350,18 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             content_type = msg.get('content_type', 'text')
                             tool_content = msg.get('tool_content')
 
-                            # Handle tool_use and tool_result messages
+                            # Handle tool_use messages - skip if no corresponding tool_result
                             if content_type == 'tool_use' and tool_content:
+                                tool_use_id = None
+                                for block in tool_content:
+                                    if isinstance(block, dict) and block.get('id'):
+                                        tool_use_id = block['id']
+                                        break
+
+                                if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                                    logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
+                                    continue
+
                                 redis_messages.append({"role": "assistant", "content": tool_content})
                             elif content_type == 'tool_result' and tool_content:
                                 redis_messages.append({"role": "user", "content": tool_content})
@@ -4495,73 +4654,80 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.info(f"AI attempting to execute tool: {tool_block.name}")
             logger.info(f"Tool input parameters: {json.dumps(tool_block.input, indent=2)}")
             logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
-            
-            # Pass WebSocket context for tools that need it (like launch_app)
-            tool_execution_result = await execute_tool(
-                tool_block.name, 
-                tool_block.input, 
-                user_id,
-                websocket=websocket,
-                tool_result_handler=tool_result_handler,
-                conversation_id=session_conversation_id
-            )
-            
-            # Check if the tool_execution_result is our specific Asana auth error
-            if isinstance(tool_execution_result, dict) and \
-               tool_execution_result.get("status_code") == 401 and \
-               "Asana authentication failed" in tool_execution_result.get("error", ""):
-                logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
-                # Add request_id and client context to Asana error response
-                tool_execution_result["request_id"] = request_id
-                tool_execution_result["client_conversation_id"] = client_conversation_id
-                await safe_websocket_send(tool_execution_result)
-                raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
-            
-            # The launch_app tool now handles WebSocket communication directly,
-            # so we don't need special handling here anymore
 
-            # If not the specific Asana auth error or WebSocket action, proceed as before with Claude:
-            async with chat_sessions_lock:
-                # Convert tool_block to a serializable dict
-                tool_block_dict = {
-                    "type": "tool_use",
-                    "id": tool_block.id,
-                    "name": tool_block.name,
-                    "input": tool_block.input
-                }
-                await add_chat_message(session_id, {"role": "assistant", "content": [tool_block_dict]})
+            # Increment pending tool counter before execution
+            await increment_pending_tools(session_conversation_id)
 
-                # Save tool_use message to database
-                save_message_to_db(
-                    user_id=user_id,
-                    conversation_id=session_conversation_id,
-                    content="",  # Tool messages don't have text content
-                    message_sender="ASSISTANT",
-                    request_id=request_id,
-                    content_type="tool_use",
-                    tool_content=[tool_block_dict]
+            try:
+                # Pass WebSocket context for tools that need it (like launch_app)
+                tool_execution_result = await execute_tool(
+                    tool_block.name,
+                    tool_block.input,
+                    user_id,
+                    websocket=websocket,
+                    tool_result_handler=tool_result_handler,
+                    conversation_id=session_conversation_id
                 )
-                logger.info(f"Saved tool_use message to database: {tool_block.name}")
 
-                # Create tool result message
-                tool_result_dict = {
-                    "type": "tool_result",
-                    "tool_use_id": tool_block.id,
-                    "content": json.dumps(tool_execution_result)
-                }
-                await add_chat_message(session_id, {"role": "user", "content": [tool_result_dict]})
+                # Check if the tool_execution_result is our specific Asana auth error
+                if isinstance(tool_execution_result, dict) and \
+                   tool_execution_result.get("status_code") == 401 and \
+                   "Asana authentication failed" in tool_execution_result.get("error", ""):
+                    logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
+                    # Add request_id and client context to Asana error response
+                    tool_execution_result["request_id"] = request_id
+                    tool_execution_result["client_conversation_id"] = client_conversation_id
+                    await safe_websocket_send(tool_execution_result)
+                    raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
 
-                # Save tool_result message to database
-                save_message_to_db(
-                    user_id=user_id,
-                    conversation_id=session_conversation_id,
-                    content="",  # Tool messages don't have text content
-                    message_sender="USER",
-                    request_id=request_id,
-                    content_type="tool_result",
-                    tool_content=[tool_result_dict]
-                )
-                logger.info(f"Saved tool_result message to database for tool: {tool_block.name}")
+                # The launch_app tool now handles WebSocket communication directly,
+                # so we don't need special handling here anymore
+
+                # If not the specific Asana auth error or WebSocket action, proceed as before with Claude:
+                async with chat_sessions_lock:
+                    # Convert tool_block to a serializable dict
+                    tool_block_dict = {
+                        "type": "tool_use",
+                        "id": tool_block.id,
+                        "name": tool_block.name,
+                        "input": tool_block.input
+                    }
+                    await add_chat_message(session_id, {"role": "assistant", "content": [tool_block_dict]})
+
+                    # Save tool_use message to database
+                    save_message_to_db(
+                        user_id=user_id,
+                        conversation_id=session_conversation_id,
+                        content="",  # Tool messages don't have text content
+                        message_sender="ASSISTANT",
+                        request_id=request_id,
+                        content_type="tool_use",
+                        tool_content=[tool_block_dict]
+                    )
+                    logger.info(f"Saved tool_use message to database: {tool_block.name}")
+
+                    # Create tool result message
+                    tool_result_dict = {
+                        "type": "tool_result",
+                        "tool_use_id": tool_block.id,
+                        "content": json.dumps(tool_execution_result)
+                    }
+                    await add_chat_message(session_id, {"role": "user", "content": [tool_result_dict]})
+
+                    # Save tool_result message to database
+                    save_message_to_db(
+                        user_id=user_id,
+                        conversation_id=session_conversation_id,
+                        content="",  # Tool messages don't have text content
+                        message_sender="USER",
+                        request_id=request_id,
+                        content_type="tool_result",
+                        tool_content=[tool_result_dict]
+                    )
+                    logger.info(f"Saved tool_result message to database for tool: {tool_block.name}")
+            finally:
+                # Always decrement counter, even if tool execution or saving fails
+                await decrement_pending_tools(session_conversation_id)
             
             # Use async API call for tool response
             try:
