@@ -2895,6 +2895,19 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             updated_at = conv_result.data[0]["updated_at"]
             logger.warning(f"Created NEW conversation {conversation_id} for user {user_id} at {created_at} (updated_at: {updated_at})")
         else:
+            # Verify the conversation exists and is not soft-deleted
+            logger.info(f"Validating conversation {conversation_id} for user {user_id}")
+            conv_check = supabase.table("conversations")\
+                .select("id")\
+                .eq("id", conversation_id)\
+                .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
+                .execute()
+
+            if not conv_check.data:
+                logger.error(f"Conversation {conversation_id} not found or is soft-deleted for user {user_id}")
+                return None
+
             logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
         # Save the message
