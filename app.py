@@ -204,7 +204,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         try:
             from supabase_client import supabase
             query = supabase.table("messages")\
-                .select("id, content, message_type, timestamp, cancelled")\
+                .select("id, content, message_sender, timestamp, cancelled")\
                 .eq("conversation_id", conversation_id)\
                 .order("timestamp", desc=False)
 
@@ -3751,7 +3751,7 @@ async def create_message(
             id=row["id"],
             conversation_id=row["conversation_id"],
             content=row["content"],
-            message_type=row["message_type"],
+            message_type=row["message_sender"],
             timestamp=row["timestamp"],
             request_id=row.get("request_id")
         )
@@ -4050,7 +4050,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             try:
                 # Get all messages from database for this conversation
                 query = supabase.table("messages")\
-                    .select("id, content, message_type, timestamp, request_id, cancelled")\
+                    .select("id, content, message_sender, timestamp, request_id, cancelled")\
                     .eq("conversation_id", session_conversation_id)\
                     .order("timestamp", desc=False)
                 
