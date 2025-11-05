@@ -3656,7 +3656,11 @@ async def get_messages(
             # Ensure cancelled field is present (None if not cancelled, timestamp if cancelled)
             if 'cancelled' not in message:
                 message['cancelled'] = None
-            # Debug logging to diagnose message_type issue and timestamp
+            # Map message_sender -> message_type for API compatibility with Android client
+            if 'message_sender' in message:
+                message['message_type'] = message['message_sender']
+                del message['message_sender']
+            # Debug logging to diagnose timestamp
             logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, cancelled={message.get('cancelled')}, timestamp={message.get('timestamp')}, content_preview={message.get('content', '')[:50]}")
         
         # Return with server timestamp for next incremental sync
