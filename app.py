@@ -2608,34 +2608,32 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
 
         # Convert database messages to Claude format
-        # Group consecutive messages by (request_id, role) to combine text + tool content
+        # Group consecutive messages by role ONLY (not request_id) to ensure proper alternation
+        # This is critical because Claude API requires strict user/assistant alternation
         claude_messages = []
-        current_group = None  # (request_id, role, content_blocks)
+        current_group = None  # (role, content_blocks)
 
         for row in result.data:
             message_role = "user" if row["message_sender"] == "USER" else "assistant"
-            req_id = row.get("request_id")
 
-            # Determine if this row belongs to current group
+            # Determine if this row belongs to current group (same role)
             should_group = (
                 current_group is not None and
-                req_id is not None and
-                req_id == current_group[0] and
-                message_role == current_group[1]
+                message_role == current_group[0]
             )
 
             if should_group:
                 # Add to current group
                 if row.get("tool_content"):
-                    current_group[2].extend(row["tool_content"])
+                    current_group[1].extend(row["tool_content"])
                 elif row.get("content") and row["content"].strip():
-                    current_group[2].append({"type": "text", "text": row["content"]})
+                    current_group[1].append({"type": "text", "text": row["content"]})
             else:
                 # Flush current group if exists
-                if current_group and current_group[2]:
+                if current_group and current_group[1]:
                     claude_messages.append({
-                        "role": current_group[1],
-                        "content": current_group[2]
+                        "role": current_group[0],
+                        "content": current_group[1]
                     })
 
                 # Start new group
@@ -2645,13 +2643,13 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 elif row.get("content") and row["content"].strip():
                     content_blocks.append({"type": "text", "text": row["content"]})
 
-                current_group = [req_id, message_role, content_blocks]
+                current_group = [message_role, content_blocks]
 
         # Flush final group
-        if current_group and current_group[2]:
+        if current_group and current_group[1]:
             claude_messages.append({
-                "role": current_group[1],
-                "content": current_group[2]
+                "role": current_group[0],
+                "content": current_group[1]
             })
 
         return claude_messages
