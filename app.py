@@ -204,7 +204,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         try:
             from supabase_client import supabase
             query = supabase.table("messages")\
-                .select("id, content, message_sender, timestamp, cancelled")\
+                .select("id, content, message_sender, timestamp, cancelled, content_type, tool_content")\
                 .eq("conversation_id", conversation_id)\
                 .order("timestamp", desc=False)
 
@@ -215,7 +215,17 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             for msg in db_messages:
                 if msg.get('cancelled'):
                     continue
-                if msg['message_sender'] == 'USER':
+
+                content_type = msg.get('content_type', 'text')
+                tool_content = msg.get('tool_content')
+
+                # Handle tool_use and tool_result messages
+                if content_type == 'tool_use' and tool_content:
+                    redis_messages.append({"role": "assistant", "content": tool_content})
+                elif content_type == 'tool_result' and tool_content:
+                    redis_messages.append({"role": "user", "content": tool_content})
+                # Handle regular text messages
+                elif msg['message_sender'] == 'USER':
                     redis_messages.append({"role": "user", "content": msg['content']})
                 elif msg['message_sender'] == 'ASSISTANT':
                     redis_messages.append({"role": "assistant", "content": msg['content']})
@@ -4067,26 +4077,34 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             try:
                 # Get all messages from database for this conversation
                 query = supabase.table("messages")\
-                    .select("id, content, message_sender, timestamp, request_id, cancelled")\
+                    .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
                     .eq("conversation_id", session_conversation_id)\
                     .order("timestamp", desc=False)
-                
+
                 response = query.execute()
                 db_messages = response.data if response.data else []
-                
+
                 # Build Redis session from database messages
                 redis_messages = []
                 for msg in db_messages:
                     # Skip cancelled messages
                     if msg.get('cancelled'):
                         continue
-                    
-                    # Format for Redis (same as Claude API format)
-                    if msg['message_sender'] == 'USER':
+
+                    content_type = msg.get('content_type', 'text')
+                    tool_content = msg.get('tool_content')
+
+                    # Handle tool_use and tool_result messages
+                    if content_type == 'tool_use' and tool_content:
+                        redis_messages.append({"role": "assistant", "content": tool_content})
+                    elif content_type == 'tool_result' and tool_content:
+                        redis_messages.append({"role": "user", "content": tool_content})
+                    # Handle regular text messages
+                    elif msg['message_sender'] == 'USER':
                         redis_messages.append({"role": "user", "content": msg['content']})
                     elif msg['message_sender'] == 'ASSISTANT':
                         redis_messages.append({"role": "assistant", "content": msg['content']})
-                
+
                 # Populate Redis session with conversation history
                 if redis_messages:
                     await set_chat_messages(session_id, redis_messages)
@@ -4166,26 +4184,34 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     logger.info(f"Loading existing messages for conversation {session_conversation_id} before adding new message")
                     try:
                         query = supabase.table("messages")\
-                            .select("id, content, message_sender, timestamp, request_id, cancelled")\
+                            .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
                             .eq("conversation_id", session_conversation_id)\
                             .order("timestamp", desc=False)
-                        
+
                         response = query.execute()
                         db_messages = response.data if response.data else []
-                        
+
                         # Build Redis session from database messages (excluding current message)
                         redis_messages = []
                         for msg in db_messages:
                             # Skip cancelled messages and the current message (by request_id)
                             if msg.get('cancelled') or msg.get('request_id') == request_id:
                                 continue
-                            
-                            # Format for Redis (same as Claude API format)
-                            if msg['message_sender'] == 'USER':
+
+                            content_type = msg.get('content_type', 'text')
+                            tool_content = msg.get('tool_content')
+
+                            # Handle tool_use and tool_result messages
+                            if content_type == 'tool_use' and tool_content:
+                                redis_messages.append({"role": "assistant", "content": tool_content})
+                            elif content_type == 'tool_result' and tool_content:
+                                redis_messages.append({"role": "user", "content": tool_content})
+                            # Handle regular text messages
+                            elif msg['message_sender'] == 'USER':
                                 redis_messages.append({"role": "user", "content": msg['content']})
                             elif msg['message_sender'] == 'ASSISTANT':
                                 redis_messages.append({"role": "assistant", "content": msg['content']})
-                        
+
                         if redis_messages:
                             await set_chat_messages(session_id, redis_messages)
                             logger.info(f"Pre-loaded {len(redis_messages)} existing messages into Redis session")
