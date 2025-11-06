@@ -2050,7 +2050,41 @@ async def websocket_endpoint(websocket: WebSocket):
                         # We'll get the message IDs after the message is saved in process_message_task
                         # But we need to do detection after the task starts to get the correct message IDs
                         # So we'll move the detection into process_message_task itself
-                        
+
+                        # Check if conversation is already responding - if so, queue this message
+                        if session_conversation_id and redis_managers and "conversation_state" in redis_managers:
+                            is_responding = await redis_managers["conversation_state"].is_responding(session_conversation_id)
+
+                            if is_responding:
+                                # Queue the message
+                                logger.info(f"Conversation {session_conversation_id} is responding, queuing message")
+                                await redis_managers["conversation_state"].queue_message(
+                                    session_conversation_id,
+                                    {
+                                        "message": message,
+                                        "request_id": request_id,
+                                        "client_conversation_id": client_conversation_id,
+                                        "client_message_id": client_message_id,
+                                        "client_timestamp": client_timestamp
+                                    }
+                                )
+
+                                # Get queue size for user feedback
+                                queue_size = await redis_managers["conversation_state"].get_queue_size(session_conversation_id)
+
+                                # Send acknowledgment to client
+                                queued_response = {
+                                    "type": "queued",
+                                    "request_id": request_id,
+                                    "message": "Message queued, will process after current response",
+                                    "queue_position": queue_size,
+                                    "conversation_id": session_conversation_id,
+                                    "client_conversation_id": client_conversation_id
+                                }
+                                await websocket.send_text(json.dumps(queued_response))
+                                logger.info(f"Queued message for conversation {session_conversation_id} (position: {queue_size})")
+                                continue  # Don't create task, message is queued
+
                         # Define a callback to handle task completion
                         async def handle_task_completion(task_future):
                             try:
@@ -4547,6 +4581,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             "api_call_start": time.time()
         })
 
+        # Mark conversation as responding BEFORE calling Claude API
+        # This ensures any new messages will be queued until this response completes
+        if session_conversation_id and redis_managers and "conversation_state" in redis_managers:
+            await redis_managers["conversation_state"].set_responding(session_conversation_id, request_id)
+
         try:
             # Log the tools being sent to Claude for debugging
             logger.info(f"Sending {len(tools)} tools to Claude")
@@ -4555,7 +4594,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             launch_app_tool = next((t for t in tools if t.get('name') == 'launch_app'), None)
             if launch_app_tool:
                 logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
-            
+
             # Create the stream/response (auto-detects whether to stream)
             # call_claude_api returns a coroutine that when awaited gives us either:
             # - AsyncStream (when stream=True)
@@ -5051,6 +5090,45 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         raise
         
     finally:
+        # Clear responding state and process any queued messages
+        # This MUST happen first to ensure queued messages get processed
+        if session_conversation_id and redis_managers and "conversation_state" in redis_managers:
+            try:
+                # Clear responding state
+                await redis_managers["conversation_state"].clear_responding(session_conversation_id)
+                logger.info(f"Cleared responding state for conversation {session_conversation_id}")
+
+                # Check for queued messages and process the next one
+                queued = await redis_managers["conversation_state"].pop_queued_message(session_conversation_id)
+                if queued:
+                    logger.info(f"Processing queued message for conversation {session_conversation_id}")
+
+                    # Create task for queued message
+                    queued_task = asyncio.create_task(
+                        process_message_task(
+                            websocket=websocket,
+                            session_id=session_id,
+                            session_conversation_id=session_conversation_id,
+                            user_id=user_id,
+                            message=queued["message"],
+                            request_id=queued["request_id"],
+                            client_conversation_id=queued.get("client_conversation_id"),
+                            client_message_id=queued.get("client_message_id"),
+                            client_timestamp=queued.get("client_timestamp")
+                        )
+                    )
+
+                    # Track the queued task same as regular messages
+                    if redis_managers:
+                        if "local_objects" in redis_managers:
+                            await redis_managers["local_objects"].add_task(queued["request_id"], queued_task)
+                        if "active_requests" in redis_managers:
+                            await redis_managers["active_requests"].add(session_id, queued["request_id"])
+
+                    logger.info(f"Started processing queued message {queued['request_id']}")
+            except Exception as e:
+                logger.error(f"Error processing queued messages for conversation {session_conversation_id}: {e}")
+
         # Clean up tracking
         if request_id:
             # Remove Claude stream from tracking
