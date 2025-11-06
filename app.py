@@ -623,45 +623,7 @@ async def update_websocket_conversation(session_id: str, old_conversation_id: Op
             await unsubscribe_from_conversation(session_id)
         
         logger.info(f"Successfully updated WebSocket registration for session {session_id}")
-
-        # After migrating WebSocket to new conversation ID, check if there are queued messages
-        # This handles the case where messages were queued while using the optimistic ID
-        if redis_managers and "conversation_state" in redis_managers and "local_objects" in redis_managers:
-            queued_count = await redis_managers["conversation_state"].get_queue_size(new_conversation_id)
-            if queued_count > 0:
-                logger.info(f"Found {queued_count} queued message(s) for conversation {new_conversation_id} after WebSocket migration")
-                queued = await redis_managers["conversation_state"].pop_queued_message(new_conversation_id)
-                if queued:
-                    logger.info(f"Processing queued message for conversation {new_conversation_id} after migration")
-
-                    # Get user_id from session_id (format: ws_{user_id}_conv_{conversation_id})
-                    parts = session_id.split("_")
-                    if len(parts) >= 2:
-                        user_id = parts[1]
-
-                        # Create task for queued message
-                        queued_task = asyncio.create_task(
-                            process_message_task(
-                                websocket=websocket,
-                                session_id=session_id,
-                                session_conversation_id=new_conversation_id,
-                                user_id=user_id,
-                                message=queued["message"],
-                                request_id=queued["request_id"],
-                                client_conversation_id=queued.get("client_conversation_id"),
-                                client_message_id=queued.get("client_message_id"),
-                                client_timestamp=queued.get("client_timestamp")
-                            )
-                        )
-
-                        # Track the queued task
-                        if "local_objects" in redis_managers:
-                            await redis_managers["local_objects"].add_task(queued["request_id"], queued_task)
-                        if "active_requests" in redis_managers:
-                            await redis_managers["active_requests"].add(session_id, queued["request_id"])
-
-                        logger.info(f"Started processing queued message {queued['request_id']} after WebSocket migration")
-
+        
     except Exception as e:
         logger.error(f"Error updating WebSocket conversation for session {session_id}: {str(e)}")
         # Don't close the WebSocket on error - let it continue with the original setup
