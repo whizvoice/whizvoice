@@ -5139,51 +5139,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 await redis_managers["conversation_state"].clear_responding(session_conversation_id)
                 logger.info(f"Cleared responding state for conversation {session_conversation_id}")
 
-                # Check for queued messages and process the next one
-                # Get an active websocket for this conversation (might not be THIS websocket if client reconnected)
-                active_websocket = None
-                active_session_id = None
-                try:
-                    if "conversation_websockets" in redis_managers:
-                        websockets = await redis_managers["conversation_websockets"].get_conversation_websockets(session_conversation_id)
-                        if websockets:
-                            # Use the first active websocket
-                            active_session_id, active_websocket = websockets[0]
-                            logger.info(f"Found {len(websockets)} active websocket(s) for conversation {session_conversation_id}, using session {active_session_id}")
-                except Exception as e:
-                    logger.error(f"Error getting active websocket for conversation {session_conversation_id}: {e}")
-
-                if active_websocket:
-                    queued = await redis_managers["conversation_state"].pop_queued_message(session_conversation_id)
-                    if queued:
-                        logger.info(f"Processing queued message for conversation {session_conversation_id}")
-
-                        # Create task for queued message using the ACTIVE websocket
-                        queued_task = asyncio.create_task(
-                            process_message_task(
-                                websocket=active_websocket,
-                                session_id=active_session_id,
-                                session_conversation_id=session_conversation_id,
-                                user_id=user_id,
-                                message=queued["message"],
-                                request_id=queued["request_id"],
-                                client_conversation_id=queued.get("client_conversation_id"),
-                                client_message_id=queued.get("client_message_id"),
-                                client_timestamp=queued.get("client_timestamp")
-                            )
-                        )
-
-                        # Track the queued task same as regular messages
-                        if redis_managers:
-                            if "local_objects" in redis_managers:
-                                await redis_managers["local_objects"].add_task(queued["request_id"], queued_task)
-                            if "active_requests" in redis_managers:
-                                await redis_managers["active_requests"].add(active_session_id, queued["request_id"])
-
-                        logger.info(f"Started processing queued message {queued['request_id']} on session {active_session_id}")
-                else:
-                    # No active websocket - queued messages will be processed when client reconnects
-                    logger.info(f"No active websocket for conversation {session_conversation_id}, queued messages will be processed on reconnect.")
+                # Queued messages will be processed when client reconnects
+                # (see WebSocket connect handler at lines 1869-1911)
+                # We don't process here because THIS websocket might be dead if client reconnected
+                queued_count = await redis_managers["conversation_state"].get_queue_size(session_conversation_id)
+                if queued_count > 0:
+                    logger.info(f"Conversation {session_conversation_id} has {queued_count} queued message(s), will be processed on next WebSocket connect")
             except Exception as e:
                 logger.error(f"Error processing queued messages for conversation {session_conversation_id}: {e}")
 
