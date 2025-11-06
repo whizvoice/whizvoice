@@ -803,86 +803,6 @@ class LocalObjectManager:
                 logger.debug(f"Removed Claude stream for request {request_id}")
 
 
-class ConversationStateManager:
-    """Manages conversation response state and message queuing
-
-    Ensures proper turn-taking by tracking when conversations are actively
-    responding and queuing new messages until the response completes.
-    """
-
-    def __init__(self, redis_client: redis.Redis):
-        self.redis = redis_client
-
-    async def is_responding(self, conversation_id: int) -> bool:
-        """Check if conversation has an active response"""
-        if conversation_id is None:
-            return False
-        key = f"conv:{conversation_id}:responding"
-        return bool(await self.redis.get(key))
-
-    async def set_responding(self, conversation_id: int, request_id: str):
-        """Mark conversation as responding
-
-        Args:
-            conversation_id: The conversation ID
-            request_id: The request ID for tracking
-        """
-        if conversation_id is None:
-            return
-        key = f"conv:{conversation_id}:responding"
-        # Set with 2 minute expiry as safety net (longer than Claude timeout)
-        await self.redis.set(key, request_id, ex=120)
-        logger.info(f"Set conversation {conversation_id} as responding (request: {request_id})")
-
-    async def clear_responding(self, conversation_id: int):
-        """Clear responding state"""
-        if conversation_id is None:
-            return
-        key = f"conv:{conversation_id}:responding"
-        await self.redis.delete(key)
-        logger.info(f"Cleared responding state for conversation {conversation_id}")
-
-    async def queue_message(self, conversation_id: int, message_data: dict):
-        """Queue a message for later processing
-
-        Args:
-            conversation_id: The conversation ID
-            message_data: Dict containing message, request_id, and other metadata
-        """
-        if conversation_id is None:
-            logger.warning("Cannot queue message: conversation_id is None")
-            return
-        key = f"conv:{conversation_id}:queue"
-        await self.redis.rpush(key, json.dumps(message_data))
-        # Set 5 minute expiry on the queue
-        await self.redis.expire(key, 300)
-
-        # Log queue size
-        queue_size = await self.redis.llen(key)
-        logger.info(f"Queued message for conversation {conversation_id} (queue size: {queue_size})")
-
-    async def pop_queued_message(self, conversation_id: int) -> Optional[dict]:
-        """Get and remove next queued message
-
-        Returns:
-            Dict with message data, or None if queue is empty
-        """
-        if conversation_id is None:
-            return None
-        key = f"conv:{conversation_id}:queue"
-        data = await self.redis.lpop(key)
-        if data:
-            logger.info(f"Popped queued message from conversation {conversation_id}")
-        return json.loads(data) if data else None
-
-    async def get_queue_size(self, conversation_id: int) -> int:
-        """Get the number of queued messages"""
-        if conversation_id is None:
-            return 0
-        key = f"conv:{conversation_id}:queue"
-        return await self.redis.llen(key)
-
-
 # Singleton instances (initialize these in your app startup)
 def create_managers(redis_client: redis.Redis) -> Dict[str, Any]:
     """Create all manager instances"""
@@ -894,6 +814,5 @@ def create_managers(redis_client: redis.Redis) -> Dict[str, Any]:
         "session_mappings": SessionMappingManager(redis_client),
         "request_states": RequestStateManager(redis_client),
         "request_messages": RequestMessageTracker(redis_client),
-        "conversation_state": ConversationStateManager(redis_client),
         "local_objects": LocalObjectManager()
     }
