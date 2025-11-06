@@ -639,55 +639,6 @@ async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: Web
                     # Parse the message data
                     data = json.loads(message["data"])
 
-                    # Check if this is a special "check_queue" message
-                    if data.get("type") == "check_queue":
-                        # Don't send to the originating session
-                        if data.get("exclude_session") == session_id:
-                            continue
-
-                        # This is a signal to check the queue for this conversation
-                        conversation_id = data.get("conversation_id")
-                        if conversation_id and redis_managers and "conversation_state" in redis_managers:
-                            logger.info(f"Received check_queue signal for conversation {conversation_id} on session {session_id}")
-
-                            # Get user_id and session_conversation_id from the session
-                            # We need to extract these from the WebSocket handler context
-                            # For now, we'll try to process the queue directly
-                            queued = await redis_managers["conversation_state"].pop_queued_message(conversation_id)
-                            if queued:
-                                logger.info(f"Processing queued message for conversation {conversation_id} triggered by Redis signal")
-
-                                # Get session info from session_id
-                                if redis_managers and "local_objects" in redis_managers:
-                                    # Extract user_id from session - session_id format: f"ws_{user_id}_conv_{conversation_id}"
-                                    parts = session_id.split("_")
-                                    if len(parts) >= 2:
-                                        user_id = parts[1]
-
-                                        # Create task for queued message
-                                        queued_task = asyncio.create_task(
-                                            process_message_task(
-                                                websocket=websocket,
-                                                session_id=session_id,
-                                                session_conversation_id=conversation_id,
-                                                user_id=user_id,
-                                                message=queued["message"],
-                                                request_id=queued["request_id"],
-                                                client_conversation_id=queued.get("client_conversation_id"),
-                                                client_message_id=queued.get("client_message_id"),
-                                                client_timestamp=queued.get("client_timestamp")
-                                            )
-                                        )
-
-                                        # Track the queued task
-                                        if "local_objects" in redis_managers:
-                                            await redis_managers["local_objects"].add_task(queued["request_id"], queued_task)
-                                        if "active_requests" in redis_managers:
-                                            await redis_managers["active_requests"].add(session_id, queued["request_id"])
-
-                                        logger.info(f"Started processing queued message {queued['request_id']} from Redis signal")
-                        continue  # Don't forward check_queue messages to client
-
                     # Don't send to the originating session
                     if data.get("exclude_session") == session_id:
                         continue
@@ -5229,32 +5180,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     queued_count = await redis_managers["conversation_state"].get_queue_size(session_conversation_id)
                     if queued_count > 0:
                         logger.info(f"WebSocket disconnected, {queued_count} queued message(s) will be processed on next connect")
-
-                        # Publish a check_queue signal via Redis to wake up any connected WebSockets on other workers
-                        try:
-                            # Get optimistic ID if available
-                            optimistic_id = None
-                            if redis_managers and "local_objects" in redis_managers:
-                                optimistic_id = await redis_managers["local_objects"].get_optimistic_id_cached(session_conversation_id)
-
-                            # Create the check_queue message
-                            check_queue_message = {
-                                "type": "check_queue",
-                                "conversation_id": session_conversation_id,
-                                "exclude_session": session_id  # Don't send back to this session (it's disconnected anyway)
-                            }
-
-                            # Publish to conversation channel and optimistic channel if available
-                            channel_name = f"conversation:{session_conversation_id}"
-                            publish_tasks = [redis_client.publish(channel_name, json.dumps(check_queue_message))]
-                            if optimistic_id:
-                                opt_channel_name = f"conversation:{optimistic_id}"
-                                publish_tasks.append(redis_client.publish(opt_channel_name, json.dumps(check_queue_message)))
-
-                            await asyncio.gather(*publish_tasks, return_exceptions=True)
-                            logger.info(f"Published check_queue signal to Redis for conversation {session_conversation_id}")
-                        except Exception as e:
-                            logger.error(f"Failed to publish check_queue signal: {e}")
             except Exception as e:
                 logger.error(f"Error processing queued messages for conversation {session_conversation_id}: {e}")
 
