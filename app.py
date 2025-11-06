@@ -259,6 +259,36 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     # Always use non-streaming mode
     stream = False
 
+    # CRITICAL: Merge consecutive messages with same role (Claude API requirement)
+    # When merging user messages, tool_result blocks MUST come before text blocks
+    merged_messages = []
+    for msg in messages:
+        if not merged_messages or merged_messages[-1]['role'] != msg['role']:
+            # Different role or first message - just append
+            merged_messages.append(msg)
+        else:
+            # Same role as previous - merge content
+            prev_msg = merged_messages[-1]
+            prev_content = prev_msg['content']
+            curr_content = msg['content']
+
+            # Convert both to lists of content blocks
+            prev_blocks = prev_content if isinstance(prev_content, list) else [{"type": "text", "text": prev_content}]
+            curr_blocks = curr_content if isinstance(curr_content, list) else [{"type": "text", "text": curr_content}]
+
+            # For user messages: tool_result blocks MUST come first, then text blocks
+            if msg['role'] == 'user':
+                tool_results = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_result']
+                text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
+                merged_content = tool_results + text_blocks
+            else:
+                # For assistant messages, just concatenate
+                merged_content = prev_blocks + curr_blocks
+
+            prev_msg['content'] = merged_content
+
+    messages = merged_messages
+
     # Log the conversation context being sent to Claude
     logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}, stream={stream}")
     for i, msg in enumerate(messages):
@@ -4884,20 +4914,19 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': getattr(block, 'text', '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
         
         # Add assistant final response to session history (if not an intercepted error)
+        # IMPORTANT: Only add text blocks here, NOT tool_use blocks
+        # Tool_use blocks were already added in the tool loop above
         async with chat_sessions_lock:
-            # Convert response.content to serializable format
+            # Convert response.content to serializable format - ONLY text blocks
             content_list = []
             for block in response.content:
                 if block.type == 'text':
                     content_list.append({"type": "text", "text": block.text})
-                elif block.type == 'tool_use':
-                    content_list.append({
-                        "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input
-                    })
-            await add_chat_message(session_id, {"role": "assistant", "content": content_list})
+                # Skip tool_use blocks - they were already added in the tool loop
+
+            # Only add message if there's text content
+            if content_list:
+                await add_chat_message(session_id, {"role": "assistant", "content": content_list})
         
         # Extract and save assistant response to database
         # Look for text in ANY content block, not just the first one
