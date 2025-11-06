@@ -1870,6 +1870,9 @@ async def websocket_endpoint(websocket: WebSocket):
         # This handles messages that were queued when the previous websocket disconnected
         if session_conversation_id and redis_managers and "conversation_state" in redis_managers:
             try:
+                # Clear any stale responding state (from disconnected websocket)
+                await redis_managers["conversation_state"].clear_responding(session_conversation_id)
+
                 # Process all queued messages
                 while True:
                     queued = await redis_managers["conversation_state"].pop_queued_message(session_conversation_id)
