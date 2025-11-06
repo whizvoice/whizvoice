@@ -4380,91 +4380,91 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 
                 # Now add the current message
                 await asyncio.shield(add_chat_message(session_id, {"role": "user", "content": message}))
-            logger.info(f"Added current message to Redis session for conversation {session_conversation_id}")
+                logger.info(f"Added current message to Redis session for conversation {session_conversation_id}")
 
-            # CRITICAL: After adding message, check if Redis now has incomplete tool_use blocks
-            # This handles race condition where tool_result was just saved to DB but not in Redis
-            current_redis_messages = await get_chat_messages(session_id)
-            has_incomplete_after_add = False
-            for i, msg in enumerate(current_redis_messages):
-                if msg.get('role') == 'assistant' and isinstance(msg.get('content'), list):
-                    for block in msg['content']:
-                        if isinstance(block, dict) and block.get('type') == 'tool_use':
-                            tool_use_id = block.get('id')
-                            if i + 1 >= len(current_redis_messages):
-                                has_incomplete_after_add = True
-                                break
-                            next_msg = current_redis_messages[i + 1]
-                            if next_msg.get('role') != 'user':
-                                has_incomplete_after_add = True
-                                break
-                            next_content = next_msg.get('content', [])
-                            if not isinstance(next_content, list):
-                                has_incomplete_after_add = True
-                                break
-                            has_result = False
-                            for result_block in next_content:
-                                if isinstance(result_block, dict) and \
-                                   result_block.get('type') == 'tool_result' and \
-                                   result_block.get('tool_use_id') == tool_use_id:
-                                    has_result = True
+                # CRITICAL: After adding message, check if Redis now has incomplete tool_use blocks
+                # This handles race condition where tool_result was just saved to DB but not in Redis
+                current_redis_messages = await get_chat_messages(session_id)
+                has_incomplete_after_add = False
+                for i, msg in enumerate(current_redis_messages):
+                    if msg.get('role') == 'assistant' and isinstance(msg.get('content'), list):
+                        for block in msg['content']:
+                            if isinstance(block, dict) and block.get('type') == 'tool_use':
+                                tool_use_id = block.get('id')
+                                if i + 1 >= len(current_redis_messages):
+                                    has_incomplete_after_add = True
                                     break
-                            if not has_result:
-                                has_incomplete_after_add = True
-                                break
-                if has_incomplete_after_add:
-                    break
-
-            # If Redis has incomplete tools after adding message, reload from DB
-            if has_incomplete_after_add and session_conversation_id:
-                logger.warning(f"Redis has incomplete tool_use after adding message, reloading from database for conversation {session_conversation_id}")
-                try:
-                    query = supabase.table("messages")\
-                        .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
-                        .eq("conversation_id", session_conversation_id)\
-                        .order("timestamp", desc=False)
-
-                    response = query.execute()
-                    db_messages = response.data if response.data else []
-
-                    # Build complete history from DB, skipping incomplete tool_use
-                    redis_messages = []
-                    tool_use_ids_with_results = set()
-                    for msg in db_messages:
-                        if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
-                            for block in msg['tool_content']:
-                                if isinstance(block, dict) and block.get('tool_use_id'):
-                                    tool_use_ids_with_results.add(block['tool_use_id'])
-
-                    for msg in db_messages:
-                        if msg.get('cancelled'):
-                            continue
-
-                        content_type = msg.get('content_type', 'text')
-                        tool_content = msg.get('tool_content')
-
-                        if content_type == 'tool_use' and tool_content:
-                            tool_use_id = None
-                            for block in tool_content:
-                                if isinstance(block, dict) and block.get('id'):
-                                    tool_use_id = block['id']
+                                next_msg = current_redis_messages[i + 1]
+                                if next_msg.get('role') != 'user':
+                                    has_incomplete_after_add = True
                                     break
-                            if tool_use_id and tool_use_id not in tool_use_ids_with_results:
-                                logger.warning(f"Skipping incomplete tool_use in reload: {tool_use_id}")
+                                next_content = next_msg.get('content', [])
+                                if not isinstance(next_content, list):
+                                    has_incomplete_after_add = True
+                                    break
+                                has_result = False
+                                for result_block in next_content:
+                                    if isinstance(result_block, dict) and \
+                                       result_block.get('type') == 'tool_result' and \
+                                       result_block.get('tool_use_id') == tool_use_id:
+                                        has_result = True
+                                        break
+                                if not has_result:
+                                    has_incomplete_after_add = True
+                                    break
+                    if has_incomplete_after_add:
+                        break
+
+                # If Redis has incomplete tools after adding message, reload from DB
+                if has_incomplete_after_add and session_conversation_id:
+                    logger.warning(f"Redis has incomplete tool_use after adding message, reloading from database for conversation {session_conversation_id}")
+                    try:
+                        query = supabase.table("messages")\
+                            .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
+                            .eq("conversation_id", session_conversation_id)\
+                            .order("timestamp", desc=False)
+
+                        response = query.execute()
+                        db_messages = response.data if response.data else []
+
+                        # Build complete history from DB, skipping incomplete tool_use
+                        redis_messages = []
+                        tool_use_ids_with_results = set()
+                        for msg in db_messages:
+                            if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                                for block in msg['tool_content']:
+                                    if isinstance(block, dict) and block.get('tool_use_id'):
+                                        tool_use_ids_with_results.add(block['tool_use_id'])
+
+                        for msg in db_messages:
+                            if msg.get('cancelled'):
                                 continue
-                            redis_messages.append({"role": "assistant", "content": tool_content})
-                        elif content_type == 'tool_result' and tool_content:
-                            redis_messages.append({"role": "user", "content": tool_content})
-                        elif msg['message_sender'] == 'USER':
-                            redis_messages.append({"role": "user", "content": msg['content']})
-                        elif msg['message_sender'] == 'ASSISTANT':
-                            redis_messages.append({"role": "assistant", "content": msg['content']})
 
-                    if redis_messages:
-                        await set_chat_messages(session_id, redis_messages)
-                        logger.info(f"Reloaded {len(redis_messages)} messages from DB to fix incomplete tool execution")
-                except Exception as e:
-                    logger.error(f"Failed to reload from DB after incomplete tool detection: {e}")
+                            content_type = msg.get('content_type', 'text')
+                            tool_content = msg.get('tool_content')
+
+                            if content_type == 'tool_use' and tool_content:
+                                tool_use_id = None
+                                for block in tool_content:
+                                    if isinstance(block, dict) and block.get('id'):
+                                        tool_use_id = block['id']
+                                        break
+                                if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                                    logger.warning(f"Skipping incomplete tool_use in reload: {tool_use_id}")
+                                    continue
+                                redis_messages.append({"role": "assistant", "content": tool_content})
+                            elif content_type == 'tool_result' and tool_content:
+                                redis_messages.append({"role": "user", "content": tool_content})
+                            elif msg['message_sender'] == 'USER':
+                                redis_messages.append({"role": "user", "content": msg['content']})
+                            elif msg['message_sender'] == 'ASSISTANT':
+                                redis_messages.append({"role": "assistant", "content": msg['content']})
+
+                        if redis_messages:
+                            await set_chat_messages(session_id, redis_messages)
+                            logger.info(f"Reloaded {len(redis_messages)} messages from DB to fix incomplete tool execution")
+                    except Exception as e:
+                        logger.error(f"Failed to reload from DB after incomplete tool detection: {e}")
         except Exception as e:
             logger.error(f"Failed to add message to Redis: {e}")
             # Continue anyway - better to process without full context than to fail
