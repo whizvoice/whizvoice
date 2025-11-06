@@ -5140,23 +5140,29 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.info(f"Cleared responding state for conversation {session_conversation_id}")
 
                 # Check for queued messages and process the next one
-                # But only if websocket is still connected
-                websocket_connected = False
+                # Get an active websocket for this conversation (might not be THIS websocket if client reconnected)
+                active_websocket = None
+                active_session_id = None
                 try:
-                    websocket_connected = websocket.client_state.name == "CONNECTED"
-                except:
-                    websocket_connected = False
+                    if "conversation_websockets" in redis_managers:
+                        websockets = await redis_managers["conversation_websockets"].get_conversation_websockets(session_conversation_id)
+                        if websockets:
+                            # Use the first active websocket
+                            active_session_id, active_websocket = websockets[0]
+                            logger.info(f"Found {len(websockets)} active websocket(s) for conversation {session_conversation_id}, using session {active_session_id}")
+                except Exception as e:
+                    logger.error(f"Error getting active websocket for conversation {session_conversation_id}: {e}")
 
-                if websocket_connected:
+                if active_websocket:
                     queued = await redis_managers["conversation_state"].pop_queued_message(session_conversation_id)
                     if queued:
                         logger.info(f"Processing queued message for conversation {session_conversation_id}")
 
-                        # Create task for queued message
+                        # Create task for queued message using the ACTIVE websocket
                         queued_task = asyncio.create_task(
                             process_message_task(
-                                websocket=websocket,
-                                session_id=session_id,
+                                websocket=active_websocket,
+                                session_id=active_session_id,
                                 session_conversation_id=session_conversation_id,
                                 user_id=user_id,
                                 message=queued["message"],
@@ -5172,12 +5178,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             if "local_objects" in redis_managers:
                                 await redis_managers["local_objects"].add_task(queued["request_id"], queued_task)
                             if "active_requests" in redis_managers:
-                                await redis_managers["active_requests"].add(session_id, queued["request_id"])
+                                await redis_managers["active_requests"].add(active_session_id, queued["request_id"])
 
-                        logger.info(f"Started processing queued message {queued['request_id']}")
+                        logger.info(f"Started processing queued message {queued['request_id']} on session {active_session_id}")
                 else:
-                    # WebSocket disconnected - queued messages will be retried when client reconnects
-                    logger.info(f"WebSocket disconnected, not processing queued messages for conversation {session_conversation_id}. Client will retry on reconnect.")
+                    # No active websocket - queued messages will be processed when client reconnects
+                    logger.info(f"No active websocket for conversation {session_conversation_id}, queued messages will be processed on reconnect.")
             except Exception as e:
                 logger.error(f"Error processing queued messages for conversation {session_conversation_id}: {e}")
 
