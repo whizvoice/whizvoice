@@ -282,8 +282,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
                 merged_content = tool_results + text_blocks
             else:
-                # For assistant messages, just concatenate
-                merged_content = prev_blocks + curr_blocks
+                # For assistant messages: text blocks MUST come first, then tool_use blocks
+                text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
+                tool_uses = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_use']
+                merged_content = text_blocks + tool_uses
 
             prev_msg['content'] = merged_content
 
