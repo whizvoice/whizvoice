@@ -3123,10 +3123,78 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             logger.warning(f"Failed to update conversation {conversation_id} timestamps")
         
         return (conversation_id, message_id)
-        
+
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")
         return None
+
+
+def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_content: dict) -> bool:
+    """Update a pending tool_result message with the actual result
+
+    Args:
+        conversation_id: The conversation ID containing the tool result message
+        tool_use_id: The tool_use_id to identify which tool_result to update
+        result_content: The actual tool execution result to replace the pending content
+
+    Returns:
+        True if update successful, False otherwise
+    """
+    try:
+        logger.info(f"Updating tool_result for tool_use_id={tool_use_id} in conversation={conversation_id}")
+
+        # Find the pending tool_result message
+        result = supabase.table("messages")\
+            .select("id, tool_content")\
+            .eq("conversation_id", conversation_id)\
+            .eq("content_type", "tool_result")\
+            .execute()
+
+        if not result.data:
+            logger.error(f"No tool_result messages found in conversation {conversation_id}")
+            return False
+
+        # Find the message with matching tool_use_id
+        message_to_update = None
+        for msg in result.data:
+            tool_content = msg.get("tool_content", [])
+            if isinstance(tool_content, list):
+                for block in tool_content:
+                    if isinstance(block, dict) and block.get("tool_use_id") == tool_use_id:
+                        message_to_update = msg
+                        break
+            if message_to_update:
+                break
+
+        if not message_to_update:
+            logger.error(f"No tool_result message found with tool_use_id={tool_use_id}")
+            return False
+
+        message_id = message_to_update["id"]
+
+        # Update the tool_content with the actual result
+        updated_tool_content = [{
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": json.dumps(result_content)
+        }]
+
+        # Update the message in the database
+        update_result = supabase.table("messages")\
+            .update({"tool_content": updated_tool_content})\
+            .eq("id", message_id)\
+            .execute()
+
+        if update_result.data:
+            logger.info(f"Successfully updated tool_result message {message_id} for tool_use_id={tool_use_id}")
+            return True
+        else:
+            logger.error(f"Failed to update tool_result message {message_id}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error updating tool_result in database: {str(e)}")
+        return False
 
 @app.post("/update_api_tokens")
 async def update_api_tokens(
@@ -4772,6 +4840,54 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # Increment pending tool counter before execution
             await increment_pending_tools(session_conversation_id)
 
+            # ===== CRITICAL: Save tool_use and PENDING tool_result IMMEDIATELY =====
+            # This prevents race conditions where Claude sees incomplete conversation history
+            # and triggers the same tool multiple times
+
+            # Convert tool_block to a serializable dict
+            tool_block_dict = {
+                "type": "tool_use",
+                "id": tool_block.id,
+                "name": tool_block.name,
+                "input": tool_block.input
+            }
+
+            # Save tool_use to Redis and database BEFORE executing the tool
+            async with chat_sessions_lock:
+                await add_chat_message(session_id, {"role": "assistant", "content": [tool_block_dict]})
+
+                tool_use_save_result = save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content="",  # Tool messages don't have text content
+                    message_sender="ASSISTANT",
+                    request_id=request_id,
+                    content_type="tool_use",
+                    tool_content=[tool_block_dict]
+                )
+                logger.info(f"✅ Saved tool_use message to database BEFORE execution: {tool_block.name}")
+
+                # Create PENDING tool result (will be updated with actual result later)
+                pending_tool_result_dict = {
+                    "type": "tool_result",
+                    "tool_use_id": tool_block.id,
+                    "content": json.dumps({"status": "pending", "message": "Tool execution in progress..."})
+                }
+                await add_chat_message(session_id, {"role": "user", "content": [pending_tool_result_dict]})
+
+                # Save PENDING tool_result to database with timestamp +1ms after tool_use
+                pending_result_save = save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content="",  # Tool messages don't have text content
+                    message_sender="USER",
+                    request_id=request_id,
+                    content_type="tool_result",
+                    tool_content=[pending_tool_result_dict]
+                )
+                logger.info(f"✅ Saved PENDING tool_result to database BEFORE execution: tool_use_id={tool_block.id}")
+
+            # ===== Now execute the tool =====
             try:
                 # Pass WebSocket context for tools that need it (like launch_app)
                 tool_execution_result = await execute_tool(
@@ -4797,48 +4913,40 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # The launch_app tool now handles WebSocket communication directly,
                 # so we don't need special handling here anymore
 
-                # If not the specific Asana auth error or WebSocket action, proceed as before with Claude:
+                # ===== Update the PENDING tool_result with actual result =====
                 async with chat_sessions_lock:
-                    # Convert tool_block to a serializable dict
-                    tool_block_dict = {
-                        "type": "tool_use",
-                        "id": tool_block.id,
-                        "name": tool_block.name,
-                        "input": tool_block.input
-                    }
-                    await add_chat_message(session_id, {"role": "assistant", "content": [tool_block_dict]})
-
-                    # Save tool_use message to database
-                    save_message_to_db(
-                        user_id=user_id,
-                        conversation_id=session_conversation_id,
-                        content="",  # Tool messages don't have text content
-                        message_sender="ASSISTANT",
-                        request_id=request_id,
-                        content_type="tool_use",
-                        tool_content=[tool_block_dict]
-                    )
-                    logger.info(f"Saved tool_use message to database: {tool_block.name}")
-
-                    # Create tool result message
-                    tool_result_dict = {
+                    # Update Redis session with actual result
+                    actual_tool_result_dict = {
                         "type": "tool_result",
                         "tool_use_id": tool_block.id,
                         "content": json.dumps(tool_execution_result)
                     }
-                    await add_chat_message(session_id, {"role": "user", "content": [tool_result_dict]})
 
-                    # Save tool_result message to database
-                    save_message_to_db(
-                        user_id=user_id,
+                    # Replace the pending result in Redis
+                    messages = await get_chat_messages(session_id)
+                    for i in range(len(messages) - 1, -1, -1):  # Search backwards for efficiency
+                        msg = messages[i]
+                        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                            for block in msg["content"]:
+                                if isinstance(block, dict) and \
+                                   block.get("type") == "tool_result" and \
+                                   block.get("tool_use_id") == tool_block.id:
+                                    # Found the pending result, update it
+                                    messages[i] = {"role": "user", "content": [actual_tool_result_dict]}
+                                    await set_chat_messages(session_id, messages)
+                                    logger.info(f"✅ Updated Redis with actual tool_result for tool_use_id={tool_block.id}")
+                                    break
+
+                    # Update database with actual result
+                    update_success = update_tool_result_in_db(
                         conversation_id=session_conversation_id,
-                        content="",  # Tool messages don't have text content
-                        message_sender="USER",
-                        request_id=request_id,
-                        content_type="tool_result",
-                        tool_content=[tool_result_dict]
+                        tool_use_id=tool_block.id,
+                        result_content=tool_execution_result
                     )
-                    logger.info(f"Saved tool_result message to database for tool: {tool_block.name}")
+                    if update_success:
+                        logger.info(f"✅ Updated database with actual tool_result for tool: {tool_block.name}")
+                    else:
+                        logger.error(f"❌ Failed to update database with actual tool_result for tool: {tool_block.name}")
             finally:
                 # Always decrement counter, even if tool execution or saving fails
                 await decrement_pending_tools(session_conversation_id)
