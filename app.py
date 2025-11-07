@@ -4805,6 +4805,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         if hasattr(response, 'content'):
             logger.info(f"Claude response content: {[{'type': getattr(block, 'type', 'unknown'), 'text': getattr(block, 'text', None)[:100] if hasattr(block, 'text') else None} for block in response.content]}")
         
+        # Track whether text was already saved during tool execution
+        text_saved_during_tool_execution = False
+
         # Handle tool calls
         while response.stop_reason == 'tool_use':
             # Check for cancellation before each tool iteration
@@ -4840,7 +4843,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # Increment pending tool counter before execution
             await increment_pending_tools(session_conversation_id)
 
-            # ===== CRITICAL: Save tool_use and PENDING tool_result IMMEDIATELY =====
+            # ===== CRITICAL: Save tool_use, TEXT, and PENDING tool_result IMMEDIATELY =====
             # This prevents race conditions where Claude sees incomplete conversation history
             # and triggers the same tool multiple times
 
@@ -4852,10 +4855,22 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "input": tool_block.input
             }
 
-            # Save tool_use to Redis and database BEFORE executing the tool
-            async with chat_sessions_lock:
-                await add_chat_message(session_id, {"role": "assistant", "content": [tool_block_dict]})
+            # Extract text blocks from response (if any)
+            text_blocks = []
+            assistant_response_text = ""
+            for block in response.content:
+                if block.type == 'text':
+                    text_blocks.append({"type": "text", "text": block.text})
+                    if not assistant_response_text:  # Use first text block
+                        assistant_response_text = block.text
 
+            # Save complete assistant message (text + tool_use) to Redis and database BEFORE executing the tool
+            async with chat_sessions_lock:
+                # Build complete assistant content: text comes BEFORE tool_use
+                assistant_content = text_blocks + [tool_block_dict]
+                await add_chat_message(session_id, {"role": "assistant", "content": assistant_content})
+
+                # Save tool_use to database
                 tool_use_save_result = save_message_to_db(
                     user_id=user_id,
                     conversation_id=session_conversation_id,
@@ -4866,6 +4881,23 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     tool_content=[tool_block_dict]
                 )
                 logger.info(f"✅ Saved tool_use message to database BEFORE execution: {tool_block.name}")
+
+                # Save text response to database IMMEDIATELY if present
+                # This prevents race conditions where a new request arrives before tool execution completes
+                if assistant_response_text:
+                    text_save_result = save_message_to_db(
+                        user_id=user_id,
+                        conversation_id=session_conversation_id,
+                        content=assistant_response_text,
+                        message_sender="ASSISTANT",
+                        request_id=request_id,
+                        content_type="text"
+                    )
+                    if text_save_result:
+                        text_saved_during_tool_execution = True
+                        logger.info(f"✅ Saved text message to database BEFORE tool execution: '{assistant_response_text[:50]}...'")
+                    else:
+                        logger.error(f"❌ Failed to save text message to database")
 
                 # Create PENDING tool result (will be updated with actual result later)
                 pending_tool_result_dict = {
@@ -5024,17 +5056,22 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Add assistant final response to session history (if not an intercepted error)
         # IMPORTANT: Only add text blocks here, NOT tool_use blocks
         # Tool_use blocks were already added in the tool loop above
+        # ALSO: Skip if text was already added during tool execution (with tool_use)
         async with chat_sessions_lock:
-            # Convert response.content to serializable format - ONLY text blocks
-            content_list = []
-            for block in response.content:
-                if block.type == 'text':
-                    content_list.append({"type": "text", "text": block.text})
-                # Skip tool_use blocks - they were already added in the tool loop
+            # Only add text if it wasn't already saved during tool execution
+            if not text_saved_during_tool_execution:
+                # Convert response.content to serializable format - ONLY text blocks
+                content_list = []
+                for block in response.content:
+                    if block.type == 'text':
+                        content_list.append({"type": "text", "text": block.text})
+                    # Skip tool_use blocks - they were already added in the tool loop
 
-            # Only add message if there's text content
-            if content_list:
-                await add_chat_message(session_id, {"role": "assistant", "content": content_list})
+                # Only add message if there's text content
+                if content_list:
+                    await add_chat_message(session_id, {"role": "assistant", "content": content_list})
+            else:
+                logger.info("Skipping Redis text save - already saved with tool_use during tool execution")
         
         # Extract and save assistant response to database
         # Look for text in ANY content block, not just the first one
@@ -5054,27 +5091,31 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.info(f"Request {request_id} was cancelled, will save bot message as cancelled")
 
         # Save assistant message to database if there's text content (always save, but mark as cancelled if needed)
+        # Skip if already saved during tool execution
         saved_conversation_id = session_conversation_id
         save_result = None
         if assistant_response_text:
-            logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
-            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text")
-            if save_result:
-                saved_conversation_id, bot_message_id = save_result
-                logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
-
-                # If cancelled, update the message to mark it as cancelled
-                if request_cancelled:
-                    try:
-                        supabase.table("messages")\
-                            .update({"cancelled": "now()"})\
-                            .eq("id", bot_message_id)\
-                            .execute()
-                        logger.info(f"Marked bot message {bot_message_id} as cancelled in database")
-                    except Exception as e:
-                        logger.error(f"Failed to mark bot message {bot_message_id} as cancelled: {e}")
+            if text_saved_during_tool_execution:
+                logger.info(f"Skipping database text save - already saved during tool execution: '{assistant_response_text[:50]}...'")
             else:
-                logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
+                logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
+                save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text")
+                if save_result:
+                    saved_conversation_id, bot_message_id = save_result
+                    logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
+
+                    # If cancelled, update the message to mark it as cancelled
+                    if request_cancelled:
+                        try:
+                            supabase.table("messages")\
+                                .update({"cancelled": "now()"})\
+                                .eq("id", bot_message_id)\
+                                .execute()
+                            logger.info(f"Marked bot message {bot_message_id} as cancelled in database")
+                        except Exception as e:
+                            logger.error(f"Failed to mark bot message {bot_message_id} as cancelled: {e}")
+                else:
+                    logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
         else:
             logger.info(f"No text content in Claude's response for request {request_id}, only tool calls. This is normal for tool-only responses.")
 
