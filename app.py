@@ -4863,26 +4863,55 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     if not assistant_response_text:  # Use first text block
                         assistant_response_text = block.text
 
+            # Calculate timestamps to ensure correct ordering in database
+            # Text must come BEFORE tool_use, so we use explicit timestamps
+            from datetime import datetime, timedelta
+
+            # Get user message timestamp
+            user_msg_result = supabase.table("messages")\
+                .select("timestamp")\
+                .eq("conversation_id", session_conversation_id)\
+                .eq("request_id", request_id)\
+                .eq("message_sender", "USER")\
+                .execute()
+
+            if user_msg_result.data:
+                user_timestamp = user_msg_result.data[0]["timestamp"]
+                # Parse and normalize timestamp
+                timestamp_str = user_timestamp.replace('Z', '+00:00')
+                if '.' in timestamp_str:
+                    parts = timestamp_str.split('.')
+                    if len(parts) == 2:
+                        if '+' in parts[1]:
+                            frac, tz = parts[1].split('+')
+                            frac = frac.ljust(6, '0')[:6]
+                            timestamp_str = f"{parts[0]}.{frac}+{tz}"
+                        elif '-' in parts[1]:
+                            frac, tz = parts[1].split('-')
+                            frac = frac.ljust(6, '0')[:6]
+                            timestamp_str = f"{parts[0]}.{frac}-{tz}"
+
+                user_dt = datetime.fromisoformat(timestamp_str)
+                # Set timestamps: text (T), tool_use (T+1ms), tool_result (T+2ms)
+                text_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
+                tool_use_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
+                tool_result_timestamp = (user_dt + timedelta(milliseconds=3)).isoformat().replace('+00:00', 'Z')
+                logger.info(f"Using explicit timestamps: text={text_timestamp}, tool_use={tool_use_timestamp}, tool_result={tool_result_timestamp}")
+            else:
+                # Fallback: no explicit timestamps
+                text_timestamp = None
+                tool_use_timestamp = None
+                tool_result_timestamp = None
+                logger.warning(f"No USER message found with request_id {request_id}, using default timestamps")
+
             # Save complete assistant message (text + tool_use) to Redis and database BEFORE executing the tool
             async with chat_sessions_lock:
                 # Build complete assistant content: text comes BEFORE tool_use
                 assistant_content = text_blocks + [tool_block_dict]
                 await add_chat_message(session_id, {"role": "assistant", "content": assistant_content})
 
-                # Save tool_use to database
-                tool_use_save_result = save_message_to_db(
-                    user_id=user_id,
-                    conversation_id=session_conversation_id,
-                    content="",  # Tool messages don't have text content
-                    message_sender="ASSISTANT",
-                    request_id=request_id,
-                    content_type="tool_use",
-                    tool_content=[tool_block_dict]
-                )
-                logger.info(f"✅ Saved tool_use message to database BEFORE execution: {tool_block.name}")
-
-                # Save text response to database IMMEDIATELY if present
-                # This prevents race conditions where a new request arrives before tool execution completes
+                # Save text response to database FIRST if present (with earliest timestamp)
+                # This ensures correct ordering when fetching from database
                 if assistant_response_text:
                     text_save_result = save_message_to_db(
                         user_id=user_id,
@@ -4890,12 +4919,26 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         content=assistant_response_text,
                         message_sender="ASSISTANT",
                         request_id=request_id,
-                        content_type="text"
+                        content_type="text",
+                        client_timestamp=text_timestamp
                     )
                     if text_save_result:
                         logger.info(f"✅ Saved text message to database BEFORE tool execution: '{assistant_response_text[:50]}...'")
                     else:
                         logger.error(f"❌ Failed to save text message to database")
+
+                # Save tool_use to database SECOND (with timestamp after text)
+                tool_use_save_result = save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content="",  # Tool messages don't have text content
+                    message_sender="ASSISTANT",
+                    request_id=request_id,
+                    content_type="tool_use",
+                    tool_content=[tool_block_dict],
+                    client_timestamp=tool_use_timestamp
+                )
+                logger.info(f"✅ Saved tool_use message to database BEFORE execution: {tool_block.name}")
 
                 # Create PENDING tool result (will be updated with actual result later)
                 pending_tool_result_dict = {
@@ -4905,7 +4948,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 }
                 await add_chat_message(session_id, {"role": "user", "content": [pending_tool_result_dict]})
 
-                # Save PENDING tool_result to database with timestamp +1ms after tool_use
+                # Save PENDING tool_result to database with timestamp after tool_use
                 pending_result_save = save_message_to_db(
                     user_id=user_id,
                     conversation_id=session_conversation_id,
@@ -4913,7 +4956,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     message_sender="USER",
                     request_id=request_id,
                     content_type="tool_result",
-                    tool_content=[pending_tool_result_dict]
+                    tool_content=[pending_tool_result_dict],
+                    client_timestamp=tool_result_timestamp
                 )
                 logger.info(f"✅ Saved PENDING tool_result to database BEFORE execution: tool_use_id={tool_block.id}")
 
