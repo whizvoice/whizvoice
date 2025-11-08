@@ -4496,20 +4496,23 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
                             # Insert cancelled assistant message to database
                             separator_text = "..."  # Minimal placeholder text
-                            separator_timestamp = time.time() * 1000  # milliseconds
 
                             try:
-                                save_message_to_db(
-                                    user_id=user_id,
-                                    conversation_id=session_conversation_id,
-                                    message_sender="ASSISTANT",
-                                    content=separator_text,
-                                    request_id=None,  # No request_id for separator
-                                    content_type="text",
-                                    timestamp=separator_timestamp,
-                                    cancelled=True  # Mark as cancelled so it won't show to user
-                                )
-                                logger.info(f"Inserted cancelled assistant separator message to database for conversation {session_conversation_id}")
+                                # Insert directly to DB with cancelled=now() since save_message_to_db doesn't support it
+                                from datetime import datetime
+                                separator_data = {
+                                    "conversation_id": session_conversation_id,
+                                    "content": separator_text,
+                                    "message_sender": "ASSISTANT",
+                                    "content_type": "text",
+                                    "cancelled": datetime.utcnow().isoformat() + 'Z'
+                                }
+
+                                separator_result = supabase.table("messages").insert(separator_data).execute()
+                                if separator_result.data:
+                                    logger.info(f"Inserted cancelled assistant separator message to database for conversation {session_conversation_id}")
+                                else:
+                                    logger.error(f"Failed to insert separator - no data returned")
 
                                 # Also add to Redis session so it's available immediately
                                 await add_chat_message(session_id, {"role": "assistant", "content": separator_text})
