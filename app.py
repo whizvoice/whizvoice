@@ -4477,7 +4477,48 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     except Exception as e:
                         logger.error(f"Failed to pre-load existing messages: {e}")
                         # Continue without context rather than fail
-                
+
+                # CRITICAL FIX: Check if last message is a tool_result
+                # If so, insert a cancelled assistant message to prevent Claude API error
+                # when consecutive user messages get merged (tool_result + new text)
+                current_messages = await get_chat_messages(session_id)
+                if current_messages and len(current_messages) > 0:
+                    last_msg = current_messages[-1]
+                    if last_msg.get('role') == 'user' and isinstance(last_msg.get('content'), list):
+                        # Check if last message contains a tool_result block
+                        has_tool_result = any(
+                            isinstance(block, dict) and block.get('type') == 'tool_result'
+                            for block in last_msg['content']
+                        )
+
+                        if has_tool_result:
+                            logger.info(f"Last message contains tool_result, inserting cancelled assistant message to prevent merging with new user message")
+
+                            # Insert cancelled assistant message to database
+                            separator_text = "..."  # Minimal placeholder text
+                            separator_timestamp = time.time() * 1000  # milliseconds
+
+                            try:
+                                save_message_to_db(
+                                    user_id=user_id,
+                                    conversation_id=session_conversation_id,
+                                    message_sender="ASSISTANT",
+                                    content=separator_text,
+                                    request_id=None,  # No request_id for separator
+                                    content_type="text",
+                                    timestamp=separator_timestamp,
+                                    cancelled=True  # Mark as cancelled so it won't show to user
+                                )
+                                logger.info(f"Inserted cancelled assistant separator message to database for conversation {session_conversation_id}")
+
+                                # Also add to Redis session so it's available immediately
+                                await add_chat_message(session_id, {"role": "assistant", "content": separator_text})
+                                logger.info(f"Added cancelled assistant separator to Redis session")
+
+                            except Exception as e:
+                                logger.error(f"Failed to insert cancelled assistant separator: {e}")
+                                # Continue anyway - the merge might still work
+
                 # Now add the current message
                 await asyncio.shield(add_chat_message(session_id, {"role": "user", "content": message}))
                 logger.info(f"Added current message to Redis session for conversation {session_conversation_id}")
