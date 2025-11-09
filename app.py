@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic, AuthenticationError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date, delete_asana_task
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
-from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message
+from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message, sms_select_chat, sms_draft_message, sms_send_message
 from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, select_location_from_list
 from color_tools import color_tools, pick_random_color
@@ -70,19 +70,23 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
 
 1. When the user asks to open/launch an app (like WhatsApp, YouTube, Maps, etc.), you MUST use the 'launch_app' tool
 2. For WhatsApp messaging, use the WhatsApp-specific tools (whatsapp_select_chat, whatsapp_draft_message, whatsapp_send_message)
-3. For Asana/task management, use the Asana tools
-4. For app information, use the get_app_info tool
-5. For music playback:
+3. For SMS texting, use the SMS-specific tools (sms_select_chat, sms_draft_message, sms_send_message)
+4. For Asana/task management, use the Asana tools
+5. For app information, use the get_app_info tool
+6. For music playback:
    - When the user asks to play music WITHOUT specifying an app, check their music app preference using get_music_app_preference
-   - If no preference is set, ask the user which music app they prefer (YouTube Music or Spotify) and save it using set_music_app_preference
-   - Use play_youtube_music or queue_youtube_music tools based on the user's preference
+   - If no preference is set, ask the user which music app they prefer (currently we only support YouTube Music, not Spotify) and save it using set_music_app_preference
    - If the user explicitly specifies an app in their request (e.g., "play on YouTube Music"), use that app and optionally save it as their preference
+7. For deciding on a random color when a list of colors isn't specified, ALWAYS use the pick_random_color tool
 
 IMPORTANT: When a user asks you to open an app, DO NOT just say you opened it - you MUST actually use the launch_app tool to open it on their device. Similarly, use the appropriate tools for all actions rather than just describing what you would do.
 
 Note that you are a voice app, so please keep your responses brief so that they don't take too long to be read out loud.
 
-FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *italic*, `code`, code blocks with triple backticks, lists, etc.) to improve readability. The app will render markdown appropriately."""
+FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *italic*, `code`, code blocks with triple backticks, lists, etc.) to improve readability. The app will render markdown appropriately.
+
+DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. If you, for example, sucessfully sent a message or made a task in Asana, DO NOT do the same thing again so the user does not see duplicates.
+"""
 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools
@@ -200,7 +204,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         try:
             from supabase_client import supabase
             query = supabase.table("messages")\
-                .select("id, content, message_type, timestamp, cancelled")\
+                .select("id, content, message_sender, timestamp, cancelled, content_type, tool_content")\
                 .eq("conversation_id", conversation_id)\
                 .order("timestamp", desc=False)
 
@@ -208,12 +212,41 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             db_messages = response.data if response.data else []
 
             redis_messages = []
+            # First pass: identify tool_use IDs that have corresponding tool_results
+            tool_use_ids_with_results = set()
+            for msg in db_messages:
+                if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                    for block in msg['tool_content']:
+                        if isinstance(block, dict) and block.get('tool_use_id'):
+                            tool_use_ids_with_results.add(block['tool_use_id'])
+
+            # Second pass: build messages, skipping incomplete tool_use blocks
             for msg in db_messages:
                 if msg.get('cancelled'):
                     continue
-                if msg['message_type'] == 'USER':
+
+                content_type = msg.get('content_type', 'text')
+                tool_content = msg.get('tool_content')
+
+                # Handle tool_use messages - skip if no corresponding tool_result
+                if content_type == 'tool_use' and tool_content:
+                    tool_use_id = None
+                    for block in tool_content:
+                        if isinstance(block, dict) and block.get('id'):
+                            tool_use_id = block['id']
+                            break
+
+                    if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                        logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
+                        continue
+
+                    redis_messages.append({"role": "assistant", "content": tool_content})
+                elif content_type == 'tool_result' and tool_content:
+                    redis_messages.append({"role": "user", "content": tool_content})
+                # Handle regular text messages
+                elif msg['message_sender'] == 'USER':
                     redis_messages.append({"role": "user", "content": msg['content']})
-                elif msg['message_type'] == 'ASSISTANT':
+                elif msg['message_sender'] == 'ASSISTANT':
                     redis_messages.append({"role": "assistant", "content": msg['content']})
 
             if redis_messages:
@@ -225,6 +258,38 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
 
     # Always use non-streaming mode
     stream = False
+
+    # CRITICAL: Merge consecutive messages with same role (Claude API requirement)
+    # When merging user messages, tool_result blocks MUST come before text blocks
+    merged_messages = []
+    for msg in messages:
+        if not merged_messages or merged_messages[-1]['role'] != msg['role']:
+            # Different role or first message - just append
+            merged_messages.append(msg)
+        else:
+            # Same role as previous - merge content
+            prev_msg = merged_messages[-1]
+            prev_content = prev_msg['content']
+            curr_content = msg['content']
+
+            # Convert both to lists of content blocks
+            prev_blocks = prev_content if isinstance(prev_content, list) else [{"type": "text", "text": prev_content}]
+            curr_blocks = curr_content if isinstance(curr_content, list) else [{"type": "text", "text": curr_content}]
+
+            # For user messages: tool_result blocks MUST come first, then text blocks
+            if msg['role'] == 'user':
+                tool_results = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_result']
+                text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
+                merged_content = tool_results + text_blocks
+            else:
+                # For assistant messages: text blocks MUST come first, then tool_use blocks
+                text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
+                tool_uses = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_use']
+                merged_content = text_blocks + tool_uses
+
+            prev_msg['content'] = merged_content
+
+    messages = merged_messages
 
     # Log the conversation context being sent to Claude
     logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}, stream={stream}")
@@ -365,6 +430,58 @@ SESSION_WARNING_THRESHOLD = 0.8  # Warn when at 80% capacity
 # Redis connection and managers
 redis_client: Optional[redis.Redis] = None
 redis_managers = None  # Will be initialized after Redis connection
+
+# Helper functions for managing pending tool execution counter
+async def increment_pending_tools(conversation_id: int):
+    """Increment the pending tool counter for a conversation"""
+    if redis_client:
+        key = f"conversation:{conversation_id}:pending_tools"
+        await redis_client.incr(key)
+        await redis_client.expire(key, 60)  # Auto-cleanup after 60s
+        logger.debug(f"Incremented pending tools for conversation {conversation_id}")
+
+async def decrement_pending_tools(conversation_id: int):
+    """Decrement the pending tool counter for a conversation"""
+    if redis_client:
+        key = f"conversation:{conversation_id}:pending_tools"
+        current = await redis_client.get(key)
+        if current and int(current) > 0:
+            await redis_client.decr(key)
+            logger.debug(f"Decremented pending tools for conversation {conversation_id}")
+
+async def get_pending_tools_count(conversation_id: int) -> int:
+    """Get the count of pending tool executions for a conversation"""
+    if redis_client:
+        key = f"conversation:{conversation_id}:pending_tools"
+        count = await redis_client.get(key)
+        return int(count) if count else 0
+    return 0
+
+async def wait_for_pending_tools(conversation_id: int, timeout_seconds: float = 5.0) -> bool:
+    """
+    Wait for pending tool executions to complete.
+    Returns True if all tools completed, False if timeout reached.
+    """
+    if not conversation_id:
+        return True
+
+    start_time = time.time()
+    max_attempts = int(timeout_seconds / 0.5)
+
+    for attempt in range(max_attempts):
+        pending_count = await get_pending_tools_count(conversation_id)
+        if pending_count == 0:
+            logger.info(f"All pending tools completed for conversation {conversation_id}")
+            return True
+
+        if time.time() - start_time >= timeout_seconds:
+            logger.warning(f"Timeout waiting for {pending_count} pending tools in conversation {conversation_id}")
+            return False
+
+        logger.debug(f"Waiting for {pending_count} pending tools (attempt {attempt + 1}/{max_attempts})")
+        await asyncio.sleep(0.5)
+
+    return False
 
 # Local-only data structures moved to LocalObjectManager in redis_managers
 
@@ -696,6 +813,49 @@ TOOL_REGISTRY = {
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id'),
             args.get('previous_text')  # Add previous_text parameter
+        ),
+        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
+    },
+    "sms_select_chat": {
+        "function_name": "sms_select_chat",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('contact_name'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Contact name is required."} if not args.get('contact_name') else None
+    },
+    "sms_draft_message": {
+        "function_name": "sms_draft_message",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('message'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id'),
+            args.get('previous_text')
+        ),
+        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
+    },
+    "sms_send_message": {
+        "function_name": "sms_send_message",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('message'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
         ),
         "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     },
@@ -1569,6 +1729,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         .select("id")\
                         .eq("user_id", user_id)\
                         .eq("optimistic_chat_id", str(conversation_id))\
+                        .is_("deleted_at", "null")\
                         .execute()
                     
                     if opt_result.data and len(opt_result.data) > 0:
@@ -2540,6 +2701,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                     .select("id")\
                     .eq("user_id", user_id)\
                     .eq("optimistic_chat_id", str(conversation_id))\
+                    .is_("deleted_at", "null")\
                     .execute()
                 
                 if opt_result.data and len(opt_result.data) > 0:
@@ -2557,14 +2719,50 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
 
         # Get messages for the conversation
         result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
-        
+
         # Convert database messages to Claude format
+        # Group consecutive messages by role ONLY (not request_id) to ensure proper alternation
+        # This is critical because Claude API requires strict user/assistant alternation
         claude_messages = []
+        current_group = None  # (role, content_blocks)
+
         for row in result.data:
-            message_role = "user" if row["message_type"] == "USER" else "assistant"
+            message_role = "user" if row["message_sender"] == "USER" else "assistant"
+
+            # Determine if this row belongs to current group (same role)
+            should_group = (
+                current_group is not None and
+                message_role == current_group[0]
+            )
+
+            if should_group:
+                # Add to current group
+                if row.get("tool_content"):
+                    current_group[1].extend(row["tool_content"])
+                elif row.get("content") and row["content"].strip():
+                    current_group[1].append({"type": "text", "text": row["content"]})
+            else:
+                # Flush current group if exists
+                if current_group and current_group[1]:
+                    claude_messages.append({
+                        "role": current_group[0],
+                        "content": current_group[1]
+                    })
+
+                # Start new group
+                content_blocks = []
+                if row.get("tool_content"):
+                    content_blocks.extend(row["tool_content"])
+                elif row.get("content") and row["content"].strip():
+                    content_blocks.append({"type": "text", "text": row["content"]})
+
+                current_group = [message_role, content_blocks]
+
+        # Flush final group
+        if current_group and current_group[1]:
             claude_messages.append({
-                "role": message_role,
-                "content": row["content"]
+                "role": current_group[0],
+                "content": current_group[1]
             })
 
         return claude_messages
@@ -2578,21 +2776,21 @@ def get_user_message_ids_since_last_bot(conversation_id: int) -> List[int]:
     try:
         # Get all messages ordered by timestamp
         result = supabase.table("messages")\
-            .select("id, message_type")\
+            .select("id, message_sender")\
             .eq("conversation_id", conversation_id)\
             .is_("cancelled", "null")\
             .order("timestamp", desc=False)\
             .execute()
-        
+
         if not result.data:
             return []
-        
+
         # Find user messages since last bot message
         user_message_ids = []
         for msg in reversed(result.data):  # Start from most recent
-            if msg["message_type"] == "ASSISTANT":
+            if msg["message_sender"] == "ASSISTANT":
                 break  # Stop at the most recent bot message
-            elif msg["message_type"] == "USER":
+            elif msg["message_sender"] == "USER":
                 user_message_ids.append(msg["id"])
         
         return list(reversed(user_message_ids))  # Return in chronological order
@@ -2606,7 +2804,7 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         result = supabase.table("messages")\
             .select("id")\
             .eq("conversation_id", conversation_id)\
-            .eq("message_type", "ASSISTANT")\
+            .eq("message_sender", "ASSISTANT")\
             .is_("cancelled", "null")\
             .order("id", desc=False)\
             .execute()
@@ -2652,7 +2850,7 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                     bot_msg_result = supabase.table("messages")\
                         .select("id")\
                         .eq("request_id", request_id)\
-                        .eq("message_type", "ASSISTANT")\
+                        .eq("message_sender", "ASSISTANT")\
                         .is_("cancelled", "null")\
                         .execute()
 
@@ -2711,11 +2909,23 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
     
     return cancelled_requests
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_type: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None) -> Optional[Tuple[int, int]]:
-    """Save a message to the database and return (conversation_id, message_id)"""
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None) -> Optional[Tuple[int, int]]:
+    """Save a message to the database and return (conversation_id, message_id)
+
+    Args:
+        user_id: User ID
+        conversation_id: Conversation ID (can be negative for optimistic IDs)
+        content: Text content of the message
+        message_sender: 'USER' or 'ASSISTANT' (renamed from message_type)
+        request_id: Optional request ID for tracking
+        client_conversation_id: Optional optimistic conversation ID from client
+        client_timestamp: Optional timestamp from client
+        content_type: Type of content - 'text', 'tool_use', 'tool_result', or 'mixed'
+        tool_content: Optional JSONB content for tool-related messages
+    """
     try:
-        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_type={message_type}, client_conversation_id={client_conversation_id}, content='{content[:50]}...'")
-        
+        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_conversation_id={client_conversation_id}, content='{content[:50] if content else '(empty)'}...'")
+
         # Handle optimistic conversation IDs (negative IDs)
         original_optimistic_id = None
         if conversation_id is not None and conversation_id < 0:
@@ -2726,6 +2936,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 .select("id")\
                 .eq("optimistic_chat_id", str(conversation_id))\
                 .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
                 .execute()
             
             if conv_result.data:
@@ -2759,6 +2970,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 .select("id")\
                 .eq("optimistic_chat_id", str(client_conversation_id))\
                 .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
                 .execute()
             
             if conv_result.data:
@@ -2796,34 +3008,53 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             updated_at = conv_result.data[0]["updated_at"]
             logger.warning(f"Created NEW conversation {conversation_id} for user {user_id} at {created_at} (updated_at: {updated_at})")
         else:
+            # Verify the conversation exists and is not soft-deleted
+            logger.info(f"Validating conversation {conversation_id} for user {user_id}")
+            conv_check = supabase.table("conversations")\
+                .select("id")\
+                .eq("id", conversation_id)\
+                .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
+                .execute()
+
+            if not conv_check.data:
+                logger.error(f"Conversation {conversation_id} not found or is soft-deleted for user {user_id}")
+                return None
+
             logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
         
         # Save the message
-        logger.info(f"Attempting to save {message_type} message to conversation_id={conversation_id}, request_id={request_id}")
-        
+        logger.info(f"Attempting to save {message_sender} message to conversation_id={conversation_id}, request_id={request_id}, content_type={content_type}")
+
         # Prepare message data
         message_data = {
             "conversation_id": conversation_id,
             "content": content,
-            "message_type": message_type,
+            "message_sender": message_sender,
+            "content_type": content_type,
             "request_id": request_id
         }
-        
+
+        # Add tool_content if provided
+        if tool_content is not None:
+            message_data["tool_content"] = tool_content
+            logger.info(f"Including tool_content in message: {json.dumps(tool_content)[:100]}...")
+
         # For USER messages with client_timestamp, use the provided timestamp to preserve message order
-        if message_type == "USER" and client_timestamp:
+        if message_sender == "USER" and client_timestamp:
             # Client timestamp is already in ISO format from Android client
             message_data["timestamp"] = client_timestamp
             logger.info(f"Using client-provided timestamp for USER message: {client_timestamp}")
         
         # For ASSISTANT messages with request_id, set timestamp to be right after the USER message
         # This ensures the response appears immediately after the user message it's responding to
-        if message_type == "ASSISTANT" and request_id:
+        if message_sender == "ASSISTANT" and request_id:
             # Find the USER message with this request_id
             user_msg_result = supabase.table("messages")\
                 .select("timestamp")\
                 .eq("conversation_id", conversation_id)\
                 .eq("request_id", request_id)\
-                .eq("message_type", "USER")\
+                .eq("message_sender", "USER")\
                 .execute()
             
             if user_msg_result.data:
@@ -2880,24 +3111,92 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         actual_timestamp = saved_message.get("timestamp")
         logger.info(f"DEBUG: Message {message_id} saved with timestamp: {actual_timestamp}")
         saved_conv_id = saved_message.get("conversation_id")
-        logger.info(f"Successfully saved {message_type} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}")
-        
+        logger.info(f"Successfully saved {message_sender} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}, content_type={content_type}")
+
         # Update conversation last_message_time and updated_at for incremental sync
         update_result = supabase.table("conversations").update({
             "last_message_time": "now()",
             "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
         }).eq("id", conversation_id).execute()
-        
+
         if update_result.data:
-            logger.info(f"Updated conversation {conversation_id} timestamps for {message_type} message")
+            logger.info(f"Updated conversation {conversation_id} timestamps for {message_sender} message")
         else:
             logger.warning(f"Failed to update conversation {conversation_id} timestamps")
         
         return (conversation_id, message_id)
-        
+
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")
         return None
+
+
+def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_content: dict) -> bool:
+    """Update a pending tool_result message with the actual result
+
+    Args:
+        conversation_id: The conversation ID containing the tool result message
+        tool_use_id: The tool_use_id to identify which tool_result to update
+        result_content: The actual tool execution result to replace the pending content
+
+    Returns:
+        True if update successful, False otherwise
+    """
+    try:
+        logger.info(f"Updating tool_result for tool_use_id={tool_use_id} in conversation={conversation_id}")
+
+        # Find the pending tool_result message
+        result = supabase.table("messages")\
+            .select("id, tool_content")\
+            .eq("conversation_id", conversation_id)\
+            .eq("content_type", "tool_result")\
+            .execute()
+
+        if not result.data:
+            logger.error(f"No tool_result messages found in conversation {conversation_id}")
+            return False
+
+        # Find the message with matching tool_use_id
+        message_to_update = None
+        for msg in result.data:
+            tool_content = msg.get("tool_content", [])
+            if isinstance(tool_content, list):
+                for block in tool_content:
+                    if isinstance(block, dict) and block.get("tool_use_id") == tool_use_id:
+                        message_to_update = msg
+                        break
+            if message_to_update:
+                break
+
+        if not message_to_update:
+            logger.error(f"No tool_result message found with tool_use_id={tool_use_id}")
+            return False
+
+        message_id = message_to_update["id"]
+
+        # Update the tool_content with the actual result
+        updated_tool_content = [{
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": json.dumps(result_content)
+        }]
+
+        # Update the message in the database
+        update_result = supabase.table("messages")\
+            .update({"tool_content": updated_tool_content})\
+            .eq("id", message_id)\
+            .execute()
+
+        if update_result.data:
+            logger.info(f"Successfully updated tool_result message {message_id} for tool_use_id={tool_use_id}")
+            return True
+        else:
+            logger.error(f"Failed to update tool_result message {message_id}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error updating tool_result in database: {str(e)}")
+        return False
 
 @app.post("/update_api_tokens")
 async def update_api_tokens(
@@ -3521,9 +3820,12 @@ async def get_messages(
         
         # Build the messages query - explicitly select fields including cancelled
         # Include ALL messages (including cancelled ones) so client can handle them appropriately
+        # Filter out tool messages (tool_use, tool_result) - only send text messages to Android client
         query = supabase.table("messages")\
-            .select("id, conversation_id, content, message_type, timestamp, updated_at, request_id, cancelled")\
+            .select("id, conversation_id, content, message_sender, content_type, timestamp, updated_at, request_id, cancelled")\
             .eq("conversation_id", actual_conversation_id)\
+            .neq("content_type", "tool_use")\
+            .neq("content_type", "tool_result")\
             .order("timestamp", desc=False)
         
         # Add incremental sync filter if provided
@@ -3548,7 +3850,11 @@ async def get_messages(
             # Ensure cancelled field is present (None if not cancelled, timestamp if cancelled)
             if 'cancelled' not in message:
                 message['cancelled'] = None
-            # Debug logging to diagnose message_type issue and timestamp
+            # Map message_sender -> message_type for API compatibility with Android client
+            if 'message_sender' in message:
+                message['message_type'] = message['message_sender']
+                del message['message_sender']
+            # Debug logging to diagnose timestamp
             logger.info(f"Message ID {message.get('id')}: type={message.get('message_type')}, cancelled={message.get('cancelled')}, timestamp={message.get('timestamp')}, content_preview={message.get('content', '')[:50]}")
         
         # Return with server timestamp for next incremental sync
@@ -3589,6 +3895,7 @@ async def create_message(
                 .select("id")\
                 .eq("optimistic_chat_id", str(message.conversation_id))\
                 .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
                 .execute()
             
             if conv_result.data:
@@ -3606,7 +3913,8 @@ async def create_message(
         message_data = {
             "conversation_id": actual_conversation_id,
             "content": message.content,
-            "message_type": message.message_type,
+            "message_sender": message.message_type,  # Note: message_type field from client maps to message_sender in DB
+            "content_type": "text",  # REST API only supports text messages for now
             "request_id": message.request_id
         }
         
@@ -3641,7 +3949,7 @@ async def create_message(
             id=row["id"],
             conversation_id=row["conversation_id"],
             content=row["content"],
-            message_type=row["message_type"],
+            message_type=row["message_sender"],
             timestamp=row["timestamp"],
             request_id=row.get("request_id")
         )
@@ -3710,19 +4018,19 @@ async def check_and_retry_failed_messages(
             last_message = messages[-1]
             
             # Check if it's an error message (ASSISTANT type with JSON error content)
-            if last_message.get("message_type") == "ASSISTANT":
+            if last_message.get("message_sender") == "ASSISTANT":
                 try:
                     content = json.loads(last_message.get("content", ""))
                     if content.get("type") == "error":
                         error_code = content.get("code")
                         request_id = content.get("request_id")
-                        
+
                         logger.info(f"Found error message with code {error_code}, will retry getting assistant response")
-                        
+
                         # Find the user message before this error
                         user_message_content = None
                         for i in range(len(messages) - 2, -1, -1):
-                            if messages[i].get("message_type") == "USER":
+                            if messages[i].get("message_sender") == "USER":
                                 user_message_content = messages[i].get("content")
                                 break
                         
@@ -3740,9 +4048,9 @@ async def check_and_retry_failed_messages(
                             # Build conversation history in chat session (exclude the error message)
                             chat_messages = []
                             for msg in messages[:-1]:  # Exclude the last error message
-                                if msg.get("message_type") == "USER":
+                                if msg.get("message_sender") == "USER":
                                     chat_messages.append({"role": "user", "content": msg.get("content")})
-                                elif msg.get("message_type") == "ASSISTANT":
+                                elif msg.get("message_sender") == "ASSISTANT":
                                     # Skip if it's an error message
                                     try:
                                         msg_content = json.loads(msg.get("content", ""))
@@ -3795,8 +4103,9 @@ async def check_and_retry_failed_messages(
                                         user_id=user_id,
                                         conversation_id=actual_conversation_id,
                                         content=assistant_response,
-                                        message_type="ASSISTANT",
-                                        request_id=request_id
+                                        message_sender="ASSISTANT",
+                                        request_id=request_id,
+                                        content_type="text"
                                     )
                                     
                                     if save_result:
@@ -3835,8 +4144,9 @@ async def check_and_retry_failed_messages(
                                     user_id=user_id,
                                     conversation_id=actual_conversation_id,
                                     content=error_content,
-                                    message_type="ASSISTANT",
-                                    request_id=request_id
+                                    message_sender="ASSISTANT",
+                                    request_id=request_id,
+                                    content_type="text"
                                 )
                                 return {
                                     "retried": False,
@@ -3857,8 +4167,9 @@ async def check_and_retry_failed_messages(
                                     user_id=user_id,
                                     conversation_id=actual_conversation_id,
                                     content=new_error_content,
-                                    message_type="ASSISTANT",
-                                    request_id=request_id
+                                    message_sender="ASSISTANT",
+                                    request_id=request_id,
+                                    content_type="text"
                                 )
                                 
                                 return {
@@ -3928,35 +4239,100 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         })
         
         messages = await get_chat_messages(session_id)
-        
-        # If we have an existing conversation but no messages in Redis, populate from database
-        # This handles reconnection scenarios where multiple messages were sent while offline
+
+        # Check if conversation history is complete (every tool_use has a tool_result)
+        # This handles race conditions where a new message arrives while a tool is executing
+        has_incomplete_tool = False
+        if len(messages) > 0:
+            for i, msg in enumerate(messages):
+                if msg.get('role') == 'assistant' and isinstance(msg.get('content'), list):
+                    for block in msg['content']:
+                        if isinstance(block, dict) and block.get('type') == 'tool_use':
+                            # Check if next message is a tool_result for this tool_use
+                            tool_use_id = block.get('id')
+                            if i + 1 >= len(messages):
+                                has_incomplete_tool = True
+                                break
+                            next_msg = messages[i + 1]
+                            if next_msg.get('role') != 'user':
+                                has_incomplete_tool = True
+                                break
+                            next_content = next_msg.get('content', [])
+                            if not isinstance(next_content, list):
+                                has_incomplete_tool = True
+                                break
+                            # Check if any block in next message is a tool_result for our tool_use_id
+                            has_result = False
+                            for result_block in next_content:
+                                if isinstance(result_block, dict) and \
+                                   result_block.get('type') == 'tool_result' and \
+                                   result_block.get('tool_use_id') == tool_use_id:
+                                    has_result = True
+                                    break
+                            if not has_result:
+                                has_incomplete_tool = True
+                                break
+                if has_incomplete_tool:
+                    break
+
+        # If we have an existing conversation but no messages in Redis OR incomplete tool execution,
+        # populate from database. This handles reconnection scenarios and race conditions.
         # IMPORTANT: Also check for optimistic conversations (negative IDs) that may have messages in DB
-        if len(messages) == 0 and session_conversation_id:
-            logger.info(f"Redis session empty for conversation {session_conversation_id}, loading history from database")
+        if (len(messages) == 0 or has_incomplete_tool) and session_conversation_id:
+            if has_incomplete_tool:
+                logger.warning(f"Redis session for conversation {session_conversation_id} has incomplete tool execution, reloading from database")
+            elif len(messages) == 0:
+                logger.info(f"Redis session empty for conversation {session_conversation_id}, loading history from database")
             try:
                 # Get all messages from database for this conversation
                 query = supabase.table("messages")\
-                    .select("id, content, message_type, timestamp, request_id, cancelled")\
+                    .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
                     .eq("conversation_id", session_conversation_id)\
                     .order("timestamp", desc=False)
-                
+
                 response = query.execute()
                 db_messages = response.data if response.data else []
-                
+
                 # Build Redis session from database messages
                 redis_messages = []
+                # First pass: identify tool_use IDs that have corresponding tool_results
+                tool_use_ids_with_results = set()
+                for msg in db_messages:
+                    if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                        for block in msg['tool_content']:
+                            if isinstance(block, dict) and block.get('tool_use_id'):
+                                tool_use_ids_with_results.add(block['tool_use_id'])
+
+                # Second pass: build messages, skipping incomplete tool_use blocks
                 for msg in db_messages:
                     # Skip cancelled messages
                     if msg.get('cancelled'):
                         continue
-                    
-                    # Format for Redis (same as Claude API format)
-                    if msg['message_type'] == 'USER':
+
+                    content_type = msg.get('content_type', 'text')
+                    tool_content = msg.get('tool_content')
+
+                    # Handle tool_use messages - skip if no corresponding tool_result
+                    if content_type == 'tool_use' and tool_content:
+                        tool_use_id = None
+                        for block in tool_content:
+                            if isinstance(block, dict) and block.get('id'):
+                                tool_use_id = block['id']
+                                break
+
+                        if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                            logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
+                            continue
+
+                        redis_messages.append({"role": "assistant", "content": tool_content})
+                    elif content_type == 'tool_result' and tool_content:
+                        redis_messages.append({"role": "user", "content": tool_content})
+                    # Handle regular text messages
+                    elif msg['message_sender'] == 'USER':
                         redis_messages.append({"role": "user", "content": msg['content']})
-                    elif msg['message_type'] == 'ASSISTANT':
+                    elif msg['message_sender'] == 'ASSISTANT':
                         redis_messages.append({"role": "assistant", "content": msg['content']})
-                
+
                 # Populate Redis session with conversation history
                 if redis_messages:
                     await set_chat_messages(session_id, redis_messages)
@@ -3971,7 +4347,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp)
+        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp, content_type="text")
         if save_result is None:
             logger.error("Failed to save user message to database")
             error_payload = {
@@ -4023,7 +4399,19 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Use real conversation ID for rest of processing
         session_conversation_id = real_conversation_id
-        
+
+        # Wait for any pending tool executions to complete before processing new message
+        # This prevents race conditions where new messages arrive while tools are still executing
+        if session_conversation_id:
+            pending_count = await get_pending_tools_count(session_conversation_id)
+            if pending_count > 0:
+                logger.info(f"Waiting for {pending_count} pending tool(s) to complete before processing new message")
+                tools_completed = await wait_for_pending_tools(session_conversation_id, timeout_seconds=5.0)
+                if tools_completed:
+                    logger.info(f"Pending tools completed, will reload history from database")
+                else:
+                    logger.warning(f"Timeout waiting for pending tools, proceeding anyway")
+
         # Add message to Redis IMMEDIATELY after getting real conversation ID
         # Use asyncio.shield to protect this from cancellation - MUST complete even if task is cancelled
         try:
@@ -4036,36 +4424,191 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     logger.info(f"Loading existing messages for conversation {session_conversation_id} before adding new message")
                     try:
                         query = supabase.table("messages")\
-                            .select("id, content, message_type, timestamp, request_id, cancelled")\
+                            .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
                             .eq("conversation_id", session_conversation_id)\
                             .order("timestamp", desc=False)
-                        
+
                         response = query.execute()
                         db_messages = response.data if response.data else []
-                        
+
                         # Build Redis session from database messages (excluding current message)
                         redis_messages = []
+                        # First pass: identify tool_use IDs that have corresponding tool_results
+                        tool_use_ids_with_results = set()
+                        for msg in db_messages:
+                            if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                                for block in msg['tool_content']:
+                                    if isinstance(block, dict) and block.get('tool_use_id'):
+                                        tool_use_ids_with_results.add(block['tool_use_id'])
+
+                        # Second pass: build messages, skipping incomplete tool_use blocks
                         for msg in db_messages:
                             # Skip cancelled messages and the current message (by request_id)
                             if msg.get('cancelled') or msg.get('request_id') == request_id:
                                 continue
-                            
-                            # Format for Redis (same as Claude API format)
-                            if msg['message_type'] == 'USER':
+
+                            content_type = msg.get('content_type', 'text')
+                            tool_content = msg.get('tool_content')
+
+                            # Handle tool_use messages - skip if no corresponding tool_result
+                            if content_type == 'tool_use' and tool_content:
+                                tool_use_id = None
+                                for block in tool_content:
+                                    if isinstance(block, dict) and block.get('id'):
+                                        tool_use_id = block['id']
+                                        break
+
+                                if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                                    logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
+                                    continue
+
+                                redis_messages.append({"role": "assistant", "content": tool_content})
+                            elif content_type == 'tool_result' and tool_content:
+                                redis_messages.append({"role": "user", "content": tool_content})
+                            # Handle regular text messages
+                            elif msg['message_sender'] == 'USER':
                                 redis_messages.append({"role": "user", "content": msg['content']})
-                            elif msg['message_type'] == 'ASSISTANT':
+                            elif msg['message_sender'] == 'ASSISTANT':
                                 redis_messages.append({"role": "assistant", "content": msg['content']})
-                        
+
                         if redis_messages:
                             await set_chat_messages(session_id, redis_messages)
                             logger.info(f"Pre-loaded {len(redis_messages)} existing messages into Redis session")
                     except Exception as e:
                         logger.error(f"Failed to pre-load existing messages: {e}")
                         # Continue without context rather than fail
-                
+
+                # CRITICAL FIX: Check if last message is a tool_result
+                # If so, insert a cancelled assistant message to prevent Claude API error
+                # when consecutive user messages get merged (tool_result + new text)
+                current_messages = await get_chat_messages(session_id)
+                if current_messages and len(current_messages) > 0:
+                    last_msg = current_messages[-1]
+                    if last_msg.get('role') == 'user' and isinstance(last_msg.get('content'), list):
+                        # Check if last message contains a tool_result block
+                        has_tool_result = any(
+                            isinstance(block, dict) and block.get('type') == 'tool_result'
+                            for block in last_msg['content']
+                        )
+
+                        if has_tool_result:
+                            logger.info(f"Last message contains tool_result, inserting cancelled assistant message to prevent merging with new user message")
+
+                            # Insert cancelled assistant message to database
+                            separator_text = "..."  # Minimal placeholder text
+
+                            try:
+                                # Insert directly to DB with cancelled=now() since save_message_to_db doesn't support it
+                                from datetime import datetime
+                                separator_data = {
+                                    "conversation_id": session_conversation_id,
+                                    "content": separator_text,
+                                    "message_sender": "ASSISTANT",
+                                    "content_type": "text",
+                                    "cancelled": datetime.utcnow().isoformat() + 'Z'
+                                }
+
+                                separator_result = supabase.table("messages").insert(separator_data).execute()
+                                if separator_result.data:
+                                    logger.info(f"Inserted cancelled assistant separator message to database for conversation {session_conversation_id}")
+                                else:
+                                    logger.error(f"Failed to insert separator - no data returned")
+
+                                # Also add to Redis session so it's available immediately
+                                await add_chat_message(session_id, {"role": "assistant", "content": separator_text})
+                                logger.info(f"Added cancelled assistant separator to Redis session")
+
+                            except Exception as e:
+                                logger.error(f"Failed to insert cancelled assistant separator: {e}")
+                                # Continue anyway - the merge might still work
+
                 # Now add the current message
                 await asyncio.shield(add_chat_message(session_id, {"role": "user", "content": message}))
-            logger.info(f"Added current message to Redis session for conversation {session_conversation_id}")
+                logger.info(f"Added current message to Redis session for conversation {session_conversation_id}")
+
+                # CRITICAL: After adding message, check if Redis now has incomplete tool_use blocks
+                # This handles race condition where tool_result was just saved to DB but not in Redis
+                current_redis_messages = await get_chat_messages(session_id)
+                has_incomplete_after_add = False
+                for i, msg in enumerate(current_redis_messages):
+                    if msg.get('role') == 'assistant' and isinstance(msg.get('content'), list):
+                        for block in msg['content']:
+                            if isinstance(block, dict) and block.get('type') == 'tool_use':
+                                tool_use_id = block.get('id')
+                                if i + 1 >= len(current_redis_messages):
+                                    has_incomplete_after_add = True
+                                    break
+                                next_msg = current_redis_messages[i + 1]
+                                if next_msg.get('role') != 'user':
+                                    has_incomplete_after_add = True
+                                    break
+                                next_content = next_msg.get('content', [])
+                                if not isinstance(next_content, list):
+                                    has_incomplete_after_add = True
+                                    break
+                                has_result = False
+                                for result_block in next_content:
+                                    if isinstance(result_block, dict) and \
+                                       result_block.get('type') == 'tool_result' and \
+                                       result_block.get('tool_use_id') == tool_use_id:
+                                        has_result = True
+                                        break
+                                if not has_result:
+                                    has_incomplete_after_add = True
+                                    break
+                    if has_incomplete_after_add:
+                        break
+
+                # If Redis has incomplete tools after adding message, reload from DB
+                if has_incomplete_after_add and session_conversation_id:
+                    logger.warning(f"Redis has incomplete tool_use after adding message, reloading from database for conversation {session_conversation_id}")
+                    try:
+                        query = supabase.table("messages")\
+                            .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
+                            .eq("conversation_id", session_conversation_id)\
+                            .order("timestamp", desc=False)
+
+                        response = query.execute()
+                        db_messages = response.data if response.data else []
+
+                        # Build complete history from DB, skipping incomplete tool_use
+                        redis_messages = []
+                        tool_use_ids_with_results = set()
+                        for msg in db_messages:
+                            if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                                for block in msg['tool_content']:
+                                    if isinstance(block, dict) and block.get('tool_use_id'):
+                                        tool_use_ids_with_results.add(block['tool_use_id'])
+
+                        for msg in db_messages:
+                            if msg.get('cancelled'):
+                                continue
+
+                            content_type = msg.get('content_type', 'text')
+                            tool_content = msg.get('tool_content')
+
+                            if content_type == 'tool_use' and tool_content:
+                                tool_use_id = None
+                                for block in tool_content:
+                                    if isinstance(block, dict) and block.get('id'):
+                                        tool_use_id = block['id']
+                                        break
+                                if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                                    logger.warning(f"Skipping incomplete tool_use in reload: {tool_use_id}")
+                                    continue
+                                redis_messages.append({"role": "assistant", "content": tool_content})
+                            elif content_type == 'tool_result' and tool_content:
+                                redis_messages.append({"role": "user", "content": tool_content})
+                            elif msg['message_sender'] == 'USER':
+                                redis_messages.append({"role": "user", "content": msg['content']})
+                            elif msg['message_sender'] == 'ASSISTANT':
+                                redis_messages.append({"role": "assistant", "content": msg['content']})
+
+                        if redis_messages:
+                            await set_chat_messages(session_id, redis_messages)
+                            logger.info(f"Reloaded {len(redis_messages)} messages from DB to fix incomplete tool execution")
+                    except Exception as e:
+                        logger.error(f"Failed to reload from DB after incomplete tool detection: {e}")
         except Exception as e:
             logger.error(f"Failed to add message to Redis: {e}")
             # Continue anyway - better to process without full context than to fail
@@ -4242,8 +4785,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 user_id=user_id,
                 conversation_id=session_conversation_id,
                 content=error_json_content,
-                message_type="ASSISTANT",
-                request_id=request_id
+                message_sender="ASSISTANT",
+                request_id=request_id,
+                content_type="text"
             )
             if save_result:
                 saved_conversation_id, error_message_id = save_result
@@ -4306,7 +4850,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         logger.info(f"Claude response stop_reason: {response.stop_reason}")
         if hasattr(response, 'content'):
             logger.info(f"Claude response content: {[{'type': getattr(block, 'type', 'unknown'), 'text': getattr(block, 'text', None)[:100] if hasattr(block, 'text') else None} for block in response.content]}")
-        
+
         # Handle tool calls
         while response.stop_reason == 'tool_use':
             # Check for cancellation before each tool iteration
@@ -4338,46 +4882,192 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.info(f"AI attempting to execute tool: {tool_block.name}")
             logger.info(f"Tool input parameters: {json.dumps(tool_block.input, indent=2)}")
             logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
-            
-            # Pass WebSocket context for tools that need it (like launch_app)
-            tool_execution_result = await execute_tool(
-                tool_block.name, 
-                tool_block.input, 
-                user_id,
-                websocket=websocket,
-                tool_result_handler=tool_result_handler,
-                conversation_id=session_conversation_id
-            )
-            
-            # Check if the tool_execution_result is our specific Asana auth error
-            if isinstance(tool_execution_result, dict) and \
-               tool_execution_result.get("status_code") == 401 and \
-               "Asana authentication failed" in tool_execution_result.get("error", ""):
-                logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
-                # Add request_id and client context to Asana error response
-                tool_execution_result["request_id"] = request_id
-                tool_execution_result["client_conversation_id"] = client_conversation_id
-                await safe_websocket_send(tool_execution_result)
-                raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
-            
-            # The launch_app tool now handles WebSocket communication directly,
-            # so we don't need special handling here anymore
 
-            # If not the specific Asana auth error or WebSocket action, proceed as before with Claude:
+            # Increment pending tool counter before execution
+            await increment_pending_tools(session_conversation_id)
+
+            # ===== CRITICAL: Save tool_use, TEXT, and PENDING tool_result IMMEDIATELY =====
+            # This prevents race conditions where Claude sees incomplete conversation history
+            # and triggers the same tool multiple times
+
+            # Convert tool_block to a serializable dict
+            tool_block_dict = {
+                "type": "tool_use",
+                "id": tool_block.id,
+                "name": tool_block.name,
+                "input": tool_block.input
+            }
+
+            # Extract text blocks from response (if any)
+            text_blocks = []
+            assistant_response_text = ""
+            for block in response.content:
+                if block.type == 'text':
+                    text_blocks.append({"type": "text", "text": block.text})
+                    if not assistant_response_text:  # Use first text block
+                        assistant_response_text = block.text
+
+            # Calculate timestamps to ensure correct ordering in database
+            # Text must come BEFORE tool_use, so we use explicit timestamps
+            from datetime import datetime, timedelta
+
+            # Get user message timestamp
+            user_msg_result = supabase.table("messages")\
+                .select("timestamp")\
+                .eq("conversation_id", session_conversation_id)\
+                .eq("request_id", request_id)\
+                .eq("message_sender", "USER")\
+                .execute()
+
+            if user_msg_result.data:
+                user_timestamp = user_msg_result.data[0]["timestamp"]
+                # Parse and normalize timestamp
+                timestamp_str = user_timestamp.replace('Z', '+00:00')
+                if '.' in timestamp_str:
+                    parts = timestamp_str.split('.')
+                    if len(parts) == 2:
+                        if '+' in parts[1]:
+                            frac, tz = parts[1].split('+')
+                            frac = frac.ljust(6, '0')[:6]
+                            timestamp_str = f"{parts[0]}.{frac}+{tz}"
+                        elif '-' in parts[1]:
+                            frac, tz = parts[1].split('-')
+                            frac = frac.ljust(6, '0')[:6]
+                            timestamp_str = f"{parts[0]}.{frac}-{tz}"
+
+                user_dt = datetime.fromisoformat(timestamp_str)
+                # Set timestamps: text (T), tool_use (T+1ms), tool_result (T+2ms)
+                text_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
+                tool_use_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
+                tool_result_timestamp = (user_dt + timedelta(milliseconds=3)).isoformat().replace('+00:00', 'Z')
+                logger.info(f"Using explicit timestamps: text={text_timestamp}, tool_use={tool_use_timestamp}, tool_result={tool_result_timestamp}")
+            else:
+                # Fallback: no explicit timestamps
+                text_timestamp = None
+                tool_use_timestamp = None
+                tool_result_timestamp = None
+                logger.warning(f"No USER message found with request_id {request_id}, using default timestamps")
+
+            # Save complete assistant message (text + tool_use) to Redis and database BEFORE executing the tool
             async with chat_sessions_lock:
-                # Convert tool_block to a serializable dict
-                tool_block_dict = {
-                    "type": "tool_use",
-                    "id": tool_block.id,
-                    "name": tool_block.name,
-                    "input": tool_block.input
-                }
-                await add_chat_message(session_id, {"role": "assistant", "content": [tool_block_dict]})
-                await add_chat_message(session_id, {"role": "user", "content": [{
+                # Build complete assistant content: text comes BEFORE tool_use
+                assistant_content = text_blocks + [tool_block_dict]
+                await add_chat_message(session_id, {"role": "assistant", "content": assistant_content})
+
+                # Save text response to database FIRST if present (with earliest timestamp)
+                # This ensures correct ordering when fetching from database
+                if assistant_response_text:
+                    text_save_result = save_message_to_db(
+                        user_id=user_id,
+                        conversation_id=session_conversation_id,
+                        content=assistant_response_text,
+                        message_sender="ASSISTANT",
+                        request_id=request_id,
+                        content_type="text",
+                        client_timestamp=text_timestamp
+                    )
+                    if text_save_result:
+                        logger.info(f"✅ Saved text message to database BEFORE tool execution: '{assistant_response_text[:50]}...'")
+                    else:
+                        logger.error(f"❌ Failed to save text message to database")
+
+                # Save tool_use to database SECOND (with timestamp after text)
+                tool_use_save_result = save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content="",  # Tool messages don't have text content
+                    message_sender="ASSISTANT",
+                    request_id=request_id,
+                    content_type="tool_use",
+                    tool_content=[tool_block_dict],
+                    client_timestamp=tool_use_timestamp
+                )
+                logger.info(f"✅ Saved tool_use message to database BEFORE execution: {tool_block.name}")
+
+                # Create PENDING tool result (will be updated with actual result later)
+                pending_tool_result_dict = {
                     "type": "tool_result",
                     "tool_use_id": tool_block.id,
-                    "content": json.dumps(tool_execution_result) 
-                }]})
+                    "content": json.dumps({"status": "pending", "message": "Tool execution in progress..."})
+                }
+                await add_chat_message(session_id, {"role": "user", "content": [pending_tool_result_dict]})
+
+                # Save PENDING tool_result to database with timestamp after tool_use
+                pending_result_save = save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content="",  # Tool messages don't have text content
+                    message_sender="USER",
+                    request_id=request_id,
+                    content_type="tool_result",
+                    tool_content=[pending_tool_result_dict],
+                    client_timestamp=tool_result_timestamp
+                )
+                logger.info(f"✅ Saved PENDING tool_result to database BEFORE execution: tool_use_id={tool_block.id}")
+
+            # ===== Now execute the tool =====
+            try:
+                # Pass WebSocket context for tools that need it (like launch_app)
+                tool_execution_result = await execute_tool(
+                    tool_block.name,
+                    tool_block.input,
+                    user_id,
+                    websocket=websocket,
+                    tool_result_handler=tool_result_handler,
+                    conversation_id=session_conversation_id
+                )
+
+                # Check if the tool_execution_result is our specific Asana auth error
+                if isinstance(tool_execution_result, dict) and \
+                   tool_execution_result.get("status_code") == 401 and \
+                   "Asana authentication failed" in tool_execution_result.get("error", ""):
+                    logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
+                    # Add request_id and client context to Asana error response
+                    tool_execution_result["request_id"] = request_id
+                    tool_execution_result["client_conversation_id"] = client_conversation_id
+                    await safe_websocket_send(tool_execution_result)
+                    raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
+
+                # The launch_app tool now handles WebSocket communication directly,
+                # so we don't need special handling here anymore
+
+                # ===== Update the PENDING tool_result with actual result =====
+                async with chat_sessions_lock:
+                    # Update Redis session with actual result
+                    actual_tool_result_dict = {
+                        "type": "tool_result",
+                        "tool_use_id": tool_block.id,
+                        "content": json.dumps(tool_execution_result)
+                    }
+
+                    # Replace the pending result in Redis
+                    messages = await get_chat_messages(session_id)
+                    for i in range(len(messages) - 1, -1, -1):  # Search backwards for efficiency
+                        msg = messages[i]
+                        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                            for block in msg["content"]:
+                                if isinstance(block, dict) and \
+                                   block.get("type") == "tool_result" and \
+                                   block.get("tool_use_id") == tool_block.id:
+                                    # Found the pending result, update it
+                                    messages[i] = {"role": "user", "content": [actual_tool_result_dict]}
+                                    await set_chat_messages(session_id, messages)
+                                    logger.info(f"✅ Updated Redis with actual tool_result for tool_use_id={tool_block.id}")
+                                    break
+
+                    # Update database with actual result
+                    update_success = update_tool_result_in_db(
+                        conversation_id=session_conversation_id,
+                        tool_use_id=tool_block.id,
+                        result_content=tool_execution_result
+                    )
+                    if update_success:
+                        logger.info(f"✅ Updated database with actual tool_result for tool: {tool_block.name}")
+                    else:
+                        logger.error(f"❌ Failed to update database with actual tool_result for tool: {tool_block.name}")
+            finally:
+                # Always decrement counter, even if tool execution or saving fails
+                await decrement_pending_tools(session_conversation_id)
             
             # Use async API call for tool response
             try:
@@ -4429,8 +5119,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     user_id=user_id,
                     conversation_id=session_conversation_id,
                     content=error_json_content,
-                    message_type="ASSISTANT",
-                    request_id=request_id
+                    message_sender="ASSISTANT",
+                    request_id=request_id,
+                    content_type="text"
                 )
                 if save_result:
                     saved_conversation_id, error_message_id = save_result
@@ -4449,20 +5140,19 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': getattr(block, 'text', '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
         
         # Add assistant final response to session history (if not an intercepted error)
+        # IMPORTANT: Only add text blocks here, NOT tool_use blocks
+        # Tool_use blocks were already added in the tool loop above
         async with chat_sessions_lock:
-            # Convert response.content to serializable format
+            # Convert response.content to serializable format - ONLY text blocks
             content_list = []
             for block in response.content:
                 if block.type == 'text':
                     content_list.append({"type": "text", "text": block.text})
-                elif block.type == 'tool_use':
-                    content_list.append({
-                        "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input
-                    })
-            await add_chat_message(session_id, {"role": "assistant", "content": content_list})
+                # Skip tool_use blocks - they were already added in the tool loop
+
+            # Only add message if there's text content
+            if content_list:
+                await add_chat_message(session_id, {"role": "assistant", "content": content_list})
         
         # Extract and save assistant response to database
         # Look for text in ANY content block, not just the first one
@@ -4486,7 +5176,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         save_result = None
         if assistant_response_text:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
-            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id)
+            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text")
             if save_result:
                 saved_conversation_id, bot_message_id = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")

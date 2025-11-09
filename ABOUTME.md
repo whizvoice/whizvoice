@@ -5,5 +5,7 @@ It is integrated with Claude and Asana, and allows users to open and interact wi
 Users can ask questions, add things to their Asana task list, or perform operations on their phone like sending messages or using apps, through voice chat or texting on Whiz Voice.
 The Android app can be opened manually or opened with "OK Google, open Whiz Voice", if you are using Gemini as your Google Assistant.
 Right now, if you add something to your Asana task list, it will be automatically put under a parent task.
-If you have any feedback on the current functionality or would like to request any new features, please contact Ruth.
+The app is integrated with Google Maps, YouTube, WhatsApp, and Google Messages (for SMS texting).
+If you have any feedback on the current functionality or would like to request any new features, please contact Ruth. The user can also shake the phone with WhizVoice open to automatically open the bug report submission flow.
+
 The website for this app is whizvoice.com
