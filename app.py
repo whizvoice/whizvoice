@@ -24,6 +24,8 @@ from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send
 from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, select_location_from_list
 from color_tools import color_tools, pick_random_color
+from location_tools import location_tools, save_location
+from weather_tools import weather_tools, get_weather
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -78,6 +80,11 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
    - If no preference is set, ask the user which music app they prefer (currently we only support YouTube Music, not Spotify) and save it using set_music_app_preference
    - If the user explicitly specifies an app in their request (e.g., "play on YouTube Music"), use that app and optionally save it as their preference
 7. For deciding on a random color when a list of colors isn't specified, ALWAYS use the pick_random_color tool
+8. For weather:
+   - When the user asks for weather, use the get_weather tool with the appropriate days_ahead parameter (0 = today, 1 = tomorrow, etc.)
+   - If the user hasn't saved a weather location yet, they'll get an error - then use save_location to save their location with location_type 'weather_default'
+   - The user can provide any location format (city name, address, landmark, etc.)
+9. For saving locations (not just for weather), use the save_location tool - it can save home, work, or any named location
 
 IMPORTANT: When a user asks you to open an app, DO NOT just say you opened it - you MUST actually use the launch_app tool to open it on their device. Similarly, use the appropriate tools for all actions rather than just describing what you would do.
 
@@ -89,7 +96,7 @@ DON'T DUPLICATE: You have access to the tool history and the success/failure of 
 """
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools
+tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -1008,6 +1015,35 @@ TOOL_REGISTRY = {
         "requires_auth": False,
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
+    },
+    "save_location": {
+        "function_name": "save_location",
+        "requires_auth": True,
+        "is_async": True,
+        "args_mapping": lambda args, user_id: (
+            args.get('location_name'),
+            args.get('location_type'),
+            user_id
+        ),
+        "validation": lambda args: (
+            {"error": "location_name is required."} if not args.get('location_name') else
+            {"error": "location_type is required."} if not args.get('location_type') else
+            None
+        )
+    },
+    "get_weather": {
+        "function_name": "get_weather",
+        "requires_auth": True,
+        "is_async": True,
+        "args_mapping": lambda args, user_id: (
+            args.get('days_ahead', 0),
+            user_id,
+            args.get('location_type', 'weather_default')
+        ),
+        "validation": lambda args: (
+            {"error": "days_ahead must be a number."} if args.get('days_ahead') is not None and not isinstance(args.get('days_ahead'), int) else
+            None
+        )
     }
 }
 
