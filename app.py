@@ -1035,7 +1035,7 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (
             args.get('days_ahead', 0),
             user_id,
-            args.get('location_type', 'weather_default')
+            args.get('location')  # None if not provided, which will default to 'weather_default'
         ),
         "validation": lambda args: (
             {"error": "days_ahead must be a number."} if args.get('days_ahead') is not None and not isinstance(args.get('days_ahead'), int) else

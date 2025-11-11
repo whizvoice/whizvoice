@@ -7,6 +7,7 @@ import json
 from typing import Dict, Any, Optional
 import httpx
 from preferences import get_preference
+from location_tools import geocode_location
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -15,14 +16,16 @@ logger = logging.getLogger(__name__)
 WEATHER_GOV_USER_AGENT = "WhizVoice/1.0 (contact@whizvoice.com)"
 
 
-async def get_weather(days_ahead: int, user_id: str, location_type: str = "weather_default") -> dict:
+async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = None) -> dict:
     """
     Get weather forecast for a specific number of days ahead.
 
     Args:
         days_ahead: Number of days ahead to get forecast for (0 = today, 1 = tomorrow, etc., max 6)
         user_id: The user ID
-        location_type: Which saved location to use (default: "weather_default")
+        location: Location to use - can be a saved location type (e.g., "weather_default", "home")
+                 or any location text to geocode (e.g., "Seattle", "Golden Gate Bridge").
+                 If None, uses "weather_default".
 
     Returns:
         Dictionary with weather forecast data or error
@@ -36,48 +39,69 @@ async def get_weather(days_ahead: int, user_id: str, location_type: str = "weath
                 "error": "days_ahead must be between 0 (today) and 6 (7 days from now). Weather.gov only provides 7-day forecasts."
             }
 
-        logger.info(f"Getting weather for user {user_id}, location_type '{location_type}', days_ahead {days_ahead}")
+        # Default to weather_default if no location specified
+        if location is None:
+            location = "weather_default"
 
-        # Get location from preferences
+        logger.info(f"Getting weather for user {user_id}, location '{location}', days_ahead {days_ahead}")
+
+        # Try to get location from saved preferences first
         locations_json = get_preference(user_id, 'locations')
+        saved_locations = {}
 
-        if not locations_json:
-            logger.warning(f"No locations saved for user {user_id}")
-            return {
-                "success": False,
-                "error": "No locations saved. Please save a location first using the save_location tool (use 'weather_default' as the location type for weather)."
-            }
+        if locations_json:
+            try:
+                saved_locations = json.loads(locations_json) if isinstance(locations_json, str) else locations_json
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse locations JSON for user {user_id}")
+                return {
+                    "success": False,
+                    "error": "Error reading saved locations"
+                }
 
-        # Parse locations
-        try:
-            locations = json.loads(locations_json) if isinstance(locations_json, str) else locations_json
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse locations JSON for user {user_id}")
-            return {
-                "success": False,
-                "error": "Error reading saved locations"
-            }
+        # Check if location is a saved location type
+        location_data = saved_locations.get(location)
 
-        # Get the requested location
-        location = locations.get(location_type)
-        if not location:
-            available_types = list(locations.keys())
-            logger.warning(f"Location type '{location_type}' not found for user {user_id}")
-            return {
-                "success": False,
-                "error": f"Location type '{location_type}' not found. Available locations: {', '.join(available_types)}. Please save this location first."
-            }
+        if location_data:
+            # Using a saved location
+            latitude = location_data.get("latitude")
+            longitude = location_data.get("longitude")
+            location_name = location_data.get("name", f"{latitude}, {longitude}")
 
-        latitude = location.get("latitude")
-        longitude = location.get("longitude")
-        location_name = location.get("name", f"{latitude}, {longitude}")
+            if latitude is None or longitude is None:
+                logger.error(f"Saved location '{location}' missing coordinates for user {user_id}")
+                return {
+                    "success": False,
+                    "error": "Saved location is missing coordinates"
+                }
+        else:
+            # Not a saved location - try to geocode it
+            logger.info(f"Location '{location}' not in saved locations, attempting to geocode")
 
-        if latitude is None or longitude is None:
-            logger.error(f"Location '{location_type}' missing coordinates for user {user_id}")
-            return {
-                "success": False,
-                "error": "Saved location is missing coordinates"
-            }
+            # Special case: if they don't have weather_default saved and didn't specify a location
+            if location == "weather_default":
+                logger.warning(f"No weather_default location saved for user {user_id}")
+                return {
+                    "success": False,
+                    "error": "You haven't saved a default weather location yet. Please use the save_location tool to save your location with location_type 'weather_default' first, or specify a location in your request (e.g., 'Seattle', 'New York City')."
+                }
+
+            # Try to geocode the location string
+            geocode_result = await geocode_location(location)
+
+            if not geocode_result.get("success"):
+                error_msg = geocode_result.get("error", "Failed to geocode location")
+                logger.warning(f"Failed to geocode location '{location}': {error_msg}")
+                return {
+                    "success": False,
+                    "error": f"Could not find location '{location}': {error_msg}"
+                }
+
+            latitude = geocode_result["latitude"]
+            longitude = geocode_result["longitude"]
+            location_name = geocode_result["formatted_address"]
+            logger.info(f"Successfully geocoded '{location}' to {location_name} ({latitude}, {longitude})")
+
 
         logger.info(f"Fetching weather for {location_name} ({latitude}, {longitude})")
 
@@ -208,7 +232,7 @@ weather_tools = [
     {
         "type": "custom",
         "name": "get_weather",
-        "description": "Get weather forecast for a specific number of days ahead (0-6 days). Uses Weather.gov API which provides 7-day forecasts. Days ahead: 0 = today, 1 = tomorrow, 2 = day after tomorrow, etc. Maximum is 6 (7 days from now). IMPORTANT: If the user hasn't saved a weather location yet, this will return an error. In that case, use save_location to save their location with location_type 'weather_default' first. The user can provide any location format (city name, address, landmark, etc.).",
+        "description": "Get weather forecast for a specific number of days ahead (0-6 days). Uses the Weather.gov API.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -216,9 +240,9 @@ weather_tools = [
                     "type": "integer",
                     "description": "Number of days ahead to get forecast for. 0 = today, 1 = tomorrow, 2 = day after tomorrow, etc. Must be between 0 and 6 (Weather.gov provides 7-day forecasts)."
                 },
-                "location_type": {
+                "location": {
                     "type": "string",
-                    "description": "Which saved location to use. Defaults to 'weather_default'. Other options include 'home', 'work', or any custom location type the user has saved."
+                    "description": "Which location to use. Do not submit this parameter if the user did not specify, so that the user's weather_default can be used. This tool will geocode the location text to get the weather for the location."
                 }
             },
             "required": ["days_ahead"]
