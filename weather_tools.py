@@ -208,7 +208,7 @@ weather_tools = [
     {
         "type": "custom",
         "name": "get_weather",
-        "description": "Get weather forecast for a specific number of days ahead (0-6 days). Uses Weather.gov API which provides 7-day forecasts. The location is retrieved from user preferences - make sure the user has saved a location first using save_location with location_type 'weather_default'. Days ahead: 0 = today, 1 = tomorrow, 2 = day after tomorrow, etc. Maximum is 6 (7 days from now).",
+        "description": "Get weather forecast for a specific number of days ahead (0-6 days). Uses Weather.gov API which provides 7-day forecasts. Days ahead: 0 = today, 1 = tomorrow, 2 = day after tomorrow, etc. Maximum is 6 (7 days from now). IMPORTANT: If the user hasn't saved a weather location yet, this will return an error. In that case, use save_location to save their location with location_type 'weather_default' first. The user can provide any location format (city name, address, landmark, etc.).",
         "input_schema": {
             "type": "object",
             "properties": {
