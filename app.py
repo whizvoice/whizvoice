@@ -33,6 +33,37 @@ from supabase_client import supabase
 from redis_managers import create_managers
 import stripe
 
+# Import extracted modules
+from models import (
+    ChatMessage, ChatResponse, GoogleTokenRequest, TokenResponse,
+    TestAuthRequest, RefreshTokenRequest, NewAccessTokenResponse,
+    UserApiKeySetRequest, TokenUpdateRequest, ApiTokenStatusResponse,
+    SetTimezoneRequest, ConversationCreate, ConversationUpdate,
+    ConversationResponse, MessageCreate, MessageResponse,
+    DialogflowWebhookRequest, DialogflowWebhookResponse,
+    CreateCheckoutSessionRequest, CreateCheckoutSessionResponse,
+    CancelSubscriptionResponse, SubscriptionStatusResponse
+)
+from database import (
+    load_conversation_history,
+    get_user_message_ids_since_last_bot,
+    get_non_cancelled_bot_message_ids,
+    save_message_to_db,
+    update_tool_result_in_db
+)
+from cleanup_tasks import (
+    cleanup_session,
+    evict_user_sessions_if_needed,
+    cleanup_abandoned_tool_executions,
+    cleanup_stale_sessions
+)
+from billing import (
+    set_stripe_config,
+    create_stripe_checkout_session,
+    get_user_subscription_status,
+    cancel_user_subscription
+)
+
 try:
     from constants import STRIPE_SECRET_KEY, STRIPE_PRICE_ID
 except ImportError:
@@ -66,6 +97,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize Stripe
 stripe.api_key = STRIPE_SECRET_KEY
+set_stripe_config(STRIPE_SECRET_KEY, STRIPE_PRICE_ID)
 
 # System prompt for Claude
 CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can help with anything. You have access to various tools that you MUST use when appropriate:
@@ -322,92 +354,6 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         api_params["betas"] = ["token-efficient-tools-2025-02-19"]
 
     return client.beta.messages.create(**api_params)
-
-class ChatMessage(BaseModel):
-    content: str
-    session_id: Optional[str] = None
-
-class ChatResponse(BaseModel):
-    content: str
-    session_id: str
-
-class GoogleTokenRequest(BaseModel):
-    token: str
-
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str
-    user: Dict[str, Any]
-
-class UserApiKeySetRequest(BaseModel):
-    key_name: str
-    key_value: Optional[str] # Allow None to potentially clear a key
-
-class TokenUpdateRequest(BaseModel):
-    claude_api_key: Optional[str] = None
-    asana_access_token: Optional[str] = None
-
-class ApiTokenStatusResponse(BaseModel):
-    has_claude_token: bool
-    has_asana_token: bool
-
-class SetTimezoneRequest(BaseModel):
-    timezone: str
-
-# Conversation and Message API models
-class ConversationCreate(BaseModel):
-    title: str
-    source: str = "app"
-    google_session_id: Optional[str] = None
-
-class ConversationUpdate(BaseModel):
-    title: Optional[str] = None
-
-class ConversationResponse(BaseModel):
-    id: int
-    user_id: str
-    title: str
-    created_at: str
-    last_message_time: str
-    source: str
-    google_session_id: Optional[str] = None
-    deleted_at: Optional[str] = None
-
-class MessageCreate(BaseModel):
-    conversation_id: int
-    content: str
-    message_type: str  # 'USER' or 'ASSISTANT'
-    request_id: Optional[str] = None  # Client-generated UUID for request tracking
-    timestamp: Optional[str] = None  # Optional ISO format timestamp for preserving message order
-
-class MessageResponse(BaseModel):
-    id: int
-    conversation_id: int
-    content: str
-    message_type: str
-    timestamp: str
-    request_id: Optional[str] = None  # Request ID for tracking request/response pairs
-
-# Dialogflow webhook models
-class DialogflowWebhookRequest(BaseModel):
-    detectIntentResponseId: Optional[str] = None
-    pageInfo: Optional[Dict[str, Any]] = None
-    sessionInfo: Optional[Dict[str, Any]] = None
-    fulfillmentInfo: Optional[Dict[str, Any]] = None
-    messages: Optional[List[Dict[str, Any]]] = None
-    payload: Optional[Dict[str, Any]] = None
-    sentimentAnalysisResult: Optional[Dict[str, Any]] = None
-    text: Optional[str] = None
-    triggerIntent: Optional[str] = None
-    triggerEvent: Optional[str] = None
-    languageCode: Optional[str] = None
-
-class DialogflowWebhookResponse(BaseModel):
-    fulfillmentResponse: Optional[Dict[str, Any]] = None
-    pageInfo: Optional[Dict[str, Any]] = None
-    sessionInfo: Optional[Dict[str, Any]] = None
-    payload: Optional[Dict[str, Any]] = None
 
 # Allow-list of preference keys that can be set via this endpoint
 ALLOWED_API_KEY_NAMES = {
@@ -1541,149 +1487,38 @@ async def create_checkout_session(
     current_user: dict = Depends(get_current_user)
 ):
     """Create a Stripe checkout session for subscription"""
-    try:
-        user_id = current_user.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="User ID not found")
-        
-        # Create Stripe customer if doesn't exist
-        customers = stripe.Customer.list(email=current_user.get("email"), limit=1)
-        if customers.data:
-            customer = customers.data[0]
-        else:
-            customer = stripe.Customer.create(
-                email=current_user.get("email"),
-                metadata={"user_id": user_id}
-            )
-        
-        # Create checkout session
-        checkout_session = stripe.checkout.Session.create(
-            payment_method_types=['card'],
-            line_items=[{
-                'price': STRIPE_PRICE_ID,
-                'quantity': 1,
-            }],
-            mode='subscription',
-            success_url=request_data.success_url,
-            cancel_url=request_data.cancel_url,
-            customer=customer.id,
-            metadata={"user_id": user_id}
-        )
-        
-        return CreateCheckoutSessionResponse(
-            checkout_url=checkout_session.url,
-            session_id=checkout_session.id
-        )
-        
-    except stripe.error.StripeError as e:
-        logger.error(f"Stripe error creating checkout session: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error creating checkout session: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to create checkout session")
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found")
+
+    return await create_stripe_checkout_session(
+        user_id=user_id,
+        email=current_user.get("email"),
+        success_url=request_data.success_url,
+        cancel_url=request_data.cancel_url
+    )
 
 @app.get("/subscription/status", response_model=SubscriptionStatusResponse)
 async def get_subscription_status(current_user: dict = Depends(get_current_user)):
     """Get current subscription status for the user"""
-    try:
-        user_id = current_user.get("sub")
-        email = current_user.get("email")
-        
-        if not user_id or not email:
-            raise HTTPException(status_code=401, detail="User information incomplete")
-        
-        # Find customer by email
-        customers = stripe.Customer.list(email=email, limit=1)
-        if not customers.data:
-            return SubscriptionStatusResponse(has_subscription=False)
-        
-        customer = customers.data[0]
-        
-        # Get active subscriptions
-        subscriptions = stripe.Subscription.list(
-            customer=customer.id,
-            status='active',
-            limit=1
-        )
-        
-        if not subscriptions.data:
-            # Check for canceled subscriptions that are still active until period end
-            subscriptions = stripe.Subscription.list(
-                customer=customer.id,
-                status='all',
-                limit=1
-            )
-            if subscriptions.data and subscriptions.data[0].status in ['active', 'trialing']:
-                subscription = subscriptions.data[0]
-                return SubscriptionStatusResponse(
-                    has_subscription=True,
-                    subscription_id=subscription.id,
-                    status=subscription.status,
-                    current_period_end=subscription.current_period_end,
-                    cancel_at_period_end=subscription.cancel_at_period_end
-                )
-            return SubscriptionStatusResponse(has_subscription=False)
-        
-        subscription = subscriptions.data[0]
-        return SubscriptionStatusResponse(
-            has_subscription=True,
-            subscription_id=subscription.id,
-            status=subscription.status,
-            current_period_end=subscription.current_period_end,
-            cancel_at_period_end=subscription.cancel_at_period_end
-        )
-        
-    except Exception as e:
-        logger.error(f"Error getting subscription status: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to get subscription status")
+    user_id = current_user.get("sub")
+    email = current_user.get("email")
+
+    if not user_id or not email:
+        raise HTTPException(status_code=401, detail="User information incomplete")
+
+    return await get_user_subscription_status(user_id=user_id, email=email)
 
 @app.post("/subscription/cancel", response_model=CancelSubscriptionResponse)
 async def cancel_subscription(current_user: dict = Depends(get_current_user)):
     """Cancel the user's subscription at period end"""
-    try:
-        user_id = current_user.get("sub")
-        email = current_user.get("email")
-        
-        if not user_id or not email:
-            raise HTTPException(status_code=401, detail="User information incomplete")
-        
-        # Find customer by email
-        customers = stripe.Customer.list(email=email, limit=1)
-        if not customers.data:
-            raise HTTPException(status_code=404, detail="No subscription found")
-        
-        customer = customers.data[0]
-        
-        # Get active subscriptions
-        subscriptions = stripe.Subscription.list(
-            customer=customer.id,
-            status='active',
-            limit=1
-        )
-        
-        if not subscriptions.data:
-            raise HTTPException(status_code=404, detail="No active subscription found")
-        
-        # Cancel subscription at period end
-        subscription = stripe.Subscription.modify(
-            subscriptions.data[0].id,
-            cancel_at_period_end=True
-        )
-        
-        return CancelSubscriptionResponse(
-            status="success",
-            message="Subscription will be canceled at the end of the billing period",
-            canceled_at=subscription.current_period_end
-        )
-        
-    except stripe.error.StripeError as e:
-        logger.error(f"Stripe error canceling subscription: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error canceling subscription: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to cancel subscription")
+    user_id = current_user.get("sub")
+    email = current_user.get("email")
+
+    if not user_id or not email:
+        raise HTTPException(status_code=401, detail="User information incomplete")
+
+    return await cancel_user_subscription(user_id=user_id, email=email)
 
 @app.websocket("/chat")
 async def websocket_endpoint(websocket: WebSocket):
@@ -2511,344 +2346,6 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
         logger.info(f"Cleaned up {len(failed_sessions)} disconnected sessions")
 
 
-async def cleanup_session(session_id: str, user_id: Optional[str] = None, conversation_id: Optional[int] = None):
-    """Clean up a session when a WebSocket disconnects"""
-    # Don't delete chat history immediately - let any active message processing tasks complete
-    # They need the session history to generate responses
-    # The session will be cleaned up when the task completes or after a timeout
-    logger.info(f"Cleaning up session {session_id}, but keeping chat history for active tasks")
-    
-    # Clean up session timestamp
-    await remove_session_timestamp(session_id)
-    logger.info(f"Cleaned up session timestamp: {session_id}")
-    
-    # Cancel Redis listener task first (before closing pubsub)
-    if redis_managers and "local_objects" in redis_managers:
-        cancelled = await redis_managers["local_objects"].cancel_listener_task(session_id)
-        if cancelled:
-            logger.info(f"Cancelled Redis listener task for session {session_id}")
-    
-    # Clean up Redis subscriptions (after cancelling the listener)
-    await unsubscribe_from_conversation(session_id)
-    
-    # Clean up session mappings
-    await clear_session_mappings(session_id)
-    logger.info(f"Cleaned up session mappings: {session_id}")
-    
-    # Clean up conversation websockets (check all conversations, not just the provided one)
-    if redis_managers and "local_objects" in redis_managers:
-        await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
-    
-    # DON'T clean up active requests immediately - we need to track them to know when tasks complete
-    # The tasks themselves will remove their entries when they finish
-    active_reqs = await get_active_requests(session_id)
-    num_requests = len(active_reqs)
-    if num_requests > 0:
-        logger.info(f"Keeping {num_requests} active requests for session {session_id} - they will clean up when complete")
-    
-    if user_id:
-        await remove_user_session(user_id, session_id)
-        logger.info(f"Removed session {session_id} from user {user_id} sessions")
-        
-        # Check if user has no more sessions
-        remaining_sessions = await get_user_sessions(user_id)
-        if not remaining_sessions:
-            logger.info(f"Cleaned up empty user sessions for user {user_id}")
-
-async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> None:
-    """Evict old sessions if user has reached the session limit
-    
-    Eviction priority (highest to lowest):
-    1. Dead/disconnected sessions (already cleaned up)
-    2. Least recently active session
-    3. Never evict the new session being created
-    """
-    # Get current sessions first
-    current_sessions = await get_user_sessions(user_id)
-    if not current_sessions:
-        return
-    
-    # Check for dead sessions (sessions without chat history)
-    dead_sessions = []
-    for sess in current_sessions:
-        if sess != new_session_id:
-            messages = await get_chat_messages(sess)
-            if not messages:
-                dead_sessions.append(sess)
-    
-    # Remove dead sessions
-    if dead_sessions:
-        for dead_sess in dead_sessions:
-            logger.info(f"Removing dead session {dead_sess} from Redis during eviction check")
-            await remove_user_session(user_id, dead_sess)
-        current_sessions = await get_user_sessions(user_id)
-    
-    # If at or under the limit, no eviction needed (new session already added)
-    if len(current_sessions) <= MAX_SESSIONS_PER_USER:
-        return
-    
-    logger.info(f"User {user_id} at session limit ({MAX_SESSIONS_PER_USER}), need to evict a session")
-    
-    # Find the least recently active session
-    current_time = time.time()
-    inactive_threshold = current_time - 120  # Sessions inactive for 2 minutes
-    
-    # Collect sessions with their activity times
-    sessions_with_activity = []
-    
-    current_sessions = await get_user_sessions(user_id)
-    
-    for sess_id in current_sessions:
-        if sess_id == new_session_id:
-            continue  # Don't evict the session we're trying to create
-        
-        # Skip sessions that are already cleaned up (disconnected)
-        messages = await get_chat_messages(sess_id)
-        if not messages:
-            logger.debug(f"Skipping already-disconnected session {sess_id}")
-            continue
-        
-        last_activity = await get_session_timestamp(sess_id) or 0
-            
-        sessions_with_activity.append((sess_id, last_activity))
-    
-    # Sort by activity time (oldest first)
-    sessions_with_activity.sort(key=lambda x: x[1])
-    
-    # Find eviction candidate
-    eviction_candidate = None
-    if sessions_with_activity:
-        # Evict the least recently active session
-        eviction_candidate, oldest_activity = sessions_with_activity[0]
-        inactive_duration = int(current_time - oldest_activity)
-        logger.info(f"Selected session {eviction_candidate} for eviction (inactive for {inactive_duration}s)")
-    
-    if eviction_candidate:
-        evicted_timestamp = await get_session_timestamp(eviction_candidate) or 0
-        logger.info(f"Evicting session {eviction_candidate} (last active: {int(current_time - evicted_timestamp)} seconds ago)")
-        
-        # Extract conversation_id from the evicted session if possible
-        evicted_conversation_id = None
-        parts = eviction_candidate.split('_')
-        if len(parts) >= 4 and parts[2] == 'conv':
-            try:
-                evicted_conversation_id = int(parts[3])
-            except ValueError:
-                pass
-        
-        # Find and notify the websocket for the evicted session
-        ws_to_notify = None
-        if redis_managers and "local_objects" in redis_managers:
-            if evicted_conversation_id:
-                connections = await redis_managers["local_objects"].get_conversation_websockets(evicted_conversation_id)
-                for sid, ws in connections:
-                    if sid == eviction_candidate:
-                        ws_to_notify = ws
-                        break
-        
-        if ws_to_notify:
-            try:
-                eviction_message = {
-                    "type": "session_evicted",
-                    "code": "MAX_SESSIONS_REACHED",
-                    "reason": "New connection from another device"
-                }
-                await ws_to_notify.send_text(json.dumps(eviction_message))
-                await ws_to_notify.close(code=1000, reason="Session evicted: max sessions reached")
-            except Exception as e:
-                logger.warning(f"Failed to notify evicted session: {e}")
-        
-        # Clean up the evicted session
-        await clear_chat_session(eviction_candidate)  # Clear Redis chat history
-        await cleanup_session(eviction_candidate, user_id, evicted_conversation_id)
-
-async def cleanup_abandoned_tool_executions():
-    """Periodically clean up abandoned tool executions that were never completed"""
-    while True:
-        try:
-            await asyncio.sleep(60)  # Run every minute
-            tool_result_handler.cleanup_old_executions(max_age_seconds=60)
-            
-            pending_count = tool_result_handler.get_pending_count()
-            if pending_count > 0:
-                logger.debug(f"Currently {pending_count} tool executions pending")
-                
-        except Exception as e:
-            logger.error(f"Error in tool execution cleanup task: {str(e)}")
-
-async def cleanup_stale_sessions():
-    """Periodically clean up stale sessions that haven't been active"""
-    while True:
-        try:
-            await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
-            
-            current_time = time.time()
-            cutoff_time = current_time - SESSION_TIMEOUT_SECONDS
-            
-            # Find all stale sessions
-            stale_sessions = await get_stale_sessions(cutoff_time)
-            
-            if stale_sessions:
-                logger.info(f"Found {len(stale_sessions)} stale sessions to clean up")
-                
-                for session_id in stale_sessions:
-                    # Extract user_id and conversation_id from session_id if possible
-                    user_id = None
-                    conversation_id = None
-                    
-                    # Session ID format: ws_{user_id}_conv_{conversation_id} or ws_{user_id}_new_{timestamp}
-                    parts = session_id.split('_')
-                    if len(parts) >= 2:
-                        user_id = parts[1]
-                    if len(parts) >= 4 and parts[2] == 'conv':
-                        try:
-                            conversation_id = int(parts[3])
-                        except ValueError:
-                            pass
-                    
-                    stale_timestamp = await get_session_timestamp(session_id) or 0
-                    logger.info(f"Cleaning up stale session: {session_id} (inactive for {int(current_time - stale_timestamp)} seconds)")
-                    await cleanup_session(session_id, user_id, conversation_id)
-                
-        except Exception as e:
-            logger.error(f"Error during stale session cleanup: {str(e)}")
-            logger.error(traceback.format_exc())
-            # Continue running even if an error occurs
-            continue
-
-def load_conversation_history(user_id: str, conversation_id: Optional[int] = None) -> List[Dict]:
-    """Load conversation history from database and convert to Claude message format"""
-    try:
-        # FIXED: If no conversation_id specified, return empty history (for new chats)
-        # This prevents new chats from loading old conversation history
-        if conversation_id is None:
-            logger.info(f"New chat session for user {user_id} - returning empty history")
-            return []
-        else:
-            # Handle optimistic/negative conversation IDs
-            actual_conversation_id = conversation_id
-            if conversation_id < 0:
-                logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
-                # Look up the real conversation using the optimistic_chat_id
-                opt_result = supabase.table("conversations")\
-                    .select("id")\
-                    .eq("user_id", user_id)\
-                    .eq("optimistic_chat_id", str(conversation_id))\
-                    .is_("deleted_at", "null")\
-                    .execute()
-                
-                if opt_result.data and len(opt_result.data) > 0:
-                    actual_conversation_id = opt_result.data[0]["id"]
-                    logger.info(f"Found real conversation ID {actual_conversation_id} for optimistic ID {conversation_id}")
-                else:
-                    logger.info(f"No existing conversation found for optimistic ID {conversation_id}, treating as new chat")
-                    return []  # Treat as new chat if optimistic ID not found
-            
-            # Verify user owns the specified conversation
-            conv_result = supabase.table("conversations").select("id").eq("id", actual_conversation_id).eq("user_id", user_id).execute()
-            if not conv_result.data:
-                logger.warning(f"Conversation {actual_conversation_id} not found or not owned by user {user_id}")
-                return []
-
-        # Get messages for the conversation
-        result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
-
-        # Convert database messages to Claude format
-        # Group consecutive messages by role ONLY (not request_id) to ensure proper alternation
-        # This is critical because Claude API requires strict user/assistant alternation
-        claude_messages = []
-        current_group = None  # (role, content_blocks)
-
-        for row in result.data:
-            message_role = "user" if row["message_sender"] == "USER" else "assistant"
-
-            # Determine if this row belongs to current group (same role)
-            should_group = (
-                current_group is not None and
-                message_role == current_group[0]
-            )
-
-            if should_group:
-                # Add to current group
-                if row.get("tool_content"):
-                    current_group[1].extend(row["tool_content"])
-                elif row.get("content") and row["content"].strip():
-                    current_group[1].append({"type": "text", "text": row["content"]})
-            else:
-                # Flush current group if exists
-                if current_group and current_group[1]:
-                    claude_messages.append({
-                        "role": current_group[0],
-                        "content": current_group[1]
-                    })
-
-                # Start new group
-                content_blocks = []
-                if row.get("tool_content"):
-                    content_blocks.extend(row["tool_content"])
-                elif row.get("content") and row["content"].strip():
-                    content_blocks.append({"type": "text", "text": row["content"]})
-
-                current_group = [message_role, content_blocks]
-
-        # Flush final group
-        if current_group and current_group[1]:
-            claude_messages.append({
-                "role": current_group[0],
-                "content": current_group[1]
-            })
-
-        return claude_messages
-        
-    except Exception as e:
-        logger.error(f"Error loading conversation history for user {user_id}, conversation {conversation_id}: {str(e)}")
-        return []
-
-def get_user_message_ids_since_last_bot(conversation_id: int) -> List[int]:
-    """Get all user message IDs since the last bot message in a conversation"""
-    try:
-        # Get all messages ordered by timestamp
-        result = supabase.table("messages")\
-            .select("id, message_sender")\
-            .eq("conversation_id", conversation_id)\
-            .is_("cancelled", "null")\
-            .order("timestamp", desc=False)\
-            .execute()
-
-        if not result.data:
-            return []
-
-        # Find user messages since last bot message
-        user_message_ids = []
-        for msg in reversed(result.data):  # Start from most recent
-            if msg["message_sender"] == "ASSISTANT":
-                break  # Stop at the most recent bot message
-            elif msg["message_sender"] == "USER":
-                user_message_ids.append(msg["id"])
-        
-        return list(reversed(user_message_ids))  # Return in chronological order
-    except Exception as e:
-        logger.error(f"Error getting user message IDs for conversation {conversation_id}: {e}")
-        return []
-
-def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
-    """Get all non-cancelled bot message IDs in a conversation"""
-    try:
-        result = supabase.table("messages")\
-            .select("id")\
-            .eq("conversation_id", conversation_id)\
-            .eq("message_sender", "ASSISTANT")\
-            .is_("cancelled", "null")\
-            .order("id", desc=False)\
-            .execute()
-        
-        if not result.data:
-            return []
-        
-        return [msg["id"] for msg in result.data]
-    except Exception as e:
-        logger.error(f"Error getting bot message IDs for conversation {conversation_id}: {e}")
-        return []
 
 async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int], websocket=None, session_id=None) -> List[str]:
     """
@@ -2941,323 +2438,6 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
         logger.error(f"Error detecting subset requests: {e}")
     
     return cancelled_requests
-
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None) -> Optional[Tuple[int, int]]:
-    """Save a message to the database and return (conversation_id, message_id)
-
-    Args:
-        user_id: User ID
-        conversation_id: Conversation ID (can be negative for optimistic IDs)
-        content: Text content of the message
-        message_sender: 'USER' or 'ASSISTANT' (renamed from message_type)
-        request_id: Optional request ID for tracking
-        client_conversation_id: Optional optimistic conversation ID from client
-        client_timestamp: Optional timestamp from client
-        content_type: Type of content - 'text', 'tool_use', 'tool_result', or 'mixed'
-        tool_content: Optional JSONB content for tool-related messages
-    """
-    try:
-        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_conversation_id={client_conversation_id}, content='{content[:50] if content else '(empty)'}...'")
-
-        # Handle optimistic conversation IDs (negative IDs)
-        original_optimistic_id = None
-        if conversation_id is not None and conversation_id < 0:
-            logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
-            original_optimistic_id = conversation_id
-            # Look up the real conversation using the optimistic_chat_id
-            conv_result = supabase.table("conversations")\
-                .select("id")\
-                .eq("optimistic_chat_id", str(conversation_id))\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
-            
-            if conv_result.data:
-                real_id = conv_result.data[0]["id"]
-                logger.info(f"Found real conversation ID {real_id} for optimistic ID {conversation_id}")
-                conversation_id = real_id
-            else:
-                logger.info(f"No existing conversation found for optimistic ID {conversation_id}, will create new one")
-                conversation_id = None
-        
-        # Validate client_conversation_id - it should ONLY be negative (optimistic) values
-        # Convert to int if it's a string number for validation
-        if client_conversation_id is not None:
-            try:
-                client_conv_id_int = int(client_conversation_id) if isinstance(client_conversation_id, str) else client_conversation_id
-                if client_conv_id_int > 0:
-                    error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. The client should use the conversation_id parameter for server-assigned IDs."
-                    logger.error(error_msg)
-                    return {"error": error_msg, "status": 400}
-                # Use the integer version for all subsequent operations
-                client_conversation_id = client_conv_id_int
-            except (ValueError, TypeError):
-                logger.warning(f"client_conversation_id is not a valid number in save_message_to_db: {client_conversation_id} (type: {type(client_conversation_id)})")
-        
-        # If no conversation_id provided, check if we can find one by optimistic client_conversation_id
-        if conversation_id is None and client_conversation_id is not None:
-            # client_conversation_id should always be negative (optimistic) at this point
-            logger.info(f"No conversation_id but have optimistic client_conversation_id {client_conversation_id}, checking for existing conversation")
-            # Look up existing conversation by optimistic_chat_id
-            conv_result = supabase.table("conversations")\
-                .select("id")\
-                .eq("optimistic_chat_id", str(client_conversation_id))\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
-            
-            if conv_result.data:
-                conversation_id = conv_result.data[0]["id"]
-                logger.info(f"Found existing conversation {conversation_id} for optimistic_chat_id {client_conversation_id}")
-                # Don't return here - we still need to save the message below
-            else:
-                logger.info(f"No existing conversation found for optimistic_chat_id {client_conversation_id}, will create new one")
-        
-        # If still no conversation_id, create a new conversation
-        if conversation_id is None:
-            logger.warning(f"Creating NEW conversation for user {user_id} because conversation_id is None")
-            # Create a new conversation
-            conversation_data = {
-                "user_id": user_id,
-                "title": content[:50] + "..." if len(content) > 50 else content,  # Use first part of message as title
-                "source": "app"
-            }
-            
-            # If this is an optimistic chat (negative ID), store it
-            # Priority: use original_optimistic_id if we had one, otherwise check client_conversation_id
-            optimistic_id_to_store = original_optimistic_id or client_conversation_id
-            if optimistic_id_to_store is not None and optimistic_id_to_store < 0:
-                conversation_data["optimistic_chat_id"] = str(optimistic_id_to_store)
-                logger.info(f"Storing optimistic_chat_id {optimistic_id_to_store} for new conversation")
-            
-            conv_result = supabase.table("conversations").insert(conversation_data).execute()
-            
-            if not conv_result.data:
-                logger.error(f"Failed to create new conversation for user {user_id}")
-                return None
-                
-            conversation_id = conv_result.data[0]["id"]
-            created_at = conv_result.data[0]["created_at"]
-            updated_at = conv_result.data[0]["updated_at"]
-            logger.warning(f"Created NEW conversation {conversation_id} for user {user_id} at {created_at} (updated_at: {updated_at})")
-        else:
-            # Verify the conversation exists and is not soft-deleted
-            logger.info(f"Validating conversation {conversation_id} for user {user_id}")
-            conv_check = supabase.table("conversations")\
-                .select("id")\
-                .eq("id", conversation_id)\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
-
-            if not conv_check.data:
-                logger.error(f"Conversation {conversation_id} not found or is soft-deleted for user {user_id}")
-                return None
-
-            logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
-        
-        # Save the message
-        logger.info(f"Attempting to save {message_sender} message to conversation_id={conversation_id}, request_id={request_id}, content_type={content_type}")
-
-        # For ASSISTANT messages with request_id, mark any previous ASSISTANT messages with the same request_id as cancelled
-        # This handles the case where streaming responses create multiple intermediate messages
-        if message_sender == "ASSISTANT" and request_id:
-            try:
-                # Find all previous ASSISTANT messages with this request_id that aren't already cancelled
-                previous_messages = supabase.table("messages")\
-                    .select("id")\
-                    .eq("conversation_id", conversation_id)\
-                    .eq("request_id", request_id)\
-                    .eq("message_sender", "ASSISTANT")\
-                    .is_("cancelled", "null")\
-                    .execute()
-
-                if previous_messages.data:
-                    # Mark all previous messages as cancelled
-                    message_ids = [msg["id"] for msg in previous_messages.data]
-                    logger.info(f"Marking {len(message_ids)} previous ASSISTANT message(s) as cancelled for request_id={request_id}: {message_ids}")
-
-                    for msg_id in message_ids:
-                        supabase.table("messages")\
-                            .update({"cancelled": "now()"})\
-                            .eq("id", msg_id)\
-                            .execute()
-
-                    logger.info(f"Successfully marked {len(message_ids)} previous ASSISTANT message(s) as cancelled")
-            except Exception as e:
-                logger.error(f"Error marking previous ASSISTANT messages as cancelled for request_id={request_id}: {e}")
-
-        # Prepare message data
-        message_data = {
-            "conversation_id": conversation_id,
-            "content": content,
-            "message_sender": message_sender,
-            "content_type": content_type,
-            "request_id": request_id
-        }
-
-        # Add tool_content if provided
-        if tool_content is not None:
-            message_data["tool_content"] = tool_content
-            logger.info(f"Including tool_content in message: {json.dumps(tool_content)[:100]}...")
-
-        # For USER messages with client_timestamp, use the provided timestamp to preserve message order
-        if message_sender == "USER" and client_timestamp:
-            # Client timestamp is already in ISO format from Android client
-            message_data["timestamp"] = client_timestamp
-            logger.info(f"Using client-provided timestamp for USER message: {client_timestamp}")
-        
-        # For ASSISTANT messages with request_id, set timestamp to be right after the USER message
-        # This ensures the response appears immediately after the user message it's responding to
-        if message_sender == "ASSISTANT" and request_id:
-            # Find the USER message with this request_id
-            user_msg_result = supabase.table("messages")\
-                .select("timestamp")\
-                .eq("conversation_id", conversation_id)\
-                .eq("request_id", request_id)\
-                .eq("message_sender", "USER")\
-                .execute()
-            
-            if user_msg_result.data:
-                user_timestamp = user_msg_result.data[0]["timestamp"]
-                # Parse the timestamp and add 1ms
-                from datetime import datetime, timedelta
-                
-                # Fix: Normalize timestamp format from Supabase
-                # Supabase sometimes returns timestamps with varying microsecond precision (4-6 digits)
-                # Python's fromisoformat expects exactly 6 digits for microseconds
-                timestamp_str = user_timestamp.replace('Z', '+00:00')
-                
-                # Check if timestamp has microseconds and normalize to 6 digits
-                if '.' in timestamp_str:
-                    # Split into main part and fractional seconds + timezone
-                    parts = timestamp_str.split('.')
-                    if len(parts) == 2:
-                        # Further split fractional part from timezone
-                        if '+' in parts[1]:
-                            frac, tz = parts[1].split('+')
-                            # Pad or truncate fractional seconds to exactly 6 digits
-                            frac = frac.ljust(6, '0')[:6]
-                            timestamp_str = f"{parts[0]}.{frac}+{tz}"
-                        elif '-' in parts[1]:
-                            frac, tz = parts[1].split('-')
-                            frac = frac.ljust(6, '0')[:6]
-                            timestamp_str = f"{parts[0]}.{frac}-{tz}"
-                
-                user_dt = datetime.fromisoformat(timestamp_str)
-                assistant_dt = user_dt + timedelta(milliseconds=1)
-                # Format as ISO string with timezone
-                message_data["timestamp"] = assistant_dt.isoformat().replace('+00:00', 'Z')
-                logger.info(f"Setting ASSISTANT message timestamp to {message_data['timestamp']} (1ms after USER message at {user_timestamp})")
-            else:
-                logger.warning(f"No USER message found with request_id {request_id}, using default timestamp")
-        
-        # Debug: Log exactly what we're sending to Supabase
-        if "timestamp" in message_data:
-            logger.info(f"DEBUG: Inserting message with timestamp field: {message_data['timestamp']}")
-        else:
-            logger.info(f"DEBUG: Inserting message WITHOUT timestamp field (will use DB default)")
-        
-        result = supabase.table("messages").insert(message_data).execute()
-        
-        if not result.data:
-            logger.error(f"Failed to save {message_type} message to conversation {conversation_id} - no data returned from insert")
-            return None
-        
-        # Extract the saved message ID
-        saved_message = result.data[0]
-        message_id = saved_message.get("id")
-        
-        # Debug: Log what timestamp was actually saved
-        actual_timestamp = saved_message.get("timestamp")
-        logger.info(f"DEBUG: Message {message_id} saved with timestamp: {actual_timestamp}")
-        saved_conv_id = saved_message.get("conversation_id")
-        logger.info(f"Successfully saved {message_sender} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}, content_type={content_type}")
-
-        # Update conversation last_message_time and updated_at for incremental sync
-        update_result = supabase.table("conversations").update({
-            "last_message_time": "now()",
-            "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
-        }).eq("id", conversation_id).execute()
-
-        if update_result.data:
-            logger.info(f"Updated conversation {conversation_id} timestamps for {message_sender} message")
-        else:
-            logger.warning(f"Failed to update conversation {conversation_id} timestamps")
-        
-        return (conversation_id, message_id)
-
-    except Exception as e:
-        logger.error(f"Error saving message to database: {str(e)}")
-        return None
-
-
-def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_content: dict) -> bool:
-    """Update a pending tool_result message with the actual result
-
-    Args:
-        conversation_id: The conversation ID containing the tool result message
-        tool_use_id: The tool_use_id to identify which tool_result to update
-        result_content: The actual tool execution result to replace the pending content
-
-    Returns:
-        True if update successful, False otherwise
-    """
-    try:
-        logger.info(f"Updating tool_result for tool_use_id={tool_use_id} in conversation={conversation_id}")
-
-        # Find the pending tool_result message
-        result = supabase.table("messages")\
-            .select("id, tool_content")\
-            .eq("conversation_id", conversation_id)\
-            .eq("content_type", "tool_result")\
-            .execute()
-
-        if not result.data:
-            logger.error(f"No tool_result messages found in conversation {conversation_id}")
-            return False
-
-        # Find the message with matching tool_use_id
-        message_to_update = None
-        for msg in result.data:
-            tool_content = msg.get("tool_content", [])
-            if isinstance(tool_content, list):
-                for block in tool_content:
-                    if isinstance(block, dict) and block.get("tool_use_id") == tool_use_id:
-                        message_to_update = msg
-                        break
-            if message_to_update:
-                break
-
-        if not message_to_update:
-            logger.error(f"No tool_result message found with tool_use_id={tool_use_id}")
-            return False
-
-        message_id = message_to_update["id"]
-
-        # Update the tool_content with the actual result
-        updated_tool_content = [{
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": json.dumps(result_content)
-        }]
-
-        # Update the message in the database
-        update_result = supabase.table("messages")\
-            .update({"tool_content": updated_tool_content})\
-            .eq("id", message_id)\
-            .execute()
-
-        if update_result.data:
-            logger.info(f"Successfully updated tool_result message {message_id} for tool_use_id={tool_use_id}")
-            return True
-        else:
-            logger.error(f"Failed to update tool_result message {message_id}")
-            return False
-
-    except Exception as e:
-        logger.error(f"Error updating tool_result in database: {str(e)}")
-        return False
 
 @app.post("/update_api_tokens")
 async def update_api_tokens(
