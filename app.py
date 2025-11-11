@@ -4962,14 +4962,27 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "input": tool_block.input
             }
 
-            # Extract text blocks from response (if any)
-            text_blocks = []
-            assistant_response_text = ""
+            # Extract text blocks from response, separating text BEFORE and AFTER tool_use
+            # Text BEFORE tool_use should be saved with tool_use in Redis
+            # Text AFTER tool_use should be saved separately (after tool execution completes)
+            text_before_tool = []
+            text_after_tool = []
+            found_tool_use = False
+            assistant_response_text_before = ""
+
             for block in response.content:
-                if block.type == 'text':
-                    text_blocks.append({"type": "text", "text": block.text})
-                    if not assistant_response_text:  # Use first text block
-                        assistant_response_text = block.text
+                if block.type == 'tool_use':
+                    found_tool_use = True
+                elif block.type == 'text':
+                    text_dict = {"type": "text", "text": block.text}
+                    if not found_tool_use:
+                        # Text comes before tool_use
+                        text_before_tool.append(text_dict)
+                        if not assistant_response_text_before:
+                            assistant_response_text_before = block.text
+                    else:
+                        # Text comes after tool_use - will be added to Redis later
+                        text_after_tool.append(text_dict)
 
             # Calculate timestamps to ensure correct ordering in database
             # Text must come BEFORE tool_use, so we use explicit timestamps
@@ -5000,41 +5013,44 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             timestamp_str = f"{parts[0]}.{frac}-{tz}"
 
                 user_dt = datetime.fromisoformat(timestamp_str)
-                # Set timestamps: text (T), tool_use (T+1ms), tool_result (T+2ms)
-                text_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
+                # Set timestamps: text_before (T+1ms), tool_use (T+2ms), tool_result (T+3ms), text_after (T+4ms)
+                text_before_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
                 tool_use_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
                 tool_result_timestamp = (user_dt + timedelta(milliseconds=3)).isoformat().replace('+00:00', 'Z')
+                text_after_timestamp = (user_dt + timedelta(milliseconds=4)).isoformat().replace('+00:00', 'Z')
                 last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
-                logger.info(f"Using explicit timestamps: text={text_timestamp}, tool_use={tool_use_timestamp}, tool_result={tool_result_timestamp}")
+                logger.info(f"Using explicit timestamps: text_before={text_before_timestamp}, tool_use={tool_use_timestamp}, tool_result={tool_result_timestamp}, text_after={text_after_timestamp}")
             else:
                 # Fallback: no explicit timestamps
-                text_timestamp = None
+                text_before_timestamp = None
                 tool_use_timestamp = None
                 tool_result_timestamp = None
+                text_after_timestamp = None
                 logger.warning(f"No USER message found with request_id {request_id}, using default timestamps")
 
-            # Save complete assistant message (text + tool_use) to Redis and database BEFORE executing the tool
+            # Save assistant message to Redis BEFORE executing the tool
+            # IMPORTANT: Only include text BEFORE tool_use, not after
             async with chat_sessions_lock:
-                # Build complete assistant content: text comes BEFORE tool_use
-                assistant_content = text_blocks + [tool_block_dict]
+                # Build assistant content: text_before + tool_use (NO text_after)
+                assistant_content = text_before_tool + [tool_block_dict]
                 await add_chat_message(session_id, {"role": "assistant", "content": assistant_content})
 
-                # Save text response to database FIRST if present (with earliest timestamp)
+                # Save text response BEFORE tool to database FIRST if present (with earliest timestamp)
                 # This ensures correct ordering when fetching from database
-                if assistant_response_text:
+                if assistant_response_text_before:
                     text_save_result = save_message_to_db(
                         user_id=user_id,
                         conversation_id=session_conversation_id,
-                        content=assistant_response_text,
+                        content=assistant_response_text_before,
                         message_sender="ASSISTANT",
                         request_id=request_id,
                         content_type="text",
-                        client_timestamp=text_timestamp
+                        client_timestamp=text_before_timestamp
                     )
                     if text_save_result:
-                        logger.info(f"✅ Saved text message to database BEFORE tool execution: '{assistant_response_text[:50]}...'")
+                        logger.info(f"✅ Saved text message BEFORE tool to database: '{assistant_response_text_before[:50]}...'")
                     else:
-                        logger.error(f"❌ Failed to save text message to database")
+                        logger.error(f"❌ Failed to save text message BEFORE tool to database")
 
                 # Save tool_use to database SECOND (with timestamp after text)
                 tool_use_save_result = save_message_to_db(
@@ -5130,6 +5146,30 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         logger.info(f"✅ Updated database with actual tool_result for tool: {tool_block.name}")
                     else:
                         logger.error(f"❌ Failed to update database with actual tool_result for tool: {tool_block.name}")
+
+                # Save text AFTER tool_use to both Redis and database (if any)
+                # This text should come AFTER the tool_result in the conversation
+                if text_after_tool:
+                    # Add to Redis
+                    await add_chat_message(session_id, {"role": "assistant", "content": text_after_tool})
+                    logger.info(f"✅ Added text AFTER tool to Redis session")
+
+                    # Save to database with timestamp after tool_result
+                    text_after_content = " ".join([block["text"] for block in text_after_tool if block.get("type") == "text"])
+                    if text_after_content:
+                        text_after_save_result = save_message_to_db(
+                            user_id=user_id,
+                            conversation_id=session_conversation_id,
+                            content=text_after_content,
+                            message_sender="ASSISTANT",
+                            request_id=request_id,
+                            content_type="text",
+                            client_timestamp=text_after_timestamp
+                        )
+                        if text_after_save_result:
+                            logger.info(f"✅ Saved text AFTER tool to database: '{text_after_content[:50]}...'")
+                        else:
+                            logger.error(f"❌ Failed to save text AFTER tool to database")
             finally:
                 # Always decrement counter, even if tool execution or saving fails
                 await decrement_pending_tools(session_conversation_id)
