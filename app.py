@@ -3059,6 +3059,34 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         # Save the message
         logger.info(f"Attempting to save {message_sender} message to conversation_id={conversation_id}, request_id={request_id}, content_type={content_type}")
 
+        # For ASSISTANT messages with request_id, mark any previous ASSISTANT messages with the same request_id as cancelled
+        # This handles the case where streaming responses create multiple intermediate messages
+        if message_sender == "ASSISTANT" and request_id:
+            try:
+                # Find all previous ASSISTANT messages with this request_id that aren't already cancelled
+                previous_messages = supabase.table("messages")\
+                    .select("id")\
+                    .eq("conversation_id", conversation_id)\
+                    .eq("request_id", request_id)\
+                    .eq("message_sender", "ASSISTANT")\
+                    .is_("cancelled", "null")\
+                    .execute()
+
+                if previous_messages.data:
+                    # Mark all previous messages as cancelled
+                    message_ids = [msg["id"] for msg in previous_messages.data]
+                    logger.info(f"Marking {len(message_ids)} previous ASSISTANT message(s) as cancelled for request_id={request_id}: {message_ids}")
+
+                    for msg_id in message_ids:
+                        supabase.table("messages")\
+                            .update({"cancelled": "now()"})\
+                            .eq("id", msg_id)\
+                            .execute()
+
+                    logger.info(f"Successfully marked {len(message_ids)} previous ASSISTANT message(s) as cancelled")
+            except Exception as e:
+                logger.error(f"Error marking previous ASSISTANT messages as cancelled for request_id={request_id}: {e}")
+
         # Prepare message data
         message_data = {
             "conversation_id": conversation_id,
