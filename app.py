@@ -5177,13 +5177,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         await add_chat_message(session_id, {"role": "assistant", "content": text_after_tool})
 
                     # Save to database with timestamp after tool_result
+                    # NOTE: text_after must be saved as USER message to maintain proper grouping
+                    # when messages are loaded from database (USER: [tool_result, text_after])
                     text_after_content = " ".join([block["text"] for block in text_after_tool if block.get("type") == "text"])
                     if text_after_content:
                         text_after_save_result = save_message_to_db(
                             user_id=user_id,
                             conversation_id=session_conversation_id,
                             content=text_after_content,
-                            message_sender="ASSISTANT",
+                            message_sender="USER",
                             request_id=request_id,
                             content_type="text",
                             client_timestamp=text_after_timestamp
