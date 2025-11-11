@@ -5150,9 +5150,31 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Save text AFTER tool_use to both Redis and database (if any)
                 # This text should come AFTER the tool_result in the conversation
                 if text_after_tool:
-                    # Add to Redis
-                    await add_chat_message(session_id, {"role": "assistant", "content": text_after_tool})
-                    logger.info(f"✅ Added text AFTER tool to Redis session")
+                    # Add to Redis - append to the USER message containing the tool_result
+                    # to maintain proper ordering: USER message = [tool_result, text_after]
+                    messages = await get_chat_messages(session_id)
+                    updated = False
+                    for i in range(len(messages) - 1, -1, -1):
+                        msg = messages[i]
+                        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                            # Check if this message contains our tool_result
+                            has_our_result = any(
+                                isinstance(block, dict) and
+                                block.get("type") == "tool_result" and
+                                block.get("tool_use_id") == tool_block.id
+                                for block in msg["content"]
+                            )
+                            if has_our_result:
+                                # Append text_after to this USER message (after tool_result)
+                                messages[i]["content"].extend(text_after_tool)
+                                await set_chat_messages(session_id, messages)
+                                logger.info(f"✅ Appended text AFTER tool_result to USER message in Redis")
+                                updated = True
+                                break
+
+                    if not updated:
+                        logger.warning(f"Could not find USER message with tool_result for tool_use_id={tool_block.id}, adding as separate message")
+                        await add_chat_message(session_id, {"role": "assistant", "content": text_after_tool})
 
                     # Save to database with timestamp after tool_result
                     text_after_content = " ".join([block["text"] for block in text_after_tool if block.get("type") == "text"])
