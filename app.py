@@ -4912,6 +4912,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         if hasattr(response, 'content'):
             logger.info(f"Claude response content: {[{'type': getattr(block, 'type', 'unknown'), 'text': getattr(block, 'text', None)[:100] if hasattr(block, 'text') else None} for block in response.content]}")
 
+        # Track the last tool_result timestamp for proper message ordering
+        last_tool_result_timestamp = None
+
         # Handle tool calls
         while response.stop_reason == 'tool_use':
             # Check for cancellation before each tool iteration
@@ -5001,6 +5004,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 text_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
                 tool_use_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
                 tool_result_timestamp = (user_dt + timedelta(milliseconds=3)).isoformat().replace('+00:00', 'Z')
+                last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
                 logger.info(f"Using explicit timestamps: text={text_timestamp}, tool_use={tool_use_timestamp}, tool_result={tool_result_timestamp}")
             else:
                 # Fallback: no explicit timestamps
@@ -5237,7 +5241,21 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         save_result = None
         if assistant_response_text:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
-            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text")
+
+            # If this is a response after tool execution, ensure it has a timestamp AFTER the tool_result
+            # to maintain proper message ordering when loading from database
+            final_text_timestamp = None
+            if last_tool_result_timestamp:  # last_tool_result_timestamp was set in the tool loop
+                # Parse tool_result timestamp and add 1ms to ensure final text comes after
+                try:
+                    from datetime import datetime, timedelta
+                    tool_result_dt = datetime.fromisoformat(last_tool_result_timestamp.replace('Z', '+00:00'))
+                    final_text_timestamp = (tool_result_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
+                    logger.info(f"Setting final assistant text timestamp to {final_text_timestamp} (after tool_result)")
+                except:
+                    pass
+
+            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text", client_timestamp=final_text_timestamp)
             if save_result:
                 saved_conversation_id, bot_message_id = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
