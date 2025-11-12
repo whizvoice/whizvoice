@@ -66,10 +66,13 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
 
             if should_group:
                 # Add to current group
+                # Handle messages that may have BOTH text content and tool_content
+                # (e.g., tool_use messages with text_before merged)
+                # Text must come before tool_use blocks
+                if row.get("content") and row["content"].strip():
+                    current_group[1].append({"type": "text", "text": row["content"]})
                 if row.get("tool_content"):
                     current_group[1].extend(row["tool_content"])
-                elif row.get("content") and row["content"].strip():
-                    current_group[1].append({"type": "text", "text": row["content"]})
             else:
                 # Flush current group if exists
                 if current_group and current_group[1]:
@@ -79,11 +82,13 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                     })
 
                 # Start new group
+                # Handle messages that may have BOTH text content and tool_content
+                # Text must come before tool_use blocks
                 content_blocks = []
+                if row.get("content") and row["content"].strip():
+                    content_blocks.append({"type": "text", "text": row["content"]})
                 if row.get("tool_content"):
                     content_blocks.extend(row["tool_content"])
-                elif row.get("content") and row["content"].strip():
-                    content_blocks.append({"type": "text", "text": row["content"]})
 
                 current_group = [message_role, content_blocks]
 

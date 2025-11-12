@@ -4151,17 +4151,16 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             timestamp_str = f"{parts[0]}.{frac}-{tz}"
 
                 user_dt = datetime.fromisoformat(timestamp_str)
-                # Set timestamps: text_before (T+1ms), tool_use (T+2ms), tool_result (T+3ms), text_after (T+4ms)
-                text_before_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
-                tool_use_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
-                tool_result_timestamp = (user_dt + timedelta(milliseconds=3)).isoformat().replace('+00:00', 'Z')
-                text_after_timestamp = (user_dt + timedelta(milliseconds=4)).isoformat().replace('+00:00', 'Z')
+                # Set timestamps: text_before+tool_use (T+1ms), tool_result (T+2ms), text_after (T+3ms)
+                # text_before and tool_use are merged into ONE message with timestamp T+1ms
+                text_before_and_tool_use_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
+                tool_result_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
+                text_after_timestamp = (user_dt + timedelta(milliseconds=3)).isoformat().replace('+00:00', 'Z')
                 last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
-                logger.info(f"Using explicit timestamps: text_before={text_before_timestamp}, tool_use={tool_use_timestamp}, tool_result={tool_result_timestamp}, text_after={text_after_timestamp}")
+                logger.info(f"Using explicit timestamps: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}, text_after={text_after_timestamp}")
             else:
                 # Fallback: no explicit timestamps
-                text_before_timestamp = None
-                tool_use_timestamp = None
+                text_before_and_tool_use_timestamp = None
                 tool_result_timestamp = None
                 text_after_timestamp = None
                 logger.warning(f"No USER message found with request_id {request_id}, using default timestamps")
@@ -4173,35 +4172,23 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 assistant_content = text_before_tool + [tool_block_dict]
                 await add_chat_message(session_id, {"role": "assistant", "content": assistant_content})
 
-                # Save text response BEFORE tool to database FIRST if present (with earliest timestamp)
-                # This ensures correct ordering when fetching from database
-                if assistant_response_text_before:
-                    text_save_result = save_message_to_db(
-                        user_id=user_id,
-                        conversation_id=session_conversation_id,
-                        content=assistant_response_text_before,
-                        message_sender="ASSISTANT",
-                        request_id=request_id,
-                        content_type="text",
-                        client_timestamp=text_before_timestamp
-                    )
-                    if text_save_result:
-                        logger.info(f"✅ Saved text message BEFORE tool to database: '{assistant_response_text_before[:50]}...'")
-                    else:
-                        logger.error(f"❌ Failed to save text message BEFORE tool to database")
-
-                # Save tool_use to database SECOND (with timestamp after text)
+                # Save merged text_before+tool_use to database as ONE message
+                # content_type is "tool_use" even though it may also contain text content
+                # This ensures proper timestamp ordering: merged message at T+1ms
                 tool_use_save_result = save_message_to_db(
                     user_id=user_id,
                     conversation_id=session_conversation_id,
-                    content="",  # Tool messages don't have text content
+                    content=assistant_response_text_before,  # Include text_before (may be empty string)
                     message_sender="ASSISTANT",
                     request_id=request_id,
-                    content_type="tool_use",
+                    content_type="tool_use",  # Type is tool_use even with text content
                     tool_content=[tool_block_dict],
-                    client_timestamp=tool_use_timestamp
+                    client_timestamp=text_before_and_tool_use_timestamp
                 )
-                logger.info(f"✅ Saved tool_use message to database BEFORE execution: {tool_block.name}")
+                if assistant_response_text_before:
+                    logger.info(f"✅ Saved merged text+tool_use message to database: text='{assistant_response_text_before[:50]}...', tool={tool_block.name}")
+                else:
+                    logger.info(f"✅ Saved tool_use message to database (no text_before): tool={tool_block.name}")
 
                 # Create PENDING tool result (will be updated with actual result later)
                 pending_tool_result_dict = {
