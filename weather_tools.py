@@ -120,6 +120,8 @@ async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = N
                 units_to_use = "us"
         elif temperature_units:
             # Saved preference exists, but parameter provided - use parameter
+            if saved_preference != temperature_units:
+                set_preference(user_id, 'temperature_units', temperature_units)
             units_to_use = temperature_units
         else:
             # Use saved preference
