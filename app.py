@@ -4491,10 +4491,62 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 
                 # Try to send via WebSocket (may fail, but error is persisted in DB)
                 await safe_websocket_send(error_payload)
-                
+
                 # Don't raise - let the client handle the error gracefully
                 return session_conversation_id
-        
+            except Exception as tool_api_error:
+                # Check if this is a tool_use_id mismatch error (conversation history corrupted)
+                is_tool_use_id_error = (
+                    isinstance(tool_api_error, BadRequestError) and
+                    ("tool_use_id" in str(tool_api_error).lower() or "unexpected tool_use_id" in str(tool_api_error).lower())
+                )
+
+                if is_tool_use_id_error:
+                    logger.error(f"Claude API tool_use_id mismatch error during tool use for request {request_id}: {str(tool_api_error)}")
+                    logger.error(f"Conversation history corrupted - cannot continue")
+                    await set_request_state(request_id, "history_error", {
+                        "session_id": session_id,
+                        "conversation_id": session_conversation_id,
+                        "error": str(tool_api_error)
+                    })
+
+                    # Create error message for user
+                    error_message = "I'm sorry, but this conversation has encountered a technical issue with the message history that prevents me from continuing. Please start a new conversation."
+
+                    # Create error payload
+                    error_payload = {
+                        "type": "message",
+                        "message": error_message,
+                        "request_id": request_id,
+                        "conversation_id": session_conversation_id,
+                        "client_conversation_id": client_conversation_id
+                    }
+
+                    # Save error as ASSISTANT message to database
+                    logger.info(f"Saving conversation history error (during tool use) as ASSISTANT message for conversation {session_conversation_id}")
+                    save_result = save_message_to_db(
+                        user_id=user_id,
+                        conversation_id=session_conversation_id,
+                        content=error_message,
+                        message_sender="ASSISTANT",
+                        request_id=request_id,
+                        content_type="text"
+                    )
+                    if save_result:
+                        saved_conversation_id, error_message_id = save_result
+                        logger.info(f"Conversation history error saved as message {error_message_id} in conversation {saved_conversation_id}")
+                    else:
+                        logger.error(f"Failed to save conversation history error message to database")
+
+                    # Try to send via WebSocket
+                    await safe_websocket_send(error_payload)
+
+                    # Don't raise - let the client handle the error gracefully
+                    return session_conversation_id
+                else:
+                    # Re-raise other exceptions
+                    raise
+
         # Log final response details
         logger.info(f"Final AI response - stop_reason: {response.stop_reason}")
         logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': getattr(block, 'text', '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
