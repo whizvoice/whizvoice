@@ -25,7 +25,7 @@ from music_tools import music_tools, play_youtube_music, queue_youtube_music, ge
 from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
-from weather_tools import weather_tools, get_weather
+from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
@@ -980,10 +980,26 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (
             args.get('days_ahead', 0),
             user_id,
-            args.get('location')  # None if not provided, which will default to 'weather_default'
+            args.get('location'),  # None if not provided, which will default to 'weather_default'
+            args.get('temperature_units')  # None if not provided, will use saved preference or default to 'us'
         ),
         "validation": lambda args: (
             {"error": "days_ahead must be a number."} if args.get('days_ahead') is not None and not isinstance(args.get('days_ahead'), int) else
+            {"error": "temperature_units must be 'us' or 'si'."} if args.get('temperature_units') is not None and args.get('temperature_units') not in ['us', 'si'] else
+            None
+        )
+    },
+    "set_temperature_units": {
+        "function_name": "set_temperature_units",
+        "requires_auth": True,
+        "is_async": True,
+        "args_mapping": lambda args, user_id: (
+            args.get('unit'),
+            user_id
+        ),
+        "validation": lambda args: (
+            {"error": "unit is required."} if not args.get('unit') else
+            {"error": "unit must be 'us' or 'si'."} if args.get('unit') not in ['us', 'si'] else
             None
         )
     }
