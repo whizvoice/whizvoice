@@ -188,3 +188,55 @@ netstat -an | grep :8000 | grep ESTABLISHED
 ```
 
 *** NOTE THAT WE HAVE A GLOBAL CONNECTIONS LIMIT OF 500 AND A LIMIT OF 5 PER USER ***
+
+## Message Ordering and Timestamp Constraints
+
+To ensure proper conversation history when messages are saved to the database and loaded back, the following constraints MUST be maintained:
+
+### Timestamp Rules for Messages with Same request_id
+
+All messages in a request/response cycle share the same `request_id`. Timestamps must be carefully managed to ensure proper ordering:
+
+1. **Base Rule**: ASSISTANT messages with the same `request_id` need to have timestamps that are +1ms after the USER message timestamp
+   - This ensures responses appear immediately after the user message they're responding to
+
+2. **Tool Use Flow with Placeholder tool_result**:
+   - When an ASSISTANT message contains tool_use blocks, we create a placeholder tool_result immediately to allow conversation to continue
+   - **USER message** (original): timestamp T (e.g., .464)
+   - **ASSISTANT text_before** (if any): T+1ms (e.g., .465)
+   - **ASSISTANT tool_use**: T+2ms (e.g., .466)
+   - **USER placeholder tool_result**: T+3ms (e.g., .467) - with content "Result pending..."
+   - **ASSISTANT text_after**: T+4ms (e.g., .468)
+
+3. **Real tool_result Replacement**:
+   - When the actual tool execution completes, the real tool_result MUST replace the placeholder
+   - **CRITICAL**: The timestamp of the placeholder (T+3ms) MUST be preserved when replacing with the real result
+   - This ensures the final ASSISTANT text (T+4ms) remains after the tool_result
+
+4. **Multiple Tool Uses**:
+   - If there are additional tool_use and tool_result pairs before the next USER text message, timestamps continue incrementing:
+   - Second tool_use: T+5ms
+   - Second placeholder tool_result: T+6ms
+   - Final ASSISTANT text: T+7ms
+
+### Message Merging Rules
+
+Claude API requires strict user/assistant alternation. Messages must be merged to maintain this:
+
+1. **ASSISTANT Messages with Text and Tool Use**:
+   - Text content MUST come before tool_use blocks in the same message
+   - All content from the same ASSISTANT turn must be merged into a single message
+   - Example: `{"role": "assistant", "content": [{"type": "text", "text": "..."}, {"type": "tool_use", ...}]}`
+
+2. **Consecutive USER Messages**:
+   - USER messages in a row (between ASSISTANT messages) MUST be merged together
+   - This can happen when multiple user inputs or tool_results arrive before the next ASSISTANT response
+   - If a tool_result and text arrive together, tool_result MUST come first, then text
+   - Example: `{"role": "user", "content": [{"type": "tool_result", ...}, {"type": "text", "text": "..."}]}`
+
+### Implementation Notes
+
+- The `save_message_to_db()` function in `database.py` handles timestamp management
+- The `load_conversation_history()` function in `database.py` handles message merging when loading from database
+- Tool messages (tool_use, tool_result) are stored in the database but filtered out when syncing to Android client (which only shows text messages)
+- Redis cache maintains the full conversation history including tool messages for server-side Claude API calls
