@@ -23,9 +23,7 @@ async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = N
     Args:
         days_ahead: Number of days ahead to get forecast for (0 = today, 1 = tomorrow, etc., max 6)
         user_id: The user ID
-        location: Location to use - can be a saved location type (e.g., "weather_default", "home")
-                 or any location text to geocode (e.g., "Seattle", "Golden Gate Bridge").
-                 If None, uses "weather_default".
+        location: Location to use.
 
     Returns:
         Dictionary with weather forecast data or error
@@ -53,11 +51,9 @@ async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = N
             try:
                 saved_locations = json.loads(locations_json) if isinstance(locations_json, str) else locations_json
             except json.JSONDecodeError:
-                logger.error(f"Failed to parse locations JSON for user {user_id}")
-                return {
-                    "success": False,
-                    "error": "Error reading saved locations"
-                }
+                logger.warning(f"Failed to parse locations JSON for user {user_id}, will attempt to geocode location string")
+                # Don't fail here - the location string may still be geocodeable
+                # Only fail if location is "weather_default" (handled below)
 
         # Check if location is a saved location type
         location_data = saved_locations.get(location)
@@ -83,7 +79,7 @@ async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = N
                 logger.warning(f"No weather_default location saved for user {user_id}")
                 return {
                     "success": False,
-                    "error": "You haven't saved a default weather location yet. Please use the save_location tool to save your location with location_type 'weather_default' first, or specify a location in your request (e.g., 'Seattle', 'New York City')."
+                    "error": "Failed to get weather because user has no weather_default location set. Please ask the user what location they'd like to use for weather forecasts and set weather_default with the save_location tool."
                 }
 
             # Try to geocode the location string
@@ -242,7 +238,7 @@ weather_tools = [
                 },
                 "location": {
                     "type": "string",
-                    "description": "Which location to use. Do not submit this parameter if the user did not specify, so that the user's weather_default can be used. This tool will geocode the location text to get the weather for the location."
+                    "description": "Location string. Do not submit this parameter if the user did not specify, so that the user's default weather location can be used."
                 }
             },
             "required": ["days_ahead"]
