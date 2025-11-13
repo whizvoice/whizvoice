@@ -202,7 +202,11 @@ def create_asana_task(user_id: str, name, due_date=None, notes=None, parent_task
         else:
             new_task = tasks_api.create_subtask_for_task(body={'data': task_data}, task_gid=parent_task_gid, opts={'opt_fields': 'name,due_on,completed,projects.name'})
 
-        return new_task
+        # Filter out gid from the result - user doesn't need to see task IDs
+        task_dict = dict(new_task)
+        if 'gid' in task_dict:
+            del task_dict['gid']
+        return task_dict
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
