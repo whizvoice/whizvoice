@@ -4357,12 +4357,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     for i in range(len(messages) - 1, -1, -1):  # Search backwards for efficiency
                         msg = messages[i]
                         if msg.get("role") == "user" and isinstance(msg.get("content"), list):
-                            for block in msg["content"]:
+                            for j, block in enumerate(msg["content"]):
                                 if isinstance(block, dict) and \
                                    block.get("type") == "tool_result" and \
                                    block.get("tool_use_id") == tool_block.id:
-                                    # Found the pending result, update it
-                                    messages[i] = {"role": "user", "content": [actual_tool_result_dict]}
+                                    # Found the pending result, update only this specific block
+                                    messages[i]["content"][j] = actual_tool_result_dict
                                     await set_chat_messages(session_id, messages)
                                     logger.info(f"✅ Updated Redis with actual tool_result for tool_use_id={tool_block.id}")
                                     break
