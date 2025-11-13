@@ -198,15 +198,11 @@ def create_asana_task(user_id: str, name, due_date=None, notes=None, parent_task
             
         # Create the task
         if parent_task_gid is None:
-            new_task = tasks_api.create_task(body={'data': task_data}, opts={'opt_fields': 'name,due_on,completed,projects.name'})
+            new_task = tasks_api.create_task(body={'data': task_data}, opts={'opt_fields': 'gid,name,due_on,completed,projects.name'})
         else:
-            new_task = tasks_api.create_subtask_for_task(body={'data': task_data}, task_gid=parent_task_gid, opts={'opt_fields': 'name,due_on,completed,projects.name'})
+            new_task = tasks_api.create_subtask_for_task(body={'data': task_data}, task_gid=parent_task_gid, opts={'opt_fields': 'gid,name,due_on,completed,projects.name'})
 
-        # Filter out gid from the result - user doesn't need to see task IDs
-        task_dict = dict(new_task)
-        if 'gid' in task_dict:
-            del task_dict['gid']
-        return task_dict
+        return dict(new_task)
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
@@ -250,7 +246,7 @@ def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=No
             updated_task = tasks_api.update_task(
                 body={'data': update_data},
                 task_gid=task_gid,
-                opts={'opt_fields': 'name,due_on,completed,projects.name'}
+                opts={'opt_fields': 'gid,name,due_on,completed,projects.name'}
             )
 
         # Handle parent separately (uses different API endpoint)
@@ -258,18 +254,14 @@ def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=No
             updated_task = tasks_api.set_parent_for_task(
                 body={'data': {'parent': parent_gid}},
                 task_gid=task_gid,
-                opts={'opt_fields': 'name,due_on,completed,projects.name'}
+                opts={'opt_fields': 'gid,name,due_on,completed,projects.name'}
             )
 
         # If no updates were provided, fetch the current task
         if updated_task is None:
-            updated_task = tasks_api.get_task(task_gid, opts={'opt_fields': 'name,due_on,completed,projects.name'})
+            updated_task = tasks_api.get_task(task_gid, opts={'opt_fields': 'gid,name,due_on,completed,projects.name'})
 
-        # Filter out gid from the result
-        task_dict = dict(updated_task)
-        if 'gid' in task_dict:
-            del task_dict['gid']
-        return task_dict
+        return dict(updated_task)
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
@@ -385,7 +377,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "create_asana_task",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. If there could be multiple candidate parent tasks, please confirm the parent task with the user before creating the task. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool to use the current_date to calculate the due date in YYYY-MM-DD format to use as a parameter here. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. DO NOT use this tool to recreate a task that you already made once - use update_asana_task instead.",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. If there could be multiple candidate parent tasks, please confirm the parent task with the user before creating the task. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool to use the current_date to calculate the due date in YYYY-MM-DD format to use as a parameter here. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. DO NOT use this tool to recreate a task that you already made once - use update_asana_task instead. No need to tell the user the ID of the task unless they ask.",
         "input_schema": {
             "type": "object",
             "properties": {
