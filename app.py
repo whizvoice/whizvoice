@@ -3551,15 +3551,25 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
                 # Build Redis session from database messages
                 redis_messages = []
-                # First pass: identify tool_use IDs that have corresponding tool_results
+                # First pass: identify valid (non-cancelled) tool_use IDs
                 tool_use_ids_with_results = set()
+                valid_tool_use_ids = set()
+
+                # Collect all tool_result IDs
                 for msg in db_messages:
                     if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
                         for block in msg['tool_content']:
                             if isinstance(block, dict) and block.get('tool_use_id'):
                                 tool_use_ids_with_results.add(block['tool_use_id'])
 
-                # Second pass: build messages, skipping incomplete tool_use blocks
+                # Collect valid (non-cancelled) tool_use IDs
+                for msg in db_messages:
+                    if not msg.get('cancelled') and msg.get('content_type') == 'tool_use' and msg.get('tool_content'):
+                        for block in msg['tool_content']:
+                            if isinstance(block, dict) and block.get('id'):
+                                valid_tool_use_ids.add(block['id'])
+
+                # Second pass: build messages, skipping incomplete/orphaned tool blocks
                 for msg in db_messages:
                     # Skip cancelled messages
                     if msg.get('cancelled'):
@@ -3582,6 +3592,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
                         redis_messages.append({"role": "assistant", "content": tool_content})
                     elif content_type == 'tool_result' and tool_content:
+                        # Skip orphaned tool_results whose tool_use was cancelled
+                        tool_use_id = None
+                        for block in tool_content:
+                            if isinstance(block, dict) and block.get('tool_use_id'):
+                                tool_use_id = block['tool_use_id']
+                                break
+
+                        if tool_use_id and tool_use_id not in valid_tool_use_ids:
+                            logger.warning(f"Skipping orphaned tool_result (tool_use was cancelled): {tool_use_id}")
+                            continue
+
                         redis_messages.append({"role": "user", "content": tool_content})
                     # Handle regular text messages
                     elif msg['message_sender'] == 'USER':
@@ -3785,14 +3806,24 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         response = query.execute()
                         db_messages = response.data if response.data else []
 
-                        # Build complete history from DB, skipping incomplete tool_use
+                        # Build complete history from DB, skipping incomplete/orphaned tool blocks
                         redis_messages = []
                         tool_use_ids_with_results = set()
+                        valid_tool_use_ids = set()
+
+                        # Collect all tool_result IDs
                         for msg in db_messages:
                             if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
                                 for block in msg['tool_content']:
                                     if isinstance(block, dict) and block.get('tool_use_id'):
                                         tool_use_ids_with_results.add(block['tool_use_id'])
+
+                        # Collect valid (non-cancelled) tool_use IDs
+                        for msg in db_messages:
+                            if not msg.get('cancelled') and msg.get('content_type') == 'tool_use' and msg.get('tool_content'):
+                                for block in msg['tool_content']:
+                                    if isinstance(block, dict) and block.get('id'):
+                                        valid_tool_use_ids.add(block['id'])
 
                         for msg in db_messages:
                             if msg.get('cancelled'):
@@ -3812,6 +3843,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                                     continue
                                 redis_messages.append({"role": "assistant", "content": tool_content})
                             elif content_type == 'tool_result' and tool_content:
+                                # Skip orphaned tool_results whose tool_use was cancelled
+                                tool_use_id = None
+                                for block in tool_content:
+                                    if isinstance(block, dict) and block.get('tool_use_id'):
+                                        tool_use_id = block['tool_use_id']
+                                        break
+
+                                if tool_use_id and tool_use_id not in valid_tool_use_ids:
+                                    logger.warning(f"Skipping orphaned tool_result in reload (tool_use was cancelled): {tool_use_id}")
+                                    continue
+
                                 redis_messages.append({"role": "user", "content": tool_content})
                             elif msg['message_sender'] == 'USER':
                                 redis_messages.append({"role": "user", "content": msg['content']})
