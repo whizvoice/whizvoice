@@ -17,7 +17,7 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, change_task_parent, update_task_due_date, delete_asana_task
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, update_asana_task, delete_asana_task
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
 from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message, sms_select_chat, sms_draft_message, sms_send_message
@@ -674,20 +674,20 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id, 'asana_workspace_preference'),
         "validation": None  # Will handle user_id check in main flow since it's already covered by requires_auth
     },
-    "change_task_parent": {
-        "function_name": "change_task_parent",
+    "update_asana_task": {
+        "function_name": "update_asana_task",
         "requires_auth": True,
-        "args_mapping": lambda args, user_id: (user_id, args.get('task_gid'), args.get('new_parent_gid')),
-        "validation": None
-    },
-    "update_task_due_date": {
-        "function_name": "update_task_due_date",
-        "requires_auth": True,
-        "args_mapping": lambda args, user_id: (user_id, args.get('task_gid'), args.get('new_due_date')),
+        "args_mapping": lambda args, user_id: (
+            user_id,
+            args.get('task_gid'),
+            args.get('name'),
+            args.get('due_date'),
+            args.get('notes'),
+            args.get('completed'),
+            args.get('parent_gid')
+        ),
         "validation": lambda args: (
-            {"error": "Task GID is required."} if not args.get('task_gid') else
-            {"error": "New due date is required."} if not args.get('new_due_date') else
-            None
+            {"error": "Task GID is required."} if not args.get('task_gid') else None
         )
     },
     "delete_asana_task": {

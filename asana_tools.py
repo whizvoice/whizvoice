@@ -217,40 +217,59 @@ def create_asana_task(user_id: str, name, due_date=None, notes=None, parent_task
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
-def change_task_parent(user_id: str, task_gid, new_parent_gid=None):
-    try:
-        api_client = get_asana_client(user_id)
-        tasks_api = asana.TasksApi(api_client)
-        # Update the task's parent
-        updated_task = tasks_api.set_parent_for_task(
-            body={'data': {'parent': new_parent_gid}},
-            task_gid=task_gid,
-            opts={'opt_fields': 'name,due_on,completed,projects.name'}
-        )
-        print(f"DEBUG: Updated task: {updated_task}")
-        return updated_task
-    except ValueError as e:
-        # Re-raise the token error to be handled by the WebSocket endpoint
-        raise
-    except AsanaError as e:
-        status_code = e.status if hasattr(e, 'status') else 500
-        if status_code == 401:
-            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
-        else:
-            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
+def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=None, completed=None, parent_gid=None):
+    """
+    Update one or more fields of an Asana task. Only provided fields will be updated.
 
-def update_task_due_date(user_id: str, task_gid, new_due_date):
+    Args:
+        task_gid: The GID of the task to update
+        name: New task name (optional)
+        due_date: New due date in YYYY-MM-DD format (optional)
+        notes: New task notes/description (optional)
+        completed: Boolean to mark task as complete/incomplete (optional)
+        parent_gid: New parent task GID, or None to remove parent (optional)
+    """
     try:
         api_client = get_asana_client(user_id)
         tasks_api = asana.TasksApi(api_client)
 
-        # Update the task's due date
-        updated_task = tasks_api.update_task(
-            body={'data': {'due_on': new_due_date}},
-            task_gid=task_gid,
-            opts={'opt_fields': 'name,due_on,completed,projects.name'}
-        )
-        return updated_task
+        # Build update data for regular fields
+        update_data = {}
+        if name is not None:
+            update_data['name'] = name
+        if due_date is not None:
+            update_data['due_on'] = due_date
+        if notes is not None:
+            update_data['notes'] = notes
+        if completed is not None:
+            update_data['completed'] = completed
+
+        # Update regular fields if any were provided
+        updated_task = None
+        if update_data:
+            updated_task = tasks_api.update_task(
+                body={'data': update_data},
+                task_gid=task_gid,
+                opts={'opt_fields': 'name,due_on,completed,projects.name'}
+            )
+
+        # Handle parent separately (uses different API endpoint)
+        if parent_gid is not None:
+            updated_task = tasks_api.set_parent_for_task(
+                body={'data': {'parent': parent_gid}},
+                task_gid=task_gid,
+                opts={'opt_fields': 'name,due_on,completed,projects.name'}
+            )
+
+        # If no updates were provided, fetch the current task
+        if updated_task is None:
+            updated_task = tasks_api.get_task(task_gid, opts={'opt_fields': 'name,due_on,completed,projects.name'})
+
+        # Filter out gid from the result
+        task_dict = dict(updated_task)
+        if 'gid' in task_dict:
+            del task_dict['gid']
+        return task_dict
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
@@ -366,7 +385,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "create_asana_task",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. If there could be multiple candidate parent tasks, please confirm the parent task with the user before creating the task. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool to use the current_date to calculate the due date in YYYY-MM-DD format to use as a parameter here. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. DO NOT use this tool to update the parent of a task (use change_task_parent) or update the due date (use update_task_due_date). If you recreate a task to update another attribute MAKE SURE to delete the old one (with delete_asana_task) so the user doesn't see duplicates",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. If there could be multiple candidate parent tasks, please confirm the parent task with the user before creating the task. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool to use the current_date to calculate the due date in YYYY-MM-DD format to use as a parameter here. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. DO NOT use this tool to update an existing task - use update_asana_task instead.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -392,8 +411,8 @@ asana_tools = [
     },
     {
         "type": "custom",
-        "name": "change_task_parent",
-        "description": "Change the parent task of an existing task. If new_parent_gid is None, the task will become a standalone task (no parent). You MUST use this tool if you are changing the parent task of an existing task, or else you will end up creating a duplicate task by accident.",
+        "name": "update_asana_task",
+        "description": "Update one or more fields of an existing Asana task. You can update the task name, due date, notes, completion status, and/or parent in a single call. Only provide the fields you want to change - all parameters are optional. If the user specifies a specific due date (e.g. two weeks from now), you MUST use the get_current_date tool to calculate the due date in YYYY-MM-DD format. To mark a task as complete, set completed to true. To remove a parent (make it a standalone task), set parent_gid to null.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -401,31 +420,28 @@ asana_tools = [
                     "type": "string",
                     "description": "The GID of the task to update"
                 },
-                "new_parent_gid": {
+                "name": {
                     "type": "string",
-                    "description": "The GID of the new parent task. If None, the task will become a standalone task."
+                    "description": "New name for the task (optional)"
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "New due date in YYYY-MM-DD format (optional)"
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "New notes/description for the task (optional)"
+                },
+                "completed": {
+                    "type": "boolean",
+                    "description": "Set to true to mark task as complete, false to mark as incomplete (optional)"
+                },
+                "parent_gid": {
+                    "type": "string",
+                    "description": "New parent task GID. Set to null to remove parent and make it a standalone task (optional)"
                 }
             },
             "required": ["task_gid"]
-        }
-    },
-    {
-        "type": "custom",
-        "name": "update_task_due_date",
-        "description": "Update the due date of an existing Asana task. If you need to calculate the due date, please use the get_current_date tool to calculate the due date in YYYY-MM-DD format to use as a parameter here.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_gid": {
-                    "type": "string",
-                    "description": "The GID of the task to update"
-                },
-                "new_due_date": {
-                    "type": "string",
-                    "description": "The new due date in YYYY-MM-DD format"
-                }
-            },
-            "required": ["task_gid", "new_due_date"]
         }
     },
     {
