@@ -90,7 +90,7 @@ async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = N
                 logger.warning(f"Failed to geocode location '{location}': {error_msg}")
                 return {
                     "success": False,
-                    "error": f"Could not find location '{location}': {error_msg}"
+                    "error": f"Could not find location '{location}'. Is it a location name that needs to be defined by save_location tool, such as 'home' or 'work'? : {error_msg}"
                 }
 
             latitude = geocode_result["latitude"]
