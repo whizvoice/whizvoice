@@ -16,7 +16,7 @@ from pathlib import Path
 import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
-from anthropic import AsyncAnthropic, AuthenticationError
+from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, update_asana_task, delete_asana_task
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
@@ -4073,14 +4073,63 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "conversation_id": session_conversation_id,
                     "reason": "Stream cancelled by newer request"
                 })
-                
+
                 # Clean up the stream tracking
                 if redis_managers and "local_objects" in redis_managers:
                     await redis_managers["local_objects"].remove_stream(request_id)
-                
+
                 # Don't send error to client - they already got an interrupt notification
                 return session_conversation_id
-            
+
+            # Check if this is a tool_use_id mismatch error (conversation history corrupted)
+            is_tool_use_id_error = (
+                isinstance(api_error, BadRequestError) and
+                ("tool_use_id" in str(api_error).lower() or "unexpected tool_use_id" in str(api_error).lower())
+            )
+
+            if is_tool_use_id_error:
+                logger.error(f"Claude API tool_use_id mismatch error for request {request_id}: {str(api_error)}")
+                logger.error(f"Conversation history corrupted - cannot continue")
+                await set_request_state(request_id, "history_error", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "error": str(api_error)
+                })
+
+                # Create error message for user
+                error_message = "I'm sorry, but this conversation has encountered a technical issue with the message history that prevents me from continuing. Please start a new conversation."
+
+                # Create error payload
+                error_payload = {
+                    "type": "message",
+                    "message": error_message,
+                    "request_id": request_id,
+                    "conversation_id": session_conversation_id,
+                    "client_conversation_id": client_conversation_id
+                }
+
+                # Save error as ASSISTANT message to database
+                logger.info(f"Saving conversation history error as ASSISTANT message for conversation {session_conversation_id}")
+                save_result = save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content=error_message,
+                    message_sender="ASSISTANT",
+                    request_id=request_id,
+                    content_type="text"
+                )
+                if save_result:
+                    saved_conversation_id, error_message_id = save_result
+                    logger.info(f"Conversation history error saved as message {error_message_id} in conversation {saved_conversation_id}")
+                else:
+                    logger.error(f"Failed to save conversation history error message to database")
+
+                # Try to send via WebSocket
+                await safe_websocket_send(error_payload)
+
+                # Don't raise - let the client handle the error gracefully
+                return session_conversation_id
+
             logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
             logger.error(f"Error type: {type(api_error).__name__}")
             logger.error(f"Error details: {repr(api_error)}")
