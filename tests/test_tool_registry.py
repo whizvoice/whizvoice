@@ -22,8 +22,8 @@ class TestToolRegistry(unittest.TestCase):
         expected_tools = [
             "get_asana_workspaces", "get_asana_tasks", "get_current_date",
             "get_parent_tasks", "create_asana_task", "set_workspace_preference",
-            "get_workspace_preference", "change_task_parent", "update_task_due_date",
-            "get_app_info"
+            "get_workspace_preference", "update_asana_task", "delete_asana_task",
+            "get_app_info", "set_temperature_units"
         ]
         
         for tool_name in expected_tools:
@@ -55,7 +55,7 @@ class TestToolRegistry(unittest.TestCase):
         protected_tools = [
             "get_asana_workspaces", "get_asana_tasks", "get_parent_tasks",
             "create_asana_task", "set_workspace_preference", "get_workspace_preference",
-            "change_task_parent", "update_task_due_date"
+            "update_asana_task", "delete_asana_task", "set_temperature_units"
         ]
         
         for tool_name in public_tools:
