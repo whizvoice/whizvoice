@@ -319,25 +319,25 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             message_data["timestamp"] = client_timestamp
             logger.info(f"Using client-provided timestamp for USER message: {client_timestamp}")
 
-        # For ASSISTANT messages with request_id, set timestamp to be right after the USER message
-        # This ensures the response appears immediately after the user message it's responding to
+        # For ASSISTANT messages with request_id, set timestamp to be right after all other messages in this request
+        # This ensures proper message ordering: text_before -> tool_use -> tool_result -> text_after
         if message_sender == "ASSISTANT" and request_id:
-            # Find the USER message with this request_id
-            user_msg_result = supabase.table("messages")\
+            # Find ALL messages with this request_id to determine the max timestamp
+            all_msgs_result = supabase.table("messages")\
                 .select("timestamp")\
                 .eq("conversation_id", conversation_id)\
                 .eq("request_id", request_id)\
-                .eq("message_sender", "USER")\
                 .execute()
 
-            if user_msg_result.data:
-                user_timestamp = user_msg_result.data[0]["timestamp"]
+            if all_msgs_result.data:
+                # Find the maximum timestamp among all messages in this request
+                max_timestamp = max(msg["timestamp"] for msg in all_msgs_result.data)
                 # Parse the timestamp and add 1ms
 
                 # Fix: Normalize timestamp format from Supabase
                 # Supabase sometimes returns timestamps with varying microsecond precision (4-6 digits)
                 # Python's fromisoformat expects exactly 6 digits for microseconds
-                timestamp_str = user_timestamp.replace('Z', '+00:00')
+                timestamp_str = max_timestamp.replace('Z', '+00:00')
 
                 # Check if timestamp has microseconds and normalize to 6 digits
                 if '.' in timestamp_str:
@@ -355,13 +355,13 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                             frac = frac.ljust(6, '0')[:6]
                             timestamp_str = f"{parts[0]}.{frac}-{tz}"
 
-                user_dt = datetime.fromisoformat(timestamp_str)
-                assistant_dt = user_dt + timedelta(milliseconds=1)
+                max_dt = datetime.fromisoformat(timestamp_str)
+                assistant_dt = max_dt + timedelta(milliseconds=1)
                 # Format as ISO string with timezone
                 message_data["timestamp"] = assistant_dt.isoformat().replace('+00:00', 'Z')
-                logger.info(f"Setting ASSISTANT message timestamp to {message_data['timestamp']} (1ms after USER message at {user_timestamp})")
+                logger.info(f"Setting ASSISTANT message timestamp to {message_data['timestamp']} (1ms after max timestamp {max_timestamp} in request)")
             else:
-                logger.warning(f"No USER message found with request_id {request_id}, using default timestamp")
+                logger.warning(f"No messages found with request_id {request_id}, using default timestamp")
 
         # Debug: Log exactly what we're sending to Supabase
         if "timestamp" in message_data:
