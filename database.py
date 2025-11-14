@@ -56,6 +56,10 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         current_group = None  # (role, content_blocks)
 
         for row in result.data:
+            # Skip cancelled messages
+            if row.get("cancelled"):
+                continue
+
             message_role = "user" if row["message_sender"] == "USER" else "assistant"
 
             # Determine if this row belongs to current group (same role)
@@ -273,11 +277,13 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
 
         # For ASSISTANT messages with request_id, mark any previous ASSISTANT messages with the same request_id as cancelled
         # This handles the case where streaming responses create multiple intermediate messages
+        # IMPORTANT: We never cancel tool_use or tool_result messages, as they represent actual tool executions
         if message_sender == "ASSISTANT" and request_id:
             try:
                 # Find all previous ASSISTANT messages with this request_id that aren't already cancelled
+                # Exclude tool_use and tool_result messages from cancellation
                 previous_messages = supabase.table("messages")\
-                    .select("id")\
+                    .select("id, content_type")\
                     .eq("conversation_id", conversation_id)\
                     .eq("request_id", request_id)\
                     .eq("message_sender", "ASSISTANT")\
@@ -285,65 +291,25 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                     .execute()
 
                 if previous_messages.data:
-                    # Mark all previous messages as cancelled
-                    message_ids = [msg["id"] for msg in previous_messages.data]
-                    logger.info(f"Marking {len(message_ids)} previous ASSISTANT message(s) as cancelled for request_id={request_id}: {message_ids}")
+                    # Filter out tool_use and tool_result messages - we never cancel these
+                    messages_to_cancel = [
+                        msg["id"] for msg in previous_messages.data
+                        if msg.get("content_type") not in ["tool_use", "tool_result"]
+                    ]
 
-                    # First, get the full message data to extract tool_use IDs
-                    cancelled_tool_use_ids = set()
-                    for msg_id in message_ids:
-                        msg_data = supabase.table("messages")\
-                            .select("tool_content")\
-                            .eq("id", msg_id)\
-                            .execute()
+                    if messages_to_cancel:
+                        logger.info(f"Marking {len(messages_to_cancel)} previous ASSISTANT message(s) as cancelled for request_id={request_id}: {messages_to_cancel}")
 
-                        if msg_data.data:
-                            msg_tool_content = msg_data.data[0].get('tool_content')
-                            if msg_tool_content:
-                                for block in msg_tool_content:
-                                    if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
-                                        cancelled_tool_use_ids.add(block['id'])
+                        # Cancel the ASSISTANT messages (excluding tool_use and tool_result)
+                        for msg_id in messages_to_cancel:
+                            supabase.table("messages")\
+                                .update({"cancelled": "now()"})\
+                                .eq("id", msg_id)\
+                                .execute()
 
-                    # Cancel the ASSISTANT messages
-                    for msg_id in message_ids:
-                        supabase.table("messages")\
-                            .update({"cancelled": "now()"})\
-                            .eq("id", msg_id)\
-                            .execute()
-
-                    logger.info(f"Successfully marked {len(message_ids)} previous ASSISTANT message(s) as cancelled")
-
-                    # Also cancel any orphaned tool_result messages for these tool_use IDs
-                    if cancelled_tool_use_ids:
-                        logger.info(f"Looking for orphaned tool_result messages for cancelled tool_use IDs: {cancelled_tool_use_ids}")
-
-                        # Find all tool_result messages in this conversation
-                        tool_results = supabase.table("messages")\
-                            .select("id, tool_content")\
-                            .eq("conversation_id", conversation_id)\
-                            .eq("content_type", "tool_result")\
-                            .is_("cancelled", "null")\
-                            .execute()
-
-                        orphaned_result_ids = []
-                        if tool_results.data:
-                            for result_msg in tool_results.data:
-                                result_tool_content = result_msg.get('tool_content')
-                                if result_tool_content:
-                                    for block in result_tool_content:
-                                        if isinstance(block, dict) and block.get('tool_use_id') in cancelled_tool_use_ids:
-                                            orphaned_result_ids.append(result_msg['id'])
-                                            break
-
-                        # Cancel the orphaned tool_result messages
-                        if orphaned_result_ids:
-                            logger.info(f"Cancelling {len(orphaned_result_ids)} orphaned tool_result message(s): {orphaned_result_ids}")
-                            for result_id in orphaned_result_ids:
-                                supabase.table("messages")\
-                                    .update({"cancelled": "now()"})\
-                                    .eq("id", result_id)\
-                                    .execute()
-                            logger.info(f"Successfully cancelled {len(orphaned_result_ids)} orphaned tool_result message(s)")
+                        logger.info(f"Successfully marked {len(messages_to_cancel)} previous ASSISTANT message(s) as cancelled")
+                    else:
+                        logger.info(f"No messages to cancel for request_id={request_id} (only tool_use/tool_result messages found)")
             except Exception as e:
                 logger.error(f"Error marking previous ASSISTANT messages as cancelled for request_id={request_id}: {e}")
 
@@ -493,38 +459,6 @@ def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_cont
             return False
 
         message_id = message_to_update["id"]
-
-        # If the tool_result was cancelled, we need to uncancel it and the corresponding tool_use
-        # because the tool actually executed and returned a result
-        if message_to_update.get("cancelled"):
-            logger.info(f"Tool_result for tool_use_id={tool_use_id} was cancelled, but tool executed. Uncancelling both tool_use and tool_result")
-
-            # Uncancel the tool_result
-            supabase.table("messages")\
-                .update({"cancelled": None})\
-                .eq("id", message_id)\
-                .execute()
-
-            # Find and uncancel the corresponding tool_use message
-            tool_use_result = supabase.table("messages")\
-                .select("id, tool_content")\
-                .eq("conversation_id", conversation_id)\
-                .eq("content_type", "tool_use")\
-                .execute()
-
-            if tool_use_result.data:
-                for tool_use_msg in tool_use_result.data:
-                    tool_content = tool_use_msg.get("tool_content", [])
-                    if isinstance(tool_content, list):
-                        for block in tool_content:
-                            if isinstance(block, dict) and block.get("id") == tool_use_id:
-                                # Found the matching tool_use, uncancel it
-                                supabase.table("messages")\
-                                    .update({"cancelled": None})\
-                                    .eq("id", tool_use_msg["id"])\
-                                    .execute()
-                                logger.info(f"Uncancelled tool_use message {tool_use_msg['id']} for tool_use_id={tool_use_id}")
-                                break
 
         # Update the tool_content with the actual result
         updated_tool_content = [{

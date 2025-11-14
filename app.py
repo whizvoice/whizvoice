@@ -4081,55 +4081,53 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Don't send error to client - they already got an interrupt notification
                 return session_conversation_id
 
-            # Check if this is a tool_use_id mismatch error (conversation history corrupted)
-            is_tool_use_id_error = (
-                isinstance(api_error, BadRequestError) and
-                ("tool_use_id" in str(api_error).lower() or "unexpected tool_use_id" in str(api_error).lower())
-            )
-
-            if is_tool_use_id_error:
-                logger.error(f"Claude API tool_use_id mismatch error for request {request_id}: {str(api_error)}")
-                logger.error(f"Conversation history corrupted - cannot continue")
-                await set_request_state(request_id, "history_error", {
+            # Handle BadRequestError (400) from Claude API
+            if isinstance(api_error, BadRequestError):
+                logger.error(f"Claude API BadRequest (400) for request {request_id}: {str(api_error)}")
+                await set_request_state(request_id, "bad_request_error", {
                     "session_id": session_id,
                     "conversation_id": session_conversation_id,
                     "error": str(api_error)
                 })
 
-                # Create error message for user
-                error_message = "I'm sorry, but this conversation has encountered a technical issue with the message history that prevents me from continuing. Please start a new conversation."
+                # Create user-friendly error message
+                error_message = "I encountered an error processing your message. This might be due to a technical issue with the conversation history. Please try starting a new conversation."
 
                 # Create error payload
                 error_payload = {
-                    "type": "message",
+                    "type": "error",
+                    "code": "CLAUDE_API_ERROR",
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_conversation_id": client_conversation_id
+                    "client_conversation_id": client_conversation_id,
+                    "client_message_id": client_message_id
                 }
 
-                # Save error as ASSISTANT message to database
-                logger.info(f"Saving conversation history error as ASSISTANT message for conversation {session_conversation_id}")
+                # Save error as ASSISTANT message to database (persists even if WebSocket fails)
+                logger.info(f"Saving BadRequest error as ASSISTANT message for conversation {session_conversation_id}")
+                error_json_content = json.dumps(error_payload)
                 save_result = save_message_to_db(
                     user_id=user_id,
                     conversation_id=session_conversation_id,
-                    content=error_message,
+                    content=error_json_content,
                     message_sender="ASSISTANT",
                     request_id=request_id,
                     content_type="text"
                 )
                 if save_result:
                     saved_conversation_id, error_message_id = save_result
-                    logger.info(f"Conversation history error saved as message {error_message_id} in conversation {saved_conversation_id}")
+                    logger.info(f"BadRequest error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 else:
-                    logger.error(f"Failed to save conversation history error message to database")
+                    logger.error(f"Failed to save BadRequest error message to database")
 
-                # Try to send via WebSocket
+                # Try to send via WebSocket (may fail, but error is persisted in DB)
                 await safe_websocket_send(error_payload)
 
                 # Don't raise - let the client handle the error gracefully
                 return session_conversation_id
 
+            # Handle other API errors
             logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
             logger.error(f"Error type: {type(api_error).__name__}")
             logger.error(f"Error details: {repr(api_error)}")
@@ -4141,7 +4139,42 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "conversation_id": session_conversation_id,
                 "error": str(api_error)
             })
-            raise
+
+            # For other errors, save generic error message to database
+            error_message = "An unexpected error occurred. Please try again."
+            error_payload = {
+                "type": "error",
+                "code": "INTERNAL_ERROR",
+                "message": error_message,
+                "request_id": request_id,
+                "conversation_id": session_conversation_id,
+                "client_conversation_id": client_conversation_id,
+                "client_message_id": client_message_id
+            }
+
+            # Save error to database
+            logger.info(f"Saving generic error as ASSISTANT message for conversation {session_conversation_id}")
+            error_json_content = json.dumps(error_payload)
+            try:
+                save_result = save_message_to_db(
+                    user_id=user_id,
+                    conversation_id=session_conversation_id,
+                    content=error_json_content,
+                    message_sender="ASSISTANT",
+                    request_id=request_id,
+                    content_type="text"
+                )
+                if save_result:
+                    saved_conversation_id, error_message_id = save_result
+                    logger.info(f"Generic error saved as message {error_message_id} in conversation {saved_conversation_id}")
+            except Exception as save_error:
+                logger.error(f"Failed to save generic error message to database: {save_error}")
+
+            # Try to send via WebSocket
+            await safe_websocket_send(error_payload)
+
+            # Don't raise - error has been handled
+            return session_conversation_id
 
         # Check for cancellation after API call
         if asyncio.current_task().cancelled():
@@ -4623,20 +4656,24 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.info(f"No text content in Claude's response for request {request_id}, only tool calls. This is normal for tool-only responses.")
 
         if not request_cancelled:
-            # Send structured response with request_id and conversation_id
-            # Even if assistant_response_text is empty, we send the response to acknowledge completion
-            response_payload = {
-                "response": assistant_response_text,
-                "request_id": request_id,
-                "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
-                "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
-                "client_message_id": client_message_id,  # Echo back optimistic message ID
-                "type": "response"  # Indicate this is a direct response (vs broadcast)
-            }
-            if await safe_websocket_send(response_payload):
-                logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
+            # Only send response if there's actual text content
+            # Empty responses create blank message bubbles in the Android app
+            if assistant_response_text and assistant_response_text.strip():
+                # Send structured response with request_id and conversation_id
+                response_payload = {
+                    "response": assistant_response_text,
+                    "request_id": request_id,
+                    "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
+                    "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
+                    "client_message_id": client_message_id,  # Echo back optimistic message ID
+                    "type": "response"  # Indicate this is a direct response (vs broadcast)
+                }
+                if await safe_websocket_send(response_payload):
+                    logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
+                else:
+                    logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
             else:
-                logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
+                logger.info(f"Skipping empty response broadcast for tool-only response (request {request_id})")
 
         # Clean up old request tracking data
         # Do this after saving the bot response to ensure we have the latest message IDs
@@ -4692,15 +4729,48 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         return session_conversation_id
     
     except Exception as e:
-        # Track any other errors
-        logger.error(f"Error processing request {request_id}: {str(e)}")
+        # This is a catch-all for any errors that weren't handled by specific handlers above
+        # Should be rare, but ensures user always gets feedback
+        logger.error(f"Unexpected error processing request {request_id}: {str(e)}")
+        logger.error(f"This error should have been caught by a specific handler - please investigate")
         await set_request_state(request_id, "failed", {
             "session_id": session_id,
             "conversation_id": session_conversation_id,
             "error": str(e),
             "error_time": time.time()
         })
-        raise
+
+        # Send error message to user
+        error_message = "An unexpected error occurred. Please try again."
+        error_payload = {
+            "type": "error",
+            "code": "UNEXPECTED_ERROR",
+            "message": error_message,
+            "request_id": request_id,
+            "conversation_id": session_conversation_id,
+            "client_conversation_id": client_conversation_id,
+            "client_message_id": client_message_id
+        }
+
+        # Try to save to database
+        error_json_content = json.dumps(error_payload)
+        try:
+            save_message_to_db(
+                user_id=user_id,
+                conversation_id=session_conversation_id,
+                content=error_json_content,
+                message_sender="ASSISTANT",
+                request_id=request_id,
+                content_type="text"
+            )
+        except Exception as save_error:
+            logger.error(f"Failed to save unexpected error to database: {save_error}")
+
+        # Try to send via WebSocket
+        await safe_websocket_send(error_payload)
+
+        # Don't raise - error has been handled
+        return session_conversation_id
         
     finally:
         # Clean up tracking
