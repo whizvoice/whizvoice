@@ -202,7 +202,10 @@ def create_asana_task(user_id: str, name, due_date=None, notes=None, parent_task
         else:
             new_task = tasks_api.create_subtask_for_task(body={'data': task_data}, task_gid=parent_task_gid, opts={'opt_fields': 'gid,name,due_on,completed,projects.name'})
 
-        return dict(new_task)
+        # Convert to dict and add reminder message
+        result = dict(new_task)
+        result['_reminder'] = "Task created successfully. If this task supersedes an older task you already created, please be sure to delete the old one so the user doesn't see duplicates."
+        return result
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
         raise
