@@ -298,9 +298,9 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                             .execute()
 
                         if msg_data.data:
-                            tool_content = msg_data.data[0].get('tool_content')
-                            if tool_content:
-                                for block in tool_content:
+                            msg_tool_content = msg_data.data[0].get('tool_content')
+                            if msg_tool_content:
+                                for block in msg_tool_content:
                                     if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
                                         cancelled_tool_use_ids.add(block['id'])
 
@@ -328,9 +328,9 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                         orphaned_result_ids = []
                         if tool_results.data:
                             for result_msg in tool_results.data:
-                                tool_content = result_msg.get('tool_content')
-                                if tool_content:
-                                    for block in tool_content:
+                                result_tool_content = result_msg.get('tool_content')
+                                if result_tool_content:
+                                    for block in result_tool_content:
                                         if isinstance(block, dict) and block.get('tool_use_id') in cancelled_tool_use_ids:
                                             orphaned_result_ids.append(result_msg['id'])
                                             break
