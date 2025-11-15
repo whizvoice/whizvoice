@@ -50,10 +50,13 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
 
         # Convert database messages to Claude format
-        # Group consecutive messages by role ONLY (not request_id) to ensure proper alternation
-        # This is critical because Claude API requires strict user/assistant alternation
+        # Group consecutive messages by role with special handling for tool boundaries
+        # This is critical because:
+        # 1. Claude API requires strict user/assistant alternation
+        # 2. ASSISTANT messages with tool_use must be followed by USER tool_results
+        # 3. USER messages should only be merged if they share the same request_id
         claude_messages = []
-        current_group = None  # (role, content_blocks)
+        current_group = None  # (role, request_id, content_blocks)
 
         for row in result.data:
             # Skip cancelled messages
@@ -61,28 +64,49 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 continue
 
             message_role = "user" if row["message_sender"] == "USER" else "assistant"
+            row_request_id = row.get("request_id")
 
-            # Determine if this row belongs to current group (same role)
-            should_group = (
-                current_group is not None and
-                message_role == current_group[0]
-            )
+            # Check if current row contains a tool_use block
+            has_tool_use = False
+            if row.get("tool_content"):
+                for block in row["tool_content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        has_tool_use = True
+                        break
+
+            # Determine if this row belongs to current group
+            if current_group is not None and message_role == current_group[0]:
+                # Same role - but should we merge?
+                if message_role == "assistant":
+                    # ASSISTANT: Can merge UNLESS the current group already has a tool_use
+                    # Once we have a tool_use, we must close the group (need USER tool_result next)
+                    # But we CAN add text-only messages before hitting the tool_use
+                    should_group = not current_group[3]  # Don't merge if group already has tool_use
+                elif message_role == "user":
+                    # USER: Only merge if same request_id
+                    should_group = (row_request_id == current_group[1])
+                else:
+                    should_group = False
+            else:
+                should_group = False
 
             if should_group:
                 # Add to current group
                 # Handle messages that may have BOTH text content and tool_content
-                # (e.g., tool_use messages with text_before merged)
                 # Text must come before tool_use blocks
                 if row.get("content") and row["content"].strip():
-                    current_group[1].append({"type": "text", "text": row["content"]})
+                    current_group[2].append({"type": "text", "text": row["content"]})
                 if row.get("tool_content"):
-                    current_group[1].extend(row["tool_content"])
+                    current_group[2].extend(row["tool_content"])
+                # Update has_tool_use flag for the group
+                if has_tool_use:
+                    current_group[3] = True
             else:
                 # Flush current group if exists
-                if current_group and current_group[1]:
+                if current_group and current_group[2]:
                     claude_messages.append({
                         "role": current_group[0],
-                        "content": current_group[1]
+                        "content": current_group[2]
                     })
 
                 # Start new group
@@ -94,13 +118,13 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 if row.get("tool_content"):
                     content_blocks.extend(row["tool_content"])
 
-                current_group = [message_role, content_blocks]
+                current_group = [message_role, row_request_id, content_blocks, has_tool_use]
 
         # Flush final group
-        if current_group and current_group[1]:
+        if current_group and current_group[2]:
             claude_messages.append({
                 "role": current_group[0],
-                "content": current_group[1]
+                "content": current_group[2]
             })
 
         return claude_messages

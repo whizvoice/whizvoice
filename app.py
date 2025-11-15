@@ -4329,6 +4329,42 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 else:
                     logger.info(f"✅ Saved tool_use message to database (no text_before): tool={tool_block.name}")
 
+                # Get the actual timestamp of the tool_use message we just saved
+                # This is critical for ensuring the tool_result has the correct timestamp (+1ms after tool_use)
+                if tool_use_save_result:
+                    tool_use_conv_id, tool_use_msg_id = tool_use_save_result
+                    tool_use_msg_result = supabase.table("messages")\
+                        .select("timestamp")\
+                        .eq("id", tool_use_msg_id)\
+                        .execute()
+
+                    if tool_use_msg_result.data:
+                        # Parse the tool_use timestamp and add 1ms for tool_result
+                        tool_use_timestamp_str = tool_use_msg_result.data[0]["timestamp"].replace('Z', '+00:00')
+                        if '.' in tool_use_timestamp_str:
+                            parts = tool_use_timestamp_str.split('.')
+                            if len(parts) == 2:
+                                if '+' in parts[1]:
+                                    frac, tz = parts[1].split('+')
+                                    frac = frac.ljust(6, '0')[:6]
+                                    tool_use_timestamp_str = f"{parts[0]}.{frac}+{tz}"
+                                elif '-' in parts[1]:
+                                    frac, tz = parts[1].split('-')
+                                    frac = frac.ljust(6, '0')[:6]
+                                    tool_use_timestamp_str = f"{parts[0]}.{frac}-{tz}"
+
+                        tool_use_dt = datetime.fromisoformat(tool_use_timestamp_str)
+                        # Calculate tool_result timestamp as tool_use timestamp + 1ms
+                        tool_result_timestamp = (tool_use_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
+                        logger.info(f"Calculated tool_result_timestamp={tool_result_timestamp} (tool_use + 1ms)")
+                    else:
+                        logger.warning(f"Could not retrieve tool_use timestamp for message_id={tool_use_msg_id}, using fallback")
+                        # Fallback to original logic if we can't get the timestamp
+                        tool_result_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
+                else:
+                    logger.warning("tool_use_save_result is None, using fallback timestamp")
+                    tool_result_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
+
                 # Create PENDING tool result (will be updated with actual result later)
                 pending_tool_result_dict = {
                     "type": "tool_result",
