@@ -4306,7 +4306,25 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
             # Save assistant message to Redis BEFORE executing the tool
             # IMPORTANT: Only include text BEFORE tool_use, not after
-            async with chat_sessions_lock:
+            # 🔒 USE DISTRIBUTED REDIS LOCK to prevent race conditions across worker processes
+            # Without this, concurrent requests can read incomplete conversation history
+            lock_key = f"conversation_lock:{session_conversation_id}"
+            lock = None
+
+            try:
+                # Acquire distributed lock - blocks other workers from reading context during tool_use + pending result creation
+                if redis_client:
+                    lock = redis_client.lock(lock_key, timeout=10, blocking_timeout=5)
+                    acquired = await asyncio.to_thread(lock.acquire, blocking=True, blocking_timeout=5)
+                    if not acquired:
+                        logger.error(f"Failed to acquire conversation lock for {session_conversation_id}, falling back to local lock")
+                        lock = None  # Fall back to local lock if Redis lock fails
+
+                # If Redis lock failed or unavailable, use local lock as fallback
+                if lock is None:
+                    logger.warning(f"Using local lock (not distributed) for conversation {session_conversation_id}")
+                    await chat_sessions_lock.acquire()
+
                 # Build assistant content: text_before + tool_use (NO text_after)
                 assistant_content = text_before_tool + [tool_block_dict]
                 await add_chat_message(session_id, {"role": "assistant", "content": assistant_content})
@@ -4385,6 +4403,24 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     client_timestamp=tool_result_timestamp
                 )
                 logger.info(f"✅ Saved PENDING tool_result to database BEFORE execution: tool_use_id={tool_block.id}")
+
+                # Lock will be released in finally block - other workers can now see the pending tool_result
+
+            finally:
+                # Release the distributed lock or local lock
+                if lock is not None and redis_client:
+                    # Redis distributed lock
+                    try:
+                        if lock.owned():
+                            await asyncio.to_thread(lock.release)
+                            logger.debug(f"✅ Released distributed conversation lock for {session_conversation_id}")
+                    except Exception as e:
+                        logger.error(f"Error releasing distributed lock: {e}")
+                elif lock is None and not redis_client:
+                    # Local lock fallback
+                    if chat_sessions_lock.locked():
+                        chat_sessions_lock.release()
+                        logger.debug(f"Released local conversation lock")
 
             # ===== Now execute the tool =====
             try:
