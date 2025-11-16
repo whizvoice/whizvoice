@@ -4315,7 +4315,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Acquire distributed lock - blocks other workers from reading context during tool_use + pending result creation
                 if redis_client:
                     lock = redis_client.lock(lock_key, timeout=10, blocking_timeout=5)
-                    acquired = await asyncio.to_thread(lock.acquire, blocking=True, blocking_timeout=5)
+                    acquired = await lock.acquire(blocking=True, blocking_timeout=5)
                     if not acquired:
                         logger.error(f"Failed to acquire conversation lock for {session_conversation_id}, falling back to local lock")
                         lock = None  # Fall back to local lock if Redis lock fails
@@ -4411,8 +4411,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 if lock is not None and redis_client:
                     # Redis distributed lock
                     try:
-                        if lock.owned():
-                            await asyncio.to_thread(lock.release)
+                        is_owned = await lock.owned()
+                        if is_owned:
+                            await lock.release()
                             logger.debug(f"✅ Released distributed conversation lock for {session_conversation_id}")
                     except Exception as e:
                         logger.error(f"Error releasing distributed lock: {e}")
