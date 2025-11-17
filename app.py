@@ -3662,30 +3662,27 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         "conversation_id": real_conversation_id
                     }
                     await safe_websocket_send(error_payload)
-        
-        # CRITICAL FIX: Update WebSocket listener IMMEDIATELY when conversation ID changes
-        # This must happen BEFORE we start broadcasting to the new conversation ID
+
+        # NO LONGER MIGRATING WEBSOCKET: The WebSocket stays subscribed to its original ID
+        # Broadcasting already handles sending to both optimistic and real conversation IDs
+        # This prevents the WebSocket from being closed during optimistic->real ID migration
         if real_conversation_id and real_conversation_id != session_conversation_id:
-            logger.info(f"Conversation ID changed from {session_conversation_id} to {real_conversation_id}, updating WebSocket listener immediately")
-            try:
-                # This moves the WebSocket registration from old to new conversation ID
-                # The updated register_conversation_websocket method now automatically removes
-                # the optimistic registration when registering with a real ID, preventing duplicates
-                await update_websocket_conversation(session_id, session_conversation_id, real_conversation_id, websocket)
-            except Exception as e:
-                logger.error(f"Failed to update WebSocket conversation, continuing with original: {str(e)}")
-                # Don't fail the entire message processing if the update fails
-        
-        # Use real conversation ID for rest of processing
-        session_conversation_id = real_conversation_id
+            logger.info(f"Mapped optimistic ID {session_conversation_id} → real ID {real_conversation_id}")
+            # DON'T call update_websocket_conversation() - leave the WebSocket on its original ID
+            # The broadcast system will send messages to both the optimistic and real conversation IDs
+
+        # Use real conversation ID for all database operations and message processing
+        # The WebSocket remains subscribed to session_conversation_id (which may be optimistic)
+        # but we use real_conversation_id for everything else
+        processing_conversation_id = real_conversation_id if real_conversation_id else session_conversation_id
 
         # Wait for any pending tool executions to complete before processing new message
         # This prevents race conditions where new messages arrive while tools are still executing
-        if session_conversation_id:
-            pending_count = await get_pending_tools_count(session_conversation_id)
+        if processing_conversation_id:
+            pending_count = await get_pending_tools_count(processing_conversation_id)
             if pending_count > 0:
                 logger.info(f"Waiting for {pending_count} pending tool(s) to complete before processing new message")
-                tools_completed = await wait_for_pending_tools(session_conversation_id, timeout_seconds=5.0)
+                tools_completed = await wait_for_pending_tools(processing_conversation_id, timeout_seconds=5.0)
                 if tools_completed:
                     logger.info(f"Pending tools completed, will reload history from database")
                 else:
@@ -3698,13 +3695,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # CRITICAL: For new conversations, check if we need to load existing messages first
                 # This handles the case where multiple messages were queued offline
                 current_messages = await get_chat_messages(session_id)
-                if len(current_messages) == 0 and session_conversation_id:
+                if len(current_messages) == 0 and processing_conversation_id:
                     # Try to load any existing messages from the database
-                    logger.info(f"Loading existing messages for conversation {session_conversation_id} before adding new message")
+                    logger.info(f"Loading existing messages for conversation {processing_conversation_id} before adding new message")
                     try:
                         query = supabase.table("messages")\
                             .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
-                            .eq("conversation_id", session_conversation_id)\
+                            .eq("conversation_id", processing_conversation_id)\
                             .order("timestamp", desc=False)
 
                         response = query.execute()
@@ -3761,7 +3758,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # subsequent user messages, and the tool_result will remain first in the merged content
                 # Now add the current message
                 await asyncio.shield(add_chat_message(session_id, {"role": "user", "content": message}))
-                logger.info(f"Added current message to Redis session for conversation {session_conversation_id}")
+                logger.info(f"Added current message to Redis session for conversation {processing_conversation_id}")
 
                 # CRITICAL: After adding message, check if Redis now has incomplete tool_use blocks
                 # This handles race condition where tool_result was just saved to DB but not in Redis
@@ -3797,12 +3794,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         break
 
                 # If Redis has incomplete tools after adding message, reload from DB
-                if has_incomplete_after_add and session_conversation_id:
-                    logger.warning(f"Redis has incomplete tool_use after adding message, reloading from database for conversation {session_conversation_id}")
+                if has_incomplete_after_add and processing_conversation_id:
+                    logger.warning(f"Redis has incomplete tool_use after adding message, reloading from database for conversation {processing_conversation_id}")
                     try:
                         query = supabase.table("messages")\
                             .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
-                            .eq("conversation_id", session_conversation_id)\
+                            .eq("conversation_id", processing_conversation_id)\
                             .order("timestamp", desc=False)
 
                         response = query.execute()
@@ -3932,7 +3929,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # call_claude_api returns a coroutine that when awaited gives us either:
             # - AsyncStream (when stream=True)
             # - Message response (when stream=False)
-            api_coroutine = await call_claude_api(current_anthropic_client, session_id, conversation_id=session_conversation_id)
+            # Use processing_conversation_id for database operations
+            api_coroutine = await call_claude_api(current_anthropic_client, session_id, conversation_id=processing_conversation_id)
             
             # The coroutine needs to be awaited to get the actual response
             # Create a task so it can be cancelled if needed
@@ -4780,14 +4778,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         broadcast_payload = {
             "response": assistant_response_text,
             "request_id": request_id,  # Include request_id so clients can track the message
-            "conversation_id": session_conversation_id,
+            "conversation_id": processing_conversation_id,  # Send the real conversation ID
             "client_conversation_id": client_conversation_id,  # Include for client validation
             "client_message_id": client_message_id,  # Include for completeness
             "type": "broadcast"  # Keep type to indicate it's a broadcast
         }
         # Bot responses should go to ALL sessions - they originate from the server, not from any client session
-        await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
-        logger.info(f"Broadcasted assistant message to all sessions for conversation {session_conversation_id}")
+        # Broadcast using the real conversation ID - the broadcast function will also send to optimistic ID
+        await broadcast_to_conversation(processing_conversation_id, broadcast_payload, exclude_session=None)
+        logger.info(f"Broadcasted assistant message to all sessions for conversation {processing_conversation_id}")
 
         return session_conversation_id
     
