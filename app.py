@@ -3867,21 +3867,22 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         except Exception as e:
             logger.error(f"Failed to add message to Redis: {e}")
             # Continue anyway - better to process without full context than to fail
-        
+
         # Track which message IDs this request is responding to
-        user_message_ids = get_user_message_ids_since_last_bot(session_conversation_id)
+        # Use processing_conversation_id for database queries
+        user_message_ids = get_user_message_ids_since_last_bot(processing_conversation_id)
         if redis_managers and "request_messages" in redis_managers:
             await redis_managers["request_messages"].set_messages(
-                request_id, user_message_ids, session_conversation_id
+                request_id, user_message_ids, processing_conversation_id
             )
             logger.info(f"Tracking request {request_id} responding to message IDs: {user_message_ids}")
-        
+
         # Detect and cancel subset requests
         cancelled_requests = await detect_and_cancel_subset_requests(
-            session_conversation_id, user_message_ids, websocket, session_id
+            processing_conversation_id, user_message_ids, websocket, session_id
         )
         if cancelled_requests:
-            logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {session_conversation_id}")
+            logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {processing_conversation_id}")
 
         # Check if this task has been marked for cancellation AFTER critical housekeeping
         # All important work (DB save, Redis add) is done, safe to exit if cancelled
