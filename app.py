@@ -4737,7 +4737,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 response_payload = {
                     "response": assistant_response_text,
                     "request_id": request_id,
-                    "conversation_id": session_conversation_id,  # Include real conversation_id for client sync
+                    "conversation_id": saved_conversation_id,  # Include real conversation_id for client sync (resolved from optimistic if needed)
                     "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
                     "client_message_id": client_message_id,  # Echo back optimistic message ID
                     "type": "response"  # Indicate this is a direct response (vs broadcast)
