@@ -22,7 +22,7 @@ from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
 from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message, sms_select_chat, sms_draft_message, sms_send_message
 from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
-from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, select_location_from_list
+from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, fullscreen_google_maps, select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
 from weather_tools import weather_tools, get_weather, set_temperature_units
@@ -928,6 +928,19 @@ TOOL_REGISTRY = {
     },
     "recenter_google_maps": {
         "function_name": "recenter_google_maps",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "fullscreen_google_maps": {
+        "function_name": "fullscreen_google_maps",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,

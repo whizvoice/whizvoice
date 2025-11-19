@@ -388,6 +388,94 @@ async def select_location_from_list(position: Optional[int] = None, fragment: Op
         }
 
 
+async def fullscreen_google_maps(user_id: str = None, websocket = None,
+                                 tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Bring Google Maps to fullscreen/foreground when it's running in the background or shown as a small overlay.
+
+    Args:
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the fullscreen operation
+    """
+    try:
+        # Generate a unique request ID for tracking
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Fullscreening Google Maps (user: {user_id}, request: {tool_request_id})")
+
+        # If no WebSocket provided, return error
+        if not websocket:
+            logger.error("No WebSocket connection available for Google Maps fullscreen")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        # Create the WebSocket message for the Android app
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "fullscreen_google_maps",
+            "request_id": tool_request_id,
+            "params": {},
+            "conversation_id": conversation_id
+        }
+
+        # Send to Android app via WebSocket
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending Google Maps fullscreen message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent fullscreen_google_maps command")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        # If we have a tool_result_handler, wait for the result
+        if tool_result_handler:
+            logger.info(f"Waiting for Google Maps fullscreen result from Android device (request_id: {tool_request_id})")
+
+            try:
+                # Wait for tool result with timeout (10 seconds for fullscreen operation)
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=10.0
+                )
+
+                logger.info(f"Google Maps fullscreen result for {tool_request_id}: {result}")
+                return result
+
+            except Exception as e:
+                logger.error(f"Error waiting for Google Maps fullscreen result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            # If no handler, just return success after sending
+            return {
+                "status": "sent",
+                "message": "Command to fullscreen map sent to device",
+                "request_id": tool_request_id
+            }
+
+    except Exception as e:
+        logger.error(f"Error in fullscreen_google_maps for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to fullscreen Google Maps: {str(e)}",
+            "success": False
+        }
+
+
 async def get_google_maps_directions(mode: Optional[str] = None, already_in_directions: bool = False,
                                      user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
@@ -546,6 +634,16 @@ maps_tools = [
         "type": "custom",
         "name": "recenter_google_maps",
         "description": "Re-center the Google Maps view to the user's current location. This is useful during navigation when the user wants to see their current position on the map.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "fullscreen_google_maps",
+        "description": "Bring Google Maps to fullscreen/foreground when it's running in the background or shown as a small overlay. Use this when the user asks you to make Google Maps big or fullscreen.",
         "input_schema": {
             "type": "object",
             "properties": {},
