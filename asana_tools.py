@@ -305,7 +305,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "set_workspace_preference",
-        "description": "Set your preferred Asana workspace. Before setting the workspace preference, please check if a preference is already set using the get_workspace_preference tool. Pass the workspace GID to make it the default. If you do not know the GID please use the get_asana_workspaces tool to get a list of workspaces and their GIDs. If there is more than one, ask the user which is their preferred workspace.",
+        "description": "Set your preferred Asana workspace. This is only necessary if the user hasn't set one yet, or if they want to change the preferred workspace that's set.",
         "input_schema": {
             "type": "object",
             "properties": {
