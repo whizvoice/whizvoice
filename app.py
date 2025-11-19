@@ -4746,6 +4746,21 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
                 else:
                     logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
+
+                # Broadcast to other WebSocket sessions for the same conversation
+                # Use same format as regular response so clients can process it correctly
+                broadcast_payload = {
+                    "response": assistant_response_text,
+                    "request_id": request_id,  # Include request_id so clients can track the message
+                    "conversation_id": processing_conversation_id,  # Send the real conversation ID
+                    "client_conversation_id": client_conversation_id,  # Include for client validation
+                    "client_message_id": client_message_id,  # Include for completeness
+                    "type": "broadcast"  # Keep type to indicate it's a broadcast
+                }
+                # Bot responses should go to ALL sessions - they originate from the server, not from any client session
+                # Broadcast using the real conversation ID - the broadcast function will also send to optimistic ID
+                await broadcast_to_conversation(processing_conversation_id, broadcast_payload, exclude_session=None)
+                logger.info(f"Broadcasted assistant message to all sessions for conversation {processing_conversation_id}")
             else:
                 logger.info(f"Skipping empty response broadcast for tool-only response (request {request_id})")
 
@@ -4773,21 +4788,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             "response_sent": True,
             "completion_time": time.time()
         })
-
-        # Broadcast to other WebSocket sessions for the same conversation
-        # Use same format as regular response so clients can process it correctly
-        broadcast_payload = {
-            "response": assistant_response_text,
-            "request_id": request_id,  # Include request_id so clients can track the message
-            "conversation_id": processing_conversation_id,  # Send the real conversation ID
-            "client_conversation_id": client_conversation_id,  # Include for client validation
-            "client_message_id": client_message_id,  # Include for completeness
-            "type": "broadcast"  # Keep type to indicate it's a broadcast
-        }
-        # Bot responses should go to ALL sessions - they originate from the server, not from any client session
-        # Broadcast using the real conversation ID - the broadcast function will also send to optimistic ID
-        await broadcast_to_conversation(processing_conversation_id, broadcast_payload, exclude_session=None)
-        logger.info(f"Broadcasted assistant message to all sessions for conversation {processing_conversation_id}")
 
         return session_conversation_id
     
