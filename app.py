@@ -123,6 +123,8 @@ Note also that messages sent to you are transcribed from audio, so if it doesn't
 FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *italic*, `code`, code blocks with triple backticks, lists, etc.) to improve readability. The app will render markdown appropriately.
 
 DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. If you, for example, sucessfully sent a message or made a task in Asana, DO NOT do the same thing again so the user does not see duplicates.
+
+PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending...". This will be updated later with the real tool result.
 """
 
 # can concatenate additional tools here if needed
@@ -2404,6 +2406,29 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
             if old_message_ids and old_message_ids.issubset(new_message_ids_set) and old_message_ids != new_message_ids_set:
                 logger.info(f"Request {request_id} (messages {old_message_ids}) is subset of new request (messages {new_message_ids_set})")
 
+                # Check if this request has any tool_use or tool_result messages
+                # If so, DO NOT cancel - we want to preserve the tool execution history
+                try:
+                    # Check for tool_use messages (ASSISTANT with content_type='tool_use')
+                    tool_use_result = supabase.table("messages")\
+                        .select("id")\
+                        .eq("request_id", request_id)\
+                        .eq("content_type", "tool_use")\
+                        .execute()
+
+                    # Check for tool_result messages (USER with content_type='tool_result')
+                    tool_result_result = supabase.table("messages")\
+                        .select("id")\
+                        .eq("request_id", request_id)\
+                        .eq("content_type", "tool_result")\
+                        .execute()
+
+                    if tool_use_result.data or tool_result_result.data:
+                        logger.info(f"Request {request_id} has tool_use or tool_result messages, skipping cancellation to preserve tool execution history")
+                        continue  # Skip cancellation for this request
+                except Exception as e:
+                    logger.error(f"Error checking for tool messages for request {request_id}: {e}")
+
                 # Check if this request has already sent a bot response
                 # Query the database for bot messages with this request_id
                 try:
@@ -4498,6 +4523,56 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     else:
                         logger.error(f"❌ Failed to update database with actual tool_result for tool: {tool_block.name}")
 
+                # After replacing pending result with real result, trigger broadcast
+                # Extract most recent assistant text from conversation history and broadcast it
+                try:
+                    messages = await get_chat_messages(session_id)
+                    broadcast_text = ""
+
+                    # Search backwards for the most recent assistant text
+                    for msg in reversed(messages):
+                        if msg.get("role") == "assistant":
+                            content = msg.get("content", [])
+                            if isinstance(content, list):
+                                for block in content:
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        text = block.get("text", "").strip()
+                                        if text:
+                                            broadcast_text = text
+                                            break
+                            if broadcast_text:
+                                break
+
+                    if broadcast_text:
+                        logger.info(f"Broadcasting assistant message after tool result replacement: '{broadcast_text[:50]}...'")
+
+                        # Send to original WebSocket
+                        response_payload = {
+                            "response": broadcast_text,
+                            "request_id": request_id,
+                            "conversation_id": session_conversation_id,
+                            "client_conversation_id": client_conversation_id,
+                            "client_message_id": client_message_id,
+                            "type": "response"
+                        }
+                        await safe_websocket_send(response_payload)
+
+                        # Broadcast to other sessions
+                        broadcast_payload = {
+                            "response": broadcast_text,
+                            "request_id": request_id,
+                            "conversation_id": session_conversation_id,
+                            "client_conversation_id": client_conversation_id,
+                            "client_message_id": client_message_id,
+                            "type": "broadcast"
+                        }
+                        await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
+                        logger.info(f"✅ Broadcasted assistant message after tool result replacement for request {request_id}")
+                    else:
+                        logger.info(f"No assistant text to broadcast after tool result replacement for request {request_id}")
+                except Exception as e:
+                    logger.error(f"Error broadcasting after tool result replacement: {e}")
+
                 # Save text AFTER tool_use to both Redis and database (if any)
                 # This text should come AFTER the tool_result in the conversation
                 if text_after_tool:
@@ -4742,7 +4817,49 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         else:
             logger.info(f"No text content in Claude's response for request {request_id}, only tool calls. This is normal for tool-only responses.")
 
-        if not request_cancelled:
+        # Check if most recent tool is a pending get_* tool
+        # If so, skip broadcast and wait for real result to trigger it
+        should_skip_broadcast_for_pending_get = False
+        if not assistant_response_text:  # Only check if we don't have text in final response
+            try:
+                messages = await get_chat_messages(session_id)
+                # Search backwards for the most recent tool_use
+                for msg in reversed(messages):
+                    if msg.get("role") == "assistant":
+                        content = msg.get("content", [])
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, dict) and block.get("type") == "tool_use":
+                                    tool_name = block.get("name", "")
+                                    tool_use_id = block.get("id")
+
+                                    # Check if this is a get_* tool
+                                    if tool_name.startswith("get_"):
+                                        # Now check if its tool_result is still pending
+                                        for user_msg in reversed(messages):
+                                            if user_msg.get("role") == "user":
+                                                user_content = user_msg.get("content", [])
+                                                if isinstance(user_content, list):
+                                                    for user_block in user_content:
+                                                        if isinstance(user_block, dict) and \
+                                                           user_block.get("type") == "tool_result" and \
+                                                           user_block.get("tool_use_id") == tool_use_id:
+                                                            # Found the tool_result - check if it's pending
+                                                            result_content = user_block.get("content", "")
+                                                            if result_content == "Result pending...":
+                                                                should_skip_broadcast_for_pending_get = True
+                                                                logger.info(f"Skipping broadcast for request {request_id}: most recent tool {tool_name} has pending result, waiting for real result to trigger broadcast")
+                                                            break
+                                            if should_skip_broadcast_for_pending_get:
+                                                break
+                                    # We found the most recent tool_use, stop searching
+                                    break
+                        if should_skip_broadcast_for_pending_get or (msg.get("role") == "assistant" and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in (content if isinstance(content, list) else []))):
+                            break
+            except Exception as e:
+                logger.error(f"Error checking for pending get_* tool: {e}")
+
+        if not request_cancelled and not should_skip_broadcast_for_pending_get:
             # Only send response if there's actual text content
             # Empty responses create blank message bubbles in the Android app
             if assistant_response_text and assistant_response_text.strip():
