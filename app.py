@@ -4821,7 +4821,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Should be rare, but ensures user always gets feedback
         logger.error(f"Unexpected error processing request {request_id}: {str(e)}")
         logger.error(f"This error should have been caught by a specific handler - please investigate")
-        await set_request_state(request_id, "failed", {
+
+        # Check if this request was already cancelled (e.g., by subset detection)
+        request_state = await get_request_state(request_id)
+        is_cancelled = request_state and request_state.get("state") == "cancelled"
+
+        if is_cancelled:
+            logger.info(f"Request {request_id} was already cancelled - saving error but marking as cancelled")
+
+        await set_request_state(request_id, "failed" if not is_cancelled else "cancelled", {
             "session_id": session_id,
             "conversation_id": session_conversation_id,
             "error": str(e),
@@ -4849,13 +4857,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 content=error_json_content,
                 message_sender="ASSISTANT",
                 request_id=request_id,
-                content_type="text"
+                content_type="text",
+                mark_cancelled=is_cancelled  # Mark as cancelled if request was cancelled
             )
         except Exception as save_error:
             logger.error(f"Failed to save unexpected error to database: {save_error}")
 
-        # Try to send via WebSocket
-        await safe_websocket_send(error_payload)
+        # Try to send via WebSocket (only if not cancelled)
+        if not is_cancelled:
+            await safe_websocket_send(error_payload)
+        else:
+            logger.info(f"Skipping WebSocket send for cancelled request {request_id}")
 
         # Don't raise - error has been handled
         return session_conversation_id

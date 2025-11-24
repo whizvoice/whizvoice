@@ -182,7 +182,7 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         return []
 
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None) -> Optional[Tuple[int, int]]:
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False) -> Optional[Tuple[int, int]]:
     """Save a message to the database and return (conversation_id, message_id)
 
     Args:
@@ -195,6 +195,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         client_timestamp: Optional timestamp from client
         content_type: Type of content - 'text', 'tool_use', 'tool_result', or 'mixed'
         tool_content: Optional JSONB content for tool-related messages
+        mark_cancelled: If True, mark the message as cancelled (for error messages from cancelled requests)
     """
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_conversation_id={client_conversation_id}, content='{content[:50] if content else '(empty)'}...'")
@@ -345,6 +346,11 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             "content_type": content_type,
             "request_id": request_id
         }
+
+        # Mark as cancelled if requested (for error messages from cancelled requests)
+        if mark_cancelled:
+            message_data["cancelled"] = "now()"
+            logger.info(f"Marking message as cancelled for request_id={request_id}")
 
         # Add tool_content if provided
         if tool_content is not None:
