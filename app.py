@@ -3688,6 +3688,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         session_id, client_conversation_id, real_conversation_id
                     )
                     logger.info(f"Mapped optimistic ID {client_conversation_id} → real ID {real_conversation_id}")
+
+                    # Also cache in local_objects for broadcast lookups
+                    if "local_objects" in redis_managers:
+                        await redis_managers["local_objects"].cache_id_mapping(
+                            client_conversation_id, real_conversation_id
+                        )
+                        logger.info(f"Cached mapping in local_objects: {client_conversation_id} → {real_conversation_id}")
                 except ValueError as e:
                     # This shouldn't happen in normal operation, but if it does, log it and continue
                     logger.error(f"Failed to set optimistic mapping: {str(e)}")
