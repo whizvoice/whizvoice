@@ -4523,7 +4523,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     update_success = update_tool_result_in_db(
                         conversation_id=session_conversation_id,
                         tool_use_id=tool_block.id,
-                        result_content=tool_execution_result
+                        result_content=tool_execution_result,
+                        user_id=user_id
                     )
                     if update_success:
                         logger.info(f"✅ Updated database with actual tool_result for tool: {tool_block.name}")

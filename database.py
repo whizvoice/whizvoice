@@ -447,18 +447,42 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         return None
 
 
-def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_content: dict) -> bool:
+def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_content: dict, user_id: int = None) -> bool:
     """Update a pending tool_result message with the actual result
 
     Args:
         conversation_id: The conversation ID containing the tool result message
         tool_use_id: The tool_use_id to identify which tool_result to update
         result_content: The actual tool execution result to replace the pending content
+        user_id: The user ID (required if conversation_id is optimistic/negative)
 
     Returns:
         True if update successful, False otherwise
     """
     try:
+        # Handle optimistic conversation IDs (negative IDs)
+        if conversation_id is not None and conversation_id < 0:
+            if user_id is None:
+                logger.error(f"user_id required to resolve optimistic conversation_id {conversation_id}")
+                return False
+
+            logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
+            # Look up the real conversation using the optimistic_chat_id
+            conv_result = supabase.table("conversations")\
+                .select("id")\
+                .eq("optimistic_chat_id", str(conversation_id))\
+                .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
+                .execute()
+
+            if conv_result.data:
+                real_id = conv_result.data[0]["id"]
+                logger.info(f"Found real conversation ID {real_id} for optimistic ID {conversation_id}")
+                conversation_id = real_id
+            else:
+                logger.error(f"No conversation found for optimistic ID {conversation_id}")
+                return False
+
         logger.info(f"Updating tool_result for tool_use_id={tool_use_id} in conversation={conversation_id}")
 
         # Find the pending tool_result message
