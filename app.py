@@ -4531,89 +4531,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     else:
                         logger.error(f"❌ Failed to update database with actual tool_result for tool: {tool_block.name}")
 
-                # After replacing pending result with real result, trigger broadcast
-                # Extract most recent assistant text from conversation history and broadcast it
-                try:
-                    messages = await get_chat_messages(session_id)
-                    broadcast_text = ""
-
-                    # Search backwards for the most recent assistant text
-                    for msg in reversed(messages):
-                        if msg.get("role") == "assistant":
-                            content = msg.get("content", [])
-                            if isinstance(content, list):
-                                for block in content:
-                                    if isinstance(block, dict) and block.get("type") == "text":
-                                        text = block.get("text", "").strip()
-                                        if text:
-                                            broadcast_text = text
-                                            break
-                            if broadcast_text:
-                                break
-
-                    # Check if there are still pending get_* tools - if so, don't broadcast yet
-                    has_pending_get_tool = False
-                    for msg in reversed(messages):
-                        if msg.get("role") == "assistant":
-                            content = msg.get("content", [])
-                            if isinstance(content, list):
-                                for block in content:
-                                    if isinstance(block, dict) and block.get("type") == "tool_use":
-                                        tool_name = block.get("name", "")
-                                        tool_use_id = block.get("id")
-                                        if tool_name.startswith("get_"):
-                                            # Check if this tool's result is still pending
-                                            for user_msg in messages:
-                                                if user_msg.get("role") == "user":
-                                                    user_content = user_msg.get("content", [])
-                                                    if isinstance(user_content, list):
-                                                        for user_block in user_content:
-                                                            if isinstance(user_block, dict) and \
-                                                               user_block.get("type") == "tool_result" and \
-                                                               user_block.get("tool_use_id") == tool_use_id:
-                                                                result_content = user_block.get("content", "")
-                                                                if result_content == "Result pending...":
-                                                                    has_pending_get_tool = True
-                                                                    logger.info(f"Skipping broadcast after tool result replacement: tool {tool_name} still has pending result")
-                                                                break
-                                                if has_pending_get_tool:
-                                                    break
-                                        if has_pending_get_tool:
-                                            break
-                            if has_pending_get_tool:
-                                break
-
-                    if broadcast_text and not has_pending_get_tool:
-                        logger.info(f"Broadcasting assistant message after tool result replacement: '{broadcast_text[:50]}...'")
-
-                        # Send to original WebSocket
-                        response_payload = {
-                            "response": broadcast_text,
-                            "request_id": request_id,
-                            "conversation_id": session_conversation_id,
-                            "client_conversation_id": client_conversation_id,
-                            "client_message_id": client_message_id,
-                            "type": "response"
-                        }
-                        await safe_websocket_send(response_payload)
-
-                        # Broadcast to other sessions
-                        broadcast_payload = {
-                            "response": broadcast_text,
-                            "request_id": request_id,
-                            "conversation_id": session_conversation_id,
-                            "client_conversation_id": client_conversation_id,
-                            "client_message_id": client_message_id,
-                            "type": "broadcast"
-                        }
-                        await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
-                        logger.info(f"✅ Broadcasted assistant message after tool result replacement for request {request_id}")
-                    elif has_pending_get_tool:
-                        logger.info(f"Skipping broadcast after tool result replacement for request {request_id}: still have pending get_* tools")
-                    else:
-                        logger.info(f"No assistant text to broadcast after tool result replacement for request {request_id}")
-                except Exception as e:
-                    logger.error(f"Error broadcasting after tool result replacement: {e}")
+                # NOTE: We no longer broadcast after each tool result replacement.
+                # The broadcast will happen at the END of the conversation turn,
+                # after Claude returns with stop_reason != 'tool_use'.
+                # This prevents premature broadcasts while Claude is still in a tool loop.
 
                 # Save text AFTER tool_use to both Redis and database (if any)
                 # This text should come AFTER the tool_result in the conversation
