@@ -4551,7 +4551,39 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             if broadcast_text:
                                 break
 
-                    if broadcast_text:
+                    # Check if there are still pending get_* tools - if so, don't broadcast yet
+                    has_pending_get_tool = False
+                    for msg in reversed(messages):
+                        if msg.get("role") == "assistant":
+                            content = msg.get("content", [])
+                            if isinstance(content, list):
+                                for block in content:
+                                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                                        tool_name = block.get("name", "")
+                                        tool_use_id = block.get("id")
+                                        if tool_name.startswith("get_"):
+                                            # Check if this tool's result is still pending
+                                            for user_msg in messages:
+                                                if user_msg.get("role") == "user":
+                                                    user_content = user_msg.get("content", [])
+                                                    if isinstance(user_content, list):
+                                                        for user_block in user_content:
+                                                            if isinstance(user_block, dict) and \
+                                                               user_block.get("type") == "tool_result" and \
+                                                               user_block.get("tool_use_id") == tool_use_id:
+                                                                result_content = user_block.get("content", "")
+                                                                if result_content == "Result pending...":
+                                                                    has_pending_get_tool = True
+                                                                    logger.info(f"Skipping broadcast after tool result replacement: tool {tool_name} still has pending result")
+                                                                break
+                                                if has_pending_get_tool:
+                                                    break
+                                        if has_pending_get_tool:
+                                            break
+                            if has_pending_get_tool:
+                                break
+
+                    if broadcast_text and not has_pending_get_tool:
                         logger.info(f"Broadcasting assistant message after tool result replacement: '{broadcast_text[:50]}...'")
 
                         # Send to original WebSocket
@@ -4576,6 +4608,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         }
                         await broadcast_to_conversation(session_conversation_id, broadcast_payload, exclude_session=None)
                         logger.info(f"✅ Broadcasted assistant message after tool result replacement for request {request_id}")
+                    elif has_pending_get_tool:
+                        logger.info(f"Skipping broadcast after tool result replacement for request {request_id}: still have pending get_* tools")
                     else:
                         logger.info(f"No assistant text to broadcast after tool result replacement for request {request_id}")
                 except Exception as e:
