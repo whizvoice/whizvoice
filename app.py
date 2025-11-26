@@ -4828,44 +4828,43 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Check if most recent tool is a pending get_* tool
         # If so, skip broadcast and wait for real result to trigger it
         should_skip_broadcast_for_pending_get = False
-        if not assistant_response_text:  # Only check if we don't have text in final response
-            try:
-                messages = await get_chat_messages(session_id)
-                # Search backwards for the most recent tool_use
-                for msg in reversed(messages):
-                    if msg.get("role") == "assistant":
-                        content = msg.get("content", [])
-                        if isinstance(content, list):
-                            for block in content:
-                                if isinstance(block, dict) and block.get("type") == "tool_use":
-                                    tool_name = block.get("name", "")
-                                    tool_use_id = block.get("id")
+        try:
+            messages = await get_chat_messages(session_id)
+            # Search backwards for the most recent tool_use
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "tool_use":
+                                tool_name = block.get("name", "")
+                                tool_use_id = block.get("id")
 
-                                    # Check if this is a get_* tool
-                                    if tool_name.startswith("get_"):
-                                        # Now check if its tool_result is still pending
-                                        for user_msg in reversed(messages):
-                                            if user_msg.get("role") == "user":
-                                                user_content = user_msg.get("content", [])
-                                                if isinstance(user_content, list):
-                                                    for user_block in user_content:
-                                                        if isinstance(user_block, dict) and \
-                                                           user_block.get("type") == "tool_result" and \
-                                                           user_block.get("tool_use_id") == tool_use_id:
-                                                            # Found the tool_result - check if it's pending
-                                                            result_content = user_block.get("content", "")
-                                                            if result_content == "Result pending...":
-                                                                should_skip_broadcast_for_pending_get = True
-                                                                logger.info(f"Skipping broadcast for request {request_id}: most recent tool {tool_name} has pending result, waiting for real result to trigger broadcast")
-                                                            break
-                                            if should_skip_broadcast_for_pending_get:
-                                                break
-                                    # We found the most recent tool_use, stop searching
-                                    break
-                        if should_skip_broadcast_for_pending_get or (msg.get("role") == "assistant" and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in (content if isinstance(content, list) else []))):
-                            break
-            except Exception as e:
-                logger.error(f"Error checking for pending get_* tool: {e}")
+                                # Check if this is a get_* tool
+                                if tool_name.startswith("get_"):
+                                    # Now check if its tool_result is still pending
+                                    for user_msg in reversed(messages):
+                                        if user_msg.get("role") == "user":
+                                            user_content = user_msg.get("content", [])
+                                            if isinstance(user_content, list):
+                                                for user_block in user_content:
+                                                    if isinstance(user_block, dict) and \
+                                                       user_block.get("type") == "tool_result" and \
+                                                       user_block.get("tool_use_id") == tool_use_id:
+                                                        # Found the tool_result - check if it's pending
+                                                        result_content = user_block.get("content", "")
+                                                        if result_content == "Result pending...":
+                                                            should_skip_broadcast_for_pending_get = True
+                                                            logger.info(f"Skipping broadcast for request {request_id}: most recent tool {tool_name} has pending result, waiting for real result to trigger broadcast")
+                                                        break
+                                        if should_skip_broadcast_for_pending_get:
+                                            break
+                                # We found the most recent tool_use, stop searching
+                                break
+                    if should_skip_broadcast_for_pending_get or (msg.get("role") == "assistant" and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in (content if isinstance(content, list) else []))):
+                        break
+        except Exception as e:
+            logger.error(f"Error checking for pending get_* tool: {e}")
 
         if not request_cancelled and not should_skip_broadcast_for_pending_get:
             # Only send response if there's actual text content
