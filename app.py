@@ -4373,7 +4373,16 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
                 # Build assistant content: text_before + tool_use (NO text_after)
                 assistant_content = text_before_tool + [tool_block_dict]
+
+                # CRITICAL: Create pending tool_result IMMEDIATELY and add BOTH to Redis TOGETHER
+                # This prevents race condition where another worker reads tool_use without its tool_result
+                pending_tool_result_dict = {
+                    "type": "tool_result",
+                    "tool_use_id": tool_block.id,
+                    "content": "Result pending..."
+                }
                 await add_chat_message(session_id, {"role": "assistant", "content": assistant_content})
+                await add_chat_message(session_id, {"role": "user", "content": [pending_tool_result_dict]})
 
                 # Save merged text_before+tool_use to database as ONE message
                 # content_type is "tool_use" even though it may also contain text content
@@ -4429,13 +4438,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     logger.warning("tool_use_save_result is None, using fallback timestamp")
                     tool_result_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
 
-                # Create PENDING tool result (will be updated with actual result later)
-                pending_tool_result_dict = {
-                    "type": "tool_result",
-                    "tool_use_id": tool_block.id,
-                    "content": "Result pending..."
-                }
-                await add_chat_message(session_id, {"role": "user", "content": [pending_tool_result_dict]})
+                # pending_tool_result_dict was already created and added to Redis above (atomically with tool_use)
+                # Now save it to the database with the calculated timestamp
 
                 # Save PENDING tool_result to database with timestamp after tool_use
                 pending_result_save = save_message_to_db(
