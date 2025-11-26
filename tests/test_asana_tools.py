@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from asana_tools import (
     get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date,
-    get_parent_tasks, create_asana_task, change_task_parent, delete_asana_task
+    get_parent_tasks, get_new_asana_task_id, change_task_parent, delete_asana_task
 )
 
 class TestAsanaTools(unittest.TestCase):
@@ -247,7 +247,7 @@ class TestAsanaTools(unittest.TestCase):
     @patch('asana_tools.get_asana_client')
     @patch('asana.UsersApi')
     @patch('asana.TasksApi')
-    def test_create_asana_task(self, mock_tasks_api, mock_users_api, mock_get_client, mock_get_token, mock_get_pref, mock_get_date):
+    def test_get_new_asana_task_id(self, mock_tasks_api, mock_users_api, mock_get_client, mock_get_token, mock_get_pref, mock_get_date):
         """Test creating a task in Asana"""
         # Setup mocks
         mock_get_token.return_value = "fake_token"
@@ -266,7 +266,7 @@ class TestAsanaTools(unittest.TestCase):
         mock_task_api.create_task.return_value = {'gid': 'new_task1', 'name': 'New Task'}
         
         # Test creating task
-        result = create_asana_task(self.test_user_id, 'New Task', due_date='2024-03-20', notes='Task notes')
+        result = get_new_asana_task_id(self.test_user_id, 'New Task', due_date='2024-03-20', notes='Task notes')
         
         # Assert
         self.assertEqual(result['gid'], 'new_task1')
@@ -309,7 +309,7 @@ class TestAsanaTools(unittest.TestCase):
         mock_task_api.create_subtask_for_task.return_value = {'gid': 'new_subtask1', 'name': 'New Subtask'}
         
         # Test creating subtask
-        result = create_asana_task(self.test_user_id, 'New Subtask', due_date='2024-03-20', notes='Subtask notes', parent_task_gid='parent_task1')
+        result = get_new_asana_task_id(self.test_user_id, 'New Subtask', due_date='2024-03-20', notes='Subtask notes', parent_task_gid='parent_task1')
         
         # Assert
         self.assertEqual(result['gid'], 'new_subtask1')

@@ -17,7 +17,7 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, create_asana_task, update_asana_task, delete_asana_task
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
 from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message, sms_select_chat, sms_draft_message, sms_send_message
@@ -654,8 +654,8 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
     },
-    "create_asana_task": {
-        "function_name": "create_asana_task",
+    "get_new_asana_task_id": {
+        "function_name": "get_new_asana_task_id",
         "requires_auth": True,
         "args_mapping": lambda args, user_id: (
             user_id,

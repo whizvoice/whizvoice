@@ -160,7 +160,7 @@ def get_parent_tasks(user_id: str):
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
-def create_asana_task(user_id: str, name, due_date=None, notes=None, parent_task_gid=None):
+def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None):
     configuration = asana.Configuration()
     asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
     if not asana_access_token:
@@ -379,7 +379,7 @@ asana_tools = [
     },
     {
         "type": "custom",
-        "name": "create_asana_task",
+        "name": "get_new_asana_task_id",
         "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. Otherwise, confirm the parent task with the user first. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. DO NOT use this tool to recreate a task that you already made once - use update_asana_task instead. No need to tell the user the ID of the task unless they ask. THINK: If you're recreating a different version of a task MAKE SURE you delete the old task with delete_asana_task so that the user doesn't see duplicates.",
         "input_schema": {
             "type": "object",

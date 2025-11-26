@@ -21,7 +21,7 @@ class TestToolRegistry(unittest.TestCase):
         # Check that all expected tools are present
         expected_tools = [
             "get_asana_workspaces", "get_asana_tasks", "get_current_date",
-            "get_parent_tasks", "create_asana_task", "set_workspace_preference",
+            "get_parent_tasks", "get_new_asana_task_id", "set_workspace_preference",
             "get_workspace_preference", "update_asana_task", "delete_asana_task",
             "get_app_info", "set_temperature_units"
         ]
@@ -54,7 +54,7 @@ class TestToolRegistry(unittest.TestCase):
         # Protected tools (should require auth)
         protected_tools = [
             "get_asana_workspaces", "get_asana_tasks", "get_parent_tasks",
-            "create_asana_task", "set_workspace_preference", "get_workspace_preference",
+            "get_new_asana_task_id", "set_workspace_preference", "get_workspace_preference",
             "update_asana_task", "delete_asana_task", "set_temperature_units"
         ]
         
@@ -78,8 +78,8 @@ class TestToolRegistry(unittest.TestCase):
         expected = (self.test_user_id, "2024-01-01", "2024-01-31")
         self.assertEqual(mapped_args, expected)
         
-        # Test create_asana_task args mapping
-        tool_config = TOOL_REGISTRY["create_asana_task"]
+        # Test get_new_asana_task_id args mapping
+        tool_config = TOOL_REGISTRY["get_new_asana_task_id"]
         test_args = {
             "name": "Test Task",
             "due_date": "2024-03-15",
@@ -93,8 +93,8 @@ class TestToolRegistry(unittest.TestCase):
 
     def test_validation_functionality(self):
         """Test that validation functions work correctly"""
-        # Test create_asana_task validation (name required)
-        tool_config = TOOL_REGISTRY["create_asana_task"]
+        # Test get_new_asana_task_id validation (name required)
+        tool_config = TOOL_REGISTRY["get_new_asana_task_id"]
         validation_func = tool_config["validation"]
         
         # Test with missing name
@@ -149,7 +149,7 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIn("User authentication required", result["error"])
         
         # Test validation error
-        result = asyncio.run(execute_tool("create_asana_task", {"due_date": "2024-03-15"}, self.test_user_id))
+        result = asyncio.run(execute_tool("get_new_asana_task_id", {"due_date": "2024-03-15"}, self.test_user_id))
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
         self.assertEqual(result["error"], "Task name is required.")
