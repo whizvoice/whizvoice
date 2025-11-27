@@ -2378,6 +2378,55 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
         logger.info(f"Cleaned up {len(failed_sessions)} disconnected sessions")
 
 
+async def cancel_and_broadcast_messages(
+    message_ids: List[int],
+    conversation_id: int,
+    request_id: str,
+    reason: str
+):
+    """
+    Cancel messages in database and broadcast DeleteMessage notifications to all clients.
+
+    This centralizes the cancellation logic to ensure clients always receive notifications
+    when messages are cancelled, preventing display of stale cancelled messages.
+
+    Args:
+        message_ids: List of message IDs to cancel
+        conversation_id: Conversation ID for broadcasting
+        request_id: Request ID for client matching
+        reason: Reason for cancellation (e.g., "superseded_by_new_message", "superseded_by_new_request")
+    """
+    if not message_ids:
+        return
+
+    logger.info(f"Cancelling {len(message_ids)} message(s) and broadcasting to conversation {conversation_id}: {message_ids}")
+
+    # Mark messages as cancelled in database
+    for msg_id in message_ids:
+        try:
+            supabase.table("messages")\
+                .update({"cancelled": "now()"})\
+                .eq("id", msg_id)\
+                .execute()
+            logger.info(f"Marked message {msg_id} as cancelled in database")
+        except Exception as e:
+            logger.error(f"Failed to mark message {msg_id} as cancelled: {e}")
+
+    # Broadcast DeleteMessage to all clients in conversation
+    for msg_id in message_ids:
+        delete_notification = {
+            "type": "delete_message",
+            "message_id": msg_id,
+            "conversation_id": conversation_id,
+            "request_id": request_id,
+            "reason": reason
+        }
+        try:
+            await broadcast_to_conversation(conversation_id, delete_notification)
+            logger.info(f"Broadcasted delete notification for message {msg_id} to conversation {conversation_id}")
+        except Exception as e:
+            logger.error(f"Failed to broadcast delete notification for message {msg_id}: {e}")
+
 
 async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int], websocket=None, session_id=None) -> List[str]:
     """
@@ -2440,18 +2489,13 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                         .execute()
 
                     if bot_msg_result.data:
-                        for bot_msg in bot_msg_result.data:
-                            bot_message_id = bot_msg["id"]
-                            cancelled_bot_messages.append((bot_message_id, request_id))  # Store both ID and request_id
-
-                            # Mark the bot message as cancelled in the database
-                            supabase.table("messages")\
-                                .update({"cancelled": "now()"})\
-                                .eq("id", bot_message_id)\
-                                .execute()
-                            logger.info(f"Marked bot message {bot_message_id} as cancelled for request {request_id}")
+                        message_ids_to_cancel = [bot_msg["id"] for bot_msg in bot_msg_result.data]
+                        # Store tuples for tracking
+                        for msg_id in message_ids_to_cancel:
+                            cancelled_bot_messages.append((msg_id, request_id))
+                        logger.info(f"Found {len(message_ids_to_cancel)} bot messages to cancel for request {request_id}")
                 except Exception as e:
-                    logger.error(f"Error checking/cancelling bot messages for request {request_id}: {e}")
+                    logger.error(f"Error checking bot messages for request {request_id}: {e}")
                 
                 # Cancel the Claude stream if it exists
                 if redis_managers and "local_objects" in redis_managers:
@@ -2472,22 +2516,17 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
         
         if cancelled_requests:
             logger.info(f"Cancelled {len(cancelled_requests)} subset requests: {cancelled_requests}")
-        
-        # Send delete notifications for cancelled bot messages
-        if cancelled_bot_messages and websocket and session_id:
+
+        # Cancel and broadcast delete notifications for cancelled bot messages
+        if cancelled_bot_messages:
+            # Group messages by request_id for efficient cancellation
             for bot_message_id, request_id in cancelled_bot_messages:
-                delete_notification = {
-                    "type": "delete_message",
-                    "message_id": bot_message_id,
-                    "conversation_id": conversation_id,
-                    "request_id": request_id,  # Include request_id so client can match and delete local message
-                    "reason": "superseded_by_new_request"
-                }
-                try:
-                    await websocket.send_text(json.dumps(delete_notification))
-                    logger.info(f"Sent delete notification for bot message {bot_message_id} (request {request_id}) to session {session_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to send delete notification for message {bot_message_id}: {e}")
+                await cancel_and_broadcast_messages(
+                    message_ids=[bot_message_id],
+                    conversation_id=conversation_id,
+                    request_id=request_id,
+                    reason="superseded_by_new_request"
+                )
             
     except Exception as e:
         logger.error(f"Error detecting subset requests: {e}")
@@ -3403,9 +3442,9 @@ async def check_and_retry_failed_messages(
                                         request_id=request_id,
                                         content_type="text"
                                     )
-                                    
+
                                     if save_result:
-                                        saved_conversation_id, message_id = save_result
+                                        saved_conversation_id, message_id, cancelled_ids = save_result
                                         logger.info(f"Successfully saved assistant response as message {message_id}")
                                         
                                         return {
@@ -3676,9 +3715,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
-        
-        real_conversation_id, user_message_id = save_result
+
+        real_conversation_id, user_message_id, cancelled_ids = save_result
         logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}, message_id: {user_message_id}")
+        # Note: USER messages shouldn't have cancelled_ids (only ASSISTANT messages cancel previous ones)
         
         # Update optimistic → real mapping if client provided optimistic ID
         if client_conversation_id and client_conversation_id < 0 and real_conversation_id:
@@ -4092,7 +4132,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 content_type="text"
             )
             if save_result:
-                saved_conversation_id, error_message_id = save_result
+                saved_conversation_id, error_message_id, cancelled_ids = save_result
                 logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
             else:
                 logger.error(f"Failed to save authentication error message to database")
@@ -4162,7 +4202,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     content_type="text"
                 )
                 if save_result:
-                    saved_conversation_id, error_message_id = save_result
+                    saved_conversation_id, error_message_id, cancelled_ids = save_result
                     logger.info(f"BadRequest error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 else:
                     logger.error(f"Failed to save BadRequest error message to database")
@@ -4211,7 +4251,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     content_type="text"
                 )
                 if save_result:
-                    saved_conversation_id, error_message_id = save_result
+                    saved_conversation_id, error_message_id, cancelled_ids = save_result
                     logger.info(f"Generic error saved as message {error_message_id} in conversation {saved_conversation_id}")
             except Exception as save_error:
                 logger.error(f"Failed to save generic error message to database: {save_error}")
@@ -4405,7 +4445,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Get the actual timestamp of the tool_use message we just saved
                 # This is critical for ensuring the tool_result has the correct timestamp (+1ms after tool_use)
                 if tool_use_save_result:
-                    tool_use_conv_id, tool_use_msg_id = tool_use_save_result
+                    tool_use_conv_id, tool_use_msg_id, cancelled_ids = tool_use_save_result
+                    # Note: tool_use messages shouldn't cancel previous messages (only text messages do)
                     tool_use_msg_result = supabase.table("messages")\
                         .select("timestamp")\
                         .eq("id", tool_use_msg_id)\
@@ -4646,7 +4687,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     content_type="text"
                 )
                 if save_result:
-                    saved_conversation_id, error_message_id = save_result
+                    saved_conversation_id, error_message_id, cancelled_ids = save_result
                     logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 else:
                     logger.error(f"Failed to save authentication error message to database")
@@ -4695,7 +4736,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         content_type="text"
                     )
                     if save_result:
-                        saved_conversation_id, error_message_id = save_result
+                        saved_conversation_id, error_message_id, cancelled_ids = save_result
                         logger.info(f"Conversation history error saved as message {error_message_id} in conversation {saved_conversation_id}")
                     else:
                         logger.error(f"Failed to save conversation history error message to database")
@@ -4766,19 +4807,26 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
             save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text", client_timestamp=final_text_timestamp)
             if save_result:
-                saved_conversation_id, bot_message_id = save_result
+                saved_conversation_id, bot_message_id, cancelled_ids = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
 
-                # If cancelled, update the message to mark it as cancelled
+                # Cancel and broadcast previous messages if any were superseded
+                if cancelled_ids:
+                    await cancel_and_broadcast_messages(
+                        message_ids=cancelled_ids,
+                        conversation_id=saved_conversation_id,
+                        request_id=request_id,
+                        reason="superseded_by_new_message"
+                    )
+
+                # If cancelled, cancel and broadcast
                 if request_cancelled:
-                    try:
-                        supabase.table("messages")\
-                            .update({"cancelled": "now()"})\
-                            .eq("id", bot_message_id)\
-                            .execute()
-                        logger.info(f"Marked bot message {bot_message_id} as cancelled in database")
-                    except Exception as e:
-                        logger.error(f"Failed to mark bot message {bot_message_id} as cancelled: {e}")
+                    await cancel_and_broadcast_messages(
+                        message_ids=[bot_message_id],
+                        conversation_id=saved_conversation_id,
+                        request_id=request_id,
+                        reason="request_cancelled"
+                    )
             else:
                 logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
         else:

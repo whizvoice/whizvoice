@@ -182,8 +182,8 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         return []
 
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False) -> Optional[Tuple[int, int]]:
-    """Save a message to the database and return (conversation_id, message_id)
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False) -> Optional[Tuple[int, int, List[int]]]:
+    """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids)
 
     Args:
         user_id: User ID
@@ -196,6 +196,10 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         content_type: Type of content - 'text', 'tool_use', 'tool_result', or 'mixed'
         tool_content: Optional JSONB content for tool-related messages
         mark_cancelled: If True, mark the message as cancelled (for error messages from cancelled requests)
+
+    Returns:
+        Tuple of (conversation_id, message_id, cancelled_message_ids) where cancelled_message_ids
+        is a list of message IDs that were marked for cancellation (caller should broadcast deletions)
     """
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_conversation_id={client_conversation_id}, content='{content[:50] if content else '(empty)'}...'")
@@ -300,9 +304,11 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         # Save the message
         logger.info(f"Attempting to save {message_sender} message to conversation_id={conversation_id}, request_id={request_id}, content_type={content_type}")
 
-        # For ASSISTANT messages with request_id, mark any previous ASSISTANT messages with the same request_id as cancelled
+        # For ASSISTANT messages with request_id, collect any previous ASSISTANT messages with the same request_id to cancel
         # This handles the case where streaming responses create multiple intermediate messages
         # IMPORTANT: We never cancel tool_use or tool_result messages, as they represent actual tool executions
+        # NOTE: We collect IDs here but don't cancel yet - caller will use cancel_and_broadcast_messages() helper
+        cancelled_message_ids = []
         if message_sender == "ASSISTANT" and request_id:
             try:
                 # Find all previous ASSISTANT messages with this request_id that aren't already cancelled
@@ -323,20 +329,13 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                     ]
 
                     if messages_to_cancel:
-                        logger.info(f"Marking {len(messages_to_cancel)} previous ASSISTANT message(s) as cancelled for request_id={request_id}: {messages_to_cancel}")
-
-                        # Cancel the ASSISTANT messages (excluding tool_use and tool_result)
-                        for msg_id in messages_to_cancel:
-                            supabase.table("messages")\
-                                .update({"cancelled": "now()"})\
-                                .eq("id", msg_id)\
-                                .execute()
-
-                        logger.info(f"Successfully marked {len(messages_to_cancel)} previous ASSISTANT message(s) as cancelled")
+                        cancelled_message_ids = messages_to_cancel
+                        logger.info(f"Found {len(cancelled_message_ids)} previous ASSISTANT message(s) to cancel for request_id={request_id}: {cancelled_message_ids}")
+                        logger.info(f"Note: Caller should use cancel_and_broadcast_messages() to actually cancel and broadcast")
                     else:
                         logger.info(f"No messages to cancel for request_id={request_id} (only tool_use/tool_result messages found)")
             except Exception as e:
-                logger.error(f"Error marking previous ASSISTANT messages as cancelled for request_id={request_id}: {e}")
+                logger.error(f"Error finding previous ASSISTANT messages to cancel for request_id={request_id}: {e}")
 
         # Prepare message data
         message_data = {
@@ -440,7 +439,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         else:
             logger.warning(f"Failed to update conversation {conversation_id} timestamps")
 
-        return (conversation_id, message_id)
+        return (conversation_id, message_id, cancelled_message_ids)
 
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")
