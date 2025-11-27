@@ -204,7 +204,7 @@ def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_
 
         # Convert to dict and add reminder message
         result = dict(new_task)
-        result['_reminder'] = "Task created successfully. THINK: Does this task supersede an older task you already created? If so, PLEASE be sure to delete the old one so the user doesn't see duplicates."
+        result['_reminder'] = "Task created successfully. PLEASE CHECK: Does this task supersede a similar task you already created? If so, you MUST DELETE the old tasks so the user doesn't see duplicates."
         return result
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
