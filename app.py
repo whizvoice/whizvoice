@@ -2455,47 +2455,34 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
             if old_message_ids and old_message_ids.issubset(new_message_ids_set) and old_message_ids != new_message_ids_set:
                 logger.info(f"Request {request_id} (messages {old_message_ids}) is subset of new request (messages {new_message_ids_set})")
 
-                # Check if this request has any tool_use or tool_result messages
-                # If so, DO NOT cancel - we want to preserve the tool execution history
+                # Get all ASSISTANT messages for this request and filter out tool messages
+                # This prevents race condition where tool messages are being saved while we check
                 try:
-                    # Check for tool_use messages (ASSISTANT with content_type='tool_use')
-                    tool_use_result = supabase.table("messages")\
-                        .select("id")\
-                        .eq("request_id", request_id)\
-                        .eq("content_type", "tool_use")\
-                        .execute()
-
-                    # Check for tool_result messages (USER with content_type='tool_result')
-                    tool_result_result = supabase.table("messages")\
-                        .select("id")\
-                        .eq("request_id", request_id)\
-                        .eq("content_type", "tool_result")\
-                        .execute()
-
-                    if tool_use_result.data or tool_result_result.data:
-                        logger.info(f"Request {request_id} has tool_use or tool_result messages, skipping cancellation to preserve tool execution history")
-                        continue  # Skip cancellation for this request
-                except Exception as e:
-                    logger.error(f"Error checking for tool messages for request {request_id}: {e}")
-
-                # Check if this request has already sent a bot response
-                # Query the database for bot messages with this request_id
-                try:
+                    # Get ALL ASSISTANT messages with their content_type in a single query
                     bot_msg_result = supabase.table("messages")\
-                        .select("id")\
+                        .select("id, content_type")\
                         .eq("request_id", request_id)\
                         .eq("message_sender", "ASSISTANT")\
                         .is_("cancelled", "null")\
                         .execute()
 
                     if bot_msg_result.data:
-                        message_ids_to_cancel = [bot_msg["id"] for bot_msg in bot_msg_result.data]
-                        # Store tuples for tracking
-                        for msg_id in message_ids_to_cancel:
-                            cancelled_bot_messages.append((msg_id, request_id))
-                        logger.info(f"Found {len(message_ids_to_cancel)} bot messages to cancel for request {request_id}")
+                        # Filter out tool_use and tool_result messages - we never cancel these
+                        message_ids_to_cancel = [
+                            bot_msg["id"] for bot_msg in bot_msg_result.data
+                            if bot_msg.get("content_type") not in ["tool_use", "tool_result"]
+                        ]
+
+                        if message_ids_to_cancel:
+                            # Store tuples for tracking
+                            for msg_id in message_ids_to_cancel:
+                                cancelled_bot_messages.append((msg_id, request_id))
+                            logger.info(f"Found {len(message_ids_to_cancel)} bot messages to cancel for request {request_id}")
+                        else:
+                            logger.info(f"Request {request_id} only has tool_use/tool_result messages, skipping cancellation to preserve tool execution history")
+                            continue  # Skip cancellation for this request
                 except Exception as e:
-                    logger.error(f"Error checking bot messages for request {request_id}: {e}")
+                    logger.error(f"Error getting messages for request {request_id}: {e}")
                 
                 # Cancel the Claude stream if it exists
                 if redis_managers and "local_objects" in redis_managers:
