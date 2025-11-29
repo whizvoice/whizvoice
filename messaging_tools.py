@@ -102,12 +102,16 @@ async def whatsapp_select_chat(chat_name: str, user_id: str = None, websocket = 
         }
 
 async def whatsapp_draft_message(message: str, user_id: str = None, websocket = None,
-                                tool_result_handler = None, conversation_id: str = None, previous_text: str = None) -> dict:
+                                tool_result_handler = None, conversation_id: str = None, previous_text: str = None,
+                                chat_name: str = None) -> dict:
     """
     Draft a message in WhatsApp by showing an overlay for user review.
 
     This tool shows a WhizVoice overlay with the message text for user confirmation
     before actually sending. Always use this before sending messages.
+
+    If chat_name is provided and the correct chat isn't already open, the tool will
+    automatically navigate to that chat first before drafting the message.
 
     If previous_text is provided, the overlay will show tracked changes:
     - Deleted text appears with red strikethrough
@@ -117,6 +121,8 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
     Args:
         message: The message text to draft for user review
         previous_text: Optional. The previous version of the message for track changes display
+        chat_name: Optional. The name of the contact/chat to draft message to. If provided
+                   and the correct chat isn't open, will automatically navigate to it.
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -143,6 +149,8 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
         params = {"message": message}
         if previous_text is not None:
             params["previous_text"] = previous_text
+        if chat_name is not None:
+            params["chat_name"] = chat_name
 
         tool_execution_message = {
             "type": "tool_execution",
@@ -172,9 +180,11 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
 
             try:
                 # Wait for tool result with timeout
+                # Use longer timeout if chat_name provided (may need to navigate first)
+                timeout = 15.0 if chat_name else 5.0
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=5.0
+                    timeout=timeout
                 )
 
                 logger.info(f"WhatsApp message draft result for {tool_request_id}: {result}")
@@ -390,9 +400,12 @@ async def sms_select_chat(contact_name: str, user_id: str = None, websocket = No
 
 async def sms_draft_message(message: str, user_id: str = None, websocket = None,
                             tool_result_handler = None, conversation_id: str = None,
-                            previous_text: str = None) -> dict:
+                            previous_text: str = None, contact_name: str = None) -> dict:
     """
     Draft an SMS message with a visual overlay for user confirmation before sending.
+
+    If contact_name is provided and the correct conversation isn't already open, the tool will
+    automatically navigate to that contact's conversation first before drafting the message.
 
     Args:
         message: The message text to draft
@@ -401,6 +414,8 @@ async def sms_draft_message(message: str, user_id: str = None, websocket = None,
         tool_result_handler: Handler for tracking pending tool executions
         conversation_id: The conversation ID for context
         previous_text: Optional previous version of the message (for tracked changes)
+        contact_name: Optional. The name of the contact to draft message to. If provided
+                      and the correct conversation isn't open, will automatically navigate to it.
 
     Returns:
         A dictionary containing the result of the draft operation
@@ -421,19 +436,19 @@ async def sms_draft_message(message: str, user_id: str = None, websocket = None,
             }
 
         # Create the WebSocket message for the Android app
+        params = {"message": message}
+        if previous_text:
+            params["previous_text"] = previous_text
+        if contact_name:
+            params["contact_name"] = contact_name
+
         tool_execution_message = {
             "type": "tool_execution",
             "tool": "sms_draft_message",
             "request_id": tool_request_id,
-            "params": {
-                "message": message
-            },
+            "params": params,
             "conversation_id": conversation_id
         }
-
-        # Add previous_text if provided (for tracked changes)
-        if previous_text:
-            tool_execution_message["params"]["previous_text"] = previous_text
 
         # Send to Android app via WebSocket
         try:
@@ -454,10 +469,12 @@ async def sms_draft_message(message: str, user_id: str = None, websocket = None,
             logger.info(f"Waiting for SMS draft message result from Android device (request_id: {tool_request_id})")
 
             try:
-                # Wait for tool result with timeout (5 seconds for draft operation)
+                # Wait for tool result with timeout
+                # Use longer timeout if contact_name provided (may need to navigate first)
+                timeout = 15.0 if contact_name else 5.0
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=5.0
+                    timeout=timeout
                 )
 
                 logger.info(f"SMS draft message result for {tool_request_id}: {result}")
@@ -597,13 +614,17 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "whatsapp_draft_message",
-        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: WhatsApp chat must be open first (use launch_app to open WhatsApp, then whatsapp_select_chat to open the chat). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "description": "Draft a message for WhatsApp and show it in an overlay for user review. If chat_name is provided, the tool will automatically open that chat if not already open (no need to call whatsapp_select_chat first). If chat_name is not provided, WhatsApp chat must already be open. Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string",
                     "description": "The message text to draft for user review before sending"
+                },
+                "chat_name": {
+                    "type": "string",
+                    "description": "Optional. The name of the contact or group chat to send to. If provided and the correct chat isn't open, will automatically navigate to it."
                 },
                 "previous_text": {
                     "type": "string",
@@ -646,13 +667,17 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "sms_draft_message",
-        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. IMPORTANT: SMS conversation must be open first (use launch_app to open Messages, then sms_select_chat to open the conversation). Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. If contact_name is provided, the tool will automatically open that conversation if not already open (no need to call sms_select_chat first). If contact_name is not provided, an SMS conversation must already be open. Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string",
                     "description": "The SMS/text message text to draft for user review before sending"
+                },
+                "contact_name": {
+                    "type": "string",
+                    "description": "Optional. The name or phone number of the contact to send to. If provided and the correct conversation isn't open, will automatically navigate to it."
                 },
                 "previous_text": {
                     "type": "string",
