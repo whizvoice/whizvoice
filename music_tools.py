@@ -65,7 +65,7 @@ def set_music_app_preference(user_id: str, music_app: str) -> tuple[bool, str]:
 
 # ================== Music Playback Functions ==================
 
-async def play_youtube_music(query: str, user_id: str = None, websocket = None,
+async def agent_play_youtube_music(query: str, user_id: str = None, websocket = None,
                             tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Play a song on YouTube Music by searching for it and playing the first result.
@@ -97,7 +97,7 @@ async def play_youtube_music(query: str, user_id: str = None, websocket = None,
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "play_youtube_music",
+            "tool": "agent_play_youtube_music",
             "request_id": tool_request_id,
             "params": {
                 "query": query
@@ -110,7 +110,7 @@ async def play_youtube_music(query: str, user_id: str = None, websocket = None,
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending YouTube Music play message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent play_youtube_music command for '{query}'")
+            logger.info(f"Successfully sent agent_play_youtube_music command for '{query}'")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -155,7 +155,7 @@ async def play_youtube_music(query: str, user_id: str = None, websocket = None,
             "success": False
         }
 
-async def queue_youtube_music(query: str, user_id: str = None, websocket = None,
+async def agent_queue_youtube_music(query: str, user_id: str = None, websocket = None,
                               tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Add a song to the queue in YouTube Music by searching for it and adding the first result.
@@ -187,7 +187,7 @@ async def queue_youtube_music(query: str, user_id: str = None, websocket = None,
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "queue_youtube_music",
+            "tool": "agent_queue_youtube_music",
             "request_id": tool_request_id,
             "params": {
                 "query": query
@@ -200,7 +200,7 @@ async def queue_youtube_music(query: str, user_id: str = None, websocket = None,
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending YouTube Music queue message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent queue_youtube_music command for '{query}'")
+            logger.info(f"Successfully sent agent_queue_youtube_music command for '{query}'")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -274,7 +274,7 @@ music_tools = [
     },
     {
         "type": "custom",
-        "name": "play_youtube_music",
+        "name": "agent_play_youtube_music",
         "description": "Play a song, album, artist, or playlist on YouTube Music. IMPORTANT: YouTube Music must already be open - use launch_app tool first to open YouTube Music if needed. This will search for the query and play the first result. If the user hasn't specified a music app, please check their music app preference first. They may prefer an app other than YouTube Music.",
         "input_schema": {
             "type": "object",
@@ -289,7 +289,7 @@ music_tools = [
     },
     {
         "type": "custom",
-        "name": "queue_youtube_music",
+        "name": "agent_queue_youtube_music",
         "description": "Add a song, album, artist, or playlist to the queue in YouTube Music. IMPORTANT: YouTube Music must already be open - use launch_app tool first to open YouTube Music if needed. This will search for the query and add the first result to the queue. Use this when the user wants to add music to their queue without immediately playing it. If the user hasn't specified a music app, please check their music app preference first. They may prefer an app other than YouTube Music.",
         "input_schema": {
             "type": "object",

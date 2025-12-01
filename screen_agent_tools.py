@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any
 # Configure logging
 logger = logging.getLogger(__name__)
 
-async def launch_app(app_name: str, user_id: str = None, websocket = None,
+async def agent_launch_app(app_name: str, user_id: str = None, websocket = None,
                      tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Launch an application on the user's Android device via WebSocket.
@@ -46,7 +46,7 @@ async def launch_app(app_name: str, user_id: str = None, websocket = None,
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "launch_app",
+            "tool": "agent_launch_app",
             "request_id": tool_request_id,
             "params": {
                 "app_name": app_name
@@ -59,7 +59,7 @@ async def launch_app(app_name: str, user_id: str = None, websocket = None,
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending tool_execution message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent launch_app command for '{app_name}'")
+            logger.info(f"Successfully sent agent_launch_app command for '{app_name}'")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -104,7 +104,7 @@ async def launch_app(app_name: str, user_id: str = None, websocket = None,
             "success": False
         }
 
-async def disable_continuous_listening(user_id: str = None, websocket = None,
+async def agent_disable_continuous_listening(user_id: str = None, websocket = None,
                                       tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Disable continuous listening mode on the user's Android device.
@@ -135,7 +135,7 @@ async def disable_continuous_listening(user_id: str = None, websocket = None,
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "disable_continuous_listening",
+            "tool": "agent_disable_continuous_listening",
             "request_id": tool_request_id,
             "params": {},
             "conversation_id": conversation_id
@@ -191,7 +191,7 @@ async def disable_continuous_listening(user_id: str = None, websocket = None,
             "success": False
         }
 
-async def set_tts_enabled(enabled: bool, user_id: str = None, websocket = None,
+async def agent_set_tts_enabled(enabled: bool, user_id: str = None, websocket = None,
                          tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Enable or disable text-to-speech for bot responses on the user's Android device.
@@ -223,7 +223,7 @@ async def set_tts_enabled(enabled: bool, user_id: str = None, websocket = None,
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "set_tts_enabled",
+            "tool": "agent_set_tts_enabled",
             "request_id": tool_request_id,
             "params": {
                 "enabled": enabled
@@ -285,7 +285,7 @@ async def set_tts_enabled(enabled: bool, user_id: str = None, websocket = None,
 screen_agent_tools = [
     {
         "type": "custom",
-        "name": "launch_app",
+        "name": "agent_launch_app",
         "description": "Launch an application on the user's Android device. This will also show a bubble overlay for easy return to WhizVoice. Use this when the user asks to open or launch an app like YouTube, Chrome, Maps, Gmail, Camera, Settings, WhatsApp, etc. For WhatsApp messaging, always launch WhatsApp first before using WhatsApp-specific tools.",
         "input_schema": {
             "type": "object",
@@ -300,7 +300,7 @@ screen_agent_tools = [
     },
     {
         "type": "custom",
-        "name": "disable_continuous_listening",
+        "name": "agent_disable_continuous_listening",
         "description": "Turn off the microphone, also known as continuous listening mode, on the user's WhizVoice app. After calling this, the user will need to manually press the microphone button to speak again. Note that microphone/continuous listening mode is completely INDEPENDENT of text to speech mode. You should NOT enable or disable continuous listening to modify text to speech mode.",
         "input_schema": {
             "type": "object",
@@ -310,7 +310,7 @@ screen_agent_tools = [
     },
     {
         "type": "custom",
-        "name": "set_tts_enabled",
+        "name": "agent_set_tts_enabled",
         "description": "Enable or disable text-to-speech (TTS) for bot responses on the user's WhizVoice app. When enabled, bot responses will be spoken aloud. When disabled, responses will only be shown as text. Note that text to speech mode is completely INDEPENDENT of microphone/continuous listening mode. You should NOT enable or disable continuous listening first.",
         "input_schema": {
             "type": "object",

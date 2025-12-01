@@ -19,10 +19,10 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task
 from about_me_tool import about_me_tools, get_app_info, get_user_data
-from screen_agent_tools import screen_agent_tools, launch_app, disable_continuous_listening, set_tts_enabled
-from messaging_tools import messaging_tools, whatsapp_select_chat, whatsapp_send_message, whatsapp_draft_message, sms_select_chat, sms_draft_message, sms_send_message
-from music_tools import music_tools, play_youtube_music, queue_youtube_music, get_music_app_preference, set_music_app_preference
-from maps_tools import maps_tools, search_google_maps_location, search_google_maps_phrase, get_google_maps_directions, recenter_google_maps, fullscreen_google_maps, select_location_from_list
+from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled
+from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message
+from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, get_music_app_preference, set_music_app_preference
+from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
 from weather_tools import weather_tools, get_weather, set_temperature_units
@@ -712,8 +712,8 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
     },
-    "launch_app": {
-        "function_name": "launch_app",
+    "agent_launch_app": {
+        "function_name": "agent_launch_app",
         "requires_auth": False,
         "is_async": True,  # Mark this as an async tool
         "needs_websocket": True,  # This tool needs WebSocket context
@@ -726,8 +726,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "App name is required."} if not args.get('app_name') else None
     },
-    "whatsapp_select_chat": {
-        "function_name": "whatsapp_select_chat",
+    "agent_whatsapp_select_chat": {
+        "function_name": "agent_whatsapp_select_chat",
         "requires_auth": False,
         "is_async": True,  # Mark this as an async tool
         "needs_websocket": True,  # This tool needs WebSocket context
@@ -740,8 +740,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Chat name is required."} if not args.get('chat_name') else None
     },
-    "whatsapp_send_message": {
-        "function_name": "whatsapp_send_message",
+    "agent_whatsapp_send_message": {
+        "function_name": "agent_whatsapp_send_message",
         "requires_auth": False,
         "is_async": True,  # Mark this as an async tool
         "needs_websocket": True,  # This tool needs WebSocket context
@@ -754,8 +754,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     },
-    "whatsapp_draft_message": {
-        "function_name": "whatsapp_draft_message",
+    "agent_whatsapp_draft_message": {
+        "function_name": "agent_whatsapp_draft_message",
         "requires_auth": False,
         "is_async": True,  # Mark this as an async tool
         "needs_websocket": True,  # This tool needs WebSocket context
@@ -769,8 +769,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     },
-    "sms_select_chat": {
-        "function_name": "sms_select_chat",
+    "agent_sms_select_chat": {
+        "function_name": "agent_sms_select_chat",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -783,8 +783,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Contact name is required."} if not args.get('contact_name') else None
     },
-    "sms_draft_message": {
-        "function_name": "sms_draft_message",
+    "agent_sms_draft_message": {
+        "function_name": "agent_sms_draft_message",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -798,8 +798,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     },
-    "sms_send_message": {
-        "function_name": "sms_send_message",
+    "agent_sms_send_message": {
+        "function_name": "agent_sms_send_message",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -812,8 +812,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     },
-    "disable_continuous_listening": {
-        "function_name": "disable_continuous_listening",
+    "agent_disable_continuous_listening": {
+        "function_name": "agent_disable_continuous_listening",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -825,8 +825,8 @@ TOOL_REGISTRY = {
         ),
         "validation": None
     },
-    "set_tts_enabled": {
-        "function_name": "set_tts_enabled",
+    "agent_set_tts_enabled": {
+        "function_name": "agent_set_tts_enabled",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -839,8 +839,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "enabled parameter is required."} if args.get('enabled') is None else None
     },
-    "play_youtube_music": {
-        "function_name": "play_youtube_music",
+    "agent_play_youtube_music": {
+        "function_name": "agent_play_youtube_music",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -853,8 +853,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Query is required."} if not args.get('query') else None
     },
-    "queue_youtube_music": {
-        "function_name": "queue_youtube_music",
+    "agent_queue_youtube_music": {
+        "function_name": "agent_queue_youtube_music",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -885,8 +885,8 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id, args.get('timezone')),
         "validation": lambda args: {"error": "timezone parameter is required."} if not args.get('timezone') else None
     },
-    "search_google_maps_location": {
-        "function_name": "search_google_maps_location",
+    "agent_search_google_maps_location": {
+        "function_name": "agent_search_google_maps_location",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -899,8 +899,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Address keyword is required."} if not args.get('address_keyword') else None
     },
-    "search_google_maps_phrase": {
-        "function_name": "search_google_maps_phrase",
+    "agent_search_google_maps_phrase": {
+        "function_name": "agent_search_google_maps_phrase",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -913,8 +913,8 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Search phrase is required."} if not args.get('search_phrase') else None
     },
-    "get_google_maps_directions": {
-        "function_name": "get_google_maps_directions",
+    "agent_get_google_maps_directions": {
+        "function_name": "agent_get_google_maps_directions",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -928,8 +928,8 @@ TOOL_REGISTRY = {
         ),
         "validation": None
     },
-    "recenter_google_maps": {
-        "function_name": "recenter_google_maps",
+    "agent_recenter_google_maps": {
+        "function_name": "agent_recenter_google_maps",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -941,8 +941,8 @@ TOOL_REGISTRY = {
         ),
         "validation": None
     },
-    "fullscreen_google_maps": {
-        "function_name": "fullscreen_google_maps",
+    "agent_fullscreen_google_maps": {
+        "function_name": "agent_fullscreen_google_maps",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -954,8 +954,8 @@ TOOL_REGISTRY = {
         ),
         "validation": None
     },
-    "select_location_from_list": {
-        "function_name": "select_location_from_list",
+    "agent_select_location_from_list": {
+        "function_name": "agent_select_location_from_list",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
