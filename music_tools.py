@@ -275,7 +275,7 @@ music_tools = [
     {
         "type": "custom",
         "name": "agent_play_youtube_music",
-        "description": "Play a song, album, artist, or playlist on YouTube Music. IMPORTANT: YouTube Music must already be open - use launch_app tool first to open YouTube Music if needed. This will search for the query and play the first result. If the user hasn't specified a music app, please check their music app preference first. They may prefer an app other than YouTube Music.",
+        "description": "Play a song, album, artist, or playlist on YouTube Music. This tool automatically opens YouTube Music. It will search for the query and play the first result. If the user hasn't specified a music app, please check their music app preference first. They may prefer an app other than YouTube Music.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -290,7 +290,7 @@ music_tools = [
     {
         "type": "custom",
         "name": "agent_queue_youtube_music",
-        "description": "Add a song, album, artist, or playlist to the queue in YouTube Music. IMPORTANT: YouTube Music must already be open - use launch_app tool first to open YouTube Music if needed. This will search for the query and add the first result to the queue. Use this when the user wants to add music to their queue without immediately playing it. If the user hasn't specified a music app, please check their music app preference first. They may prefer an app other than YouTube Music.",
+        "description": "Add a song, album, artist, or playlist to the queue in YouTube Music. This tool automatically opens YouTube Music. It will search for the query and add the first result to the queue. Use this when the user wants to add music to their queue without immediately playing it. If the user hasn't specified a music app, please check their music app preference first. They may prefer an app other than YouTube Music.",
         "input_schema": {
             "type": "object",
             "properties": {

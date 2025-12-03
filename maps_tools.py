@@ -583,7 +583,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_search_google_maps_location",
-        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and automatically select the first result. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. This tool results in a single location displayed on the map. After calling this tool, you can call get_google_maps_directions if the user wants directions to the place. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and automatically select the first result. This tool automatically opens Google Maps. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. This tool results in a single location displayed on the map. After calling this tool, you can call get_google_maps_directions if the user wants directions to the place.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -598,7 +598,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_search_google_maps_phrase",
-        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list. After using this tool, you MUST ask the user to select one. Based on what they say, you can use the select_location_from_list tool to actually select an item from the list of results. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. This tool automatically opens Google Maps. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list. After using this tool, you MUST ask the user to select one. Based on what they say, you can use the select_location_from_list tool to actually select an item from the list of results.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -613,7 +613,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_get_google_maps_directions",
-        "description": "Get directions to a location that's currently displayed in Google Maps. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation. IMPORTANT: A location must already be displayed in Google Maps - this tool is menat to be used after search_google_maps_location or select_location_from_list. If you have JUST already called get_google_maps_directions sucessfully and are just changing the mode of transportation, you will have to set already_in_directions to true, otherwise, make sure it is set to false or leave it as its default value.",
+        "description": "Get directions to a location that's currently displayed in Google Maps. This tool automatically opens Google Maps. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation. A location must already be displayed in Google Maps - this tool is meant to be used after search_google_maps_location or select_location_from_list. If you have JUST already called get_google_maps_directions successfully and are just changing the mode of transportation, you will have to set already_in_directions to true, otherwise, make sure it is set to false or leave it as its default value.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -633,7 +633,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_recenter_google_maps",
-        "description": "Re-center the Google Maps view to the user's current location. This is useful during navigation when the user wants to see their current position on the map.",
+        "description": "Re-center the Google Maps view to the user's current location. This tool automatically opens Google Maps. This is useful during navigation when the user wants to see their current position on the map.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -643,7 +643,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_fullscreen_google_maps",
-        "description": "Bring Google Maps to fullscreen/foreground when it's running in the background or shown as a small overlay. Use this when the user asks you to make Google Maps big or fullscreen.",
+        "description": "Bring Google Maps to fullscreen/foreground when it's running in the background or shown as a small overlay. This tool automatically opens Google Maps. Use this when the user asks you to make Google Maps big or fullscreen.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -653,7 +653,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_select_location_from_list",
-        "description": "Select a specific location from a Google Maps search results list. This must be used after user responds to search_google_maps_phrase results, to select the user's choice. This function can select by position (1 for first item, 2 for second, etc.) or by matching part of the business name or address. If your goal was to get directions for the location, you MUST call get_google_maps_directions afterwards.",
+        "description": "Select a specific location from a Google Maps search results list. This tool automatically opens Google Maps. This must be used after user responds to search_google_maps_phrase results, to select the user's choice. This function can select by position (1 for first item, 2 for second, etc.) or by matching part of the business name or address. If your goal was to get directions for the location, you MUST call get_google_maps_directions afterwards.",
         "input_schema": {
             "type": "object",
             "properties": {
