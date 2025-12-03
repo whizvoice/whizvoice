@@ -596,7 +596,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_whatsapp_select_chat",
-        "description": "Select a specific chat in WhatsApp by contact or group name. IMPORTANT: WhatsApp must already be open - use launch_app tool first to open WhatsApp if needed. Use this when the user wants to open a conversation with a specific person or group in WhatsApp.",
+        "description": "Select a specific chat in WhatsApp by contact or group name. This tool automatically opens WhatsApp if not already open. Use this when the user wants to open a conversation with a specific person or group in WhatsApp.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -611,7 +611,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_whatsapp_draft_message",
-        "description": "Draft a message for WhatsApp and show it in an overlay for user review. The tool will automatically open the specified chat if not already open (no need to call whatsapp_select_chat first). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "description": "Draft a message for WhatsApp and show it in an overlay for user review. This tool automatically opens WhatsApp and navigates to the specified chat. Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -634,7 +634,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_whatsapp_send_message",
-        "description": "Send a message in WhatsApp. IMPORTANT: You MUST have already: 1) Opened WhatsApp (launch_app), 2) Selected a chat (whatsapp_select_chat), 3) Drafted the message (whatsapp_draft_message), 4) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in WhatsApp.",
+        "description": "Send a message in WhatsApp. This tool automatically opens WhatsApp if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (whatsapp_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in WhatsApp.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -649,7 +649,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_sms_select_chat",
-        "description": "Select a specific SMS conversation by contact name or phone number in Google Messages. IMPORTANT: Google Messages app must already be open - use launch_app tool first to open 'Messages' if needed. Use this when the user wants to open an SMS/text message conversation with a specific contact or phone number.",
+        "description": "Select a specific SMS conversation by contact name or phone number in Google Messages. This tool automatically opens Google Messages if not already open. Use this when the user wants to open an SMS/text message conversation with a specific contact or phone number.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -664,7 +664,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_sms_draft_message",
-        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. The tool will automatically open the specified conversation if not already open (no need to call sms_select_chat first). Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. This tool automatically opens Google Messages and navigates to the specified conversation. Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -687,7 +687,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_sms_send_message",
-        "description": "Send an SMS/text message in Google Messages. IMPORTANT: You MUST have already: 1) Opened Messages app (launch_app), 2) Selected a conversation (sms_select_chat), 3) Drafted the message (sms_draft_message), 4) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in Google Messages.",
+        "description": "Send an SMS/text message in Google Messages. This tool automatically opens Google Messages if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (sms_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in Google Messages.",
         "input_schema": {
             "type": "object",
             "properties": {
