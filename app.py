@@ -761,13 +761,14 @@ TOOL_REGISTRY = {
         "needs_websocket": True,  # This tool needs WebSocket context
         "args_mapping": lambda args, user_id, **kwargs: (
             args.get('message'),
+            args.get('chat_name'),  # Required: recipient name/phone number
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id'),
-            args.get('previous_text')  # Add previous_text parameter
+            args.get('previous_text')
         ),
-        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
+        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else ({"error": "chat_name is required."} if not args.get('chat_name') else None)
     },
     "agent_sms_select_chat": {
         "function_name": "agent_sms_select_chat",
@@ -790,13 +791,14 @@ TOOL_REGISTRY = {
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
             args.get('message'),
+            args.get('contact_name'),  # Required: recipient name/phone number
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id'),
             args.get('previous_text')
         ),
-        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
+        "validation": lambda args: {"error": "Message is required."} if not args.get('message') else ({"error": "contact_name is required."} if not args.get('contact_name') else None)
     },
     "agent_sms_send_message": {
         "function_name": "agent_sms_send_message",

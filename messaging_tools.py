@@ -101,17 +101,15 @@ async def agent_whatsapp_select_chat(chat_name: str, user_id: str = None, websoc
             "success": False
         }
 
-async def agent_whatsapp_draft_message(message: str, user_id: str = None, websocket = None,
-                                tool_result_handler = None, conversation_id: str = None, previous_text: str = None,
-                                chat_name: str = None) -> dict:
+async def agent_whatsapp_draft_message(message: str, chat_name: str, user_id: str = None, websocket = None,
+                                tool_result_handler = None, conversation_id: str = None, previous_text: str = None) -> dict:
     """
     Draft a message in WhatsApp by showing an overlay for user review.
 
     This tool shows a WhizVoice overlay with the message text for user confirmation
     before actually sending. Always use this before sending messages.
 
-    If chat_name is provided and the correct chat isn't already open, the tool will
-    automatically navigate to that chat first before drafting the message.
+    The tool will automatically navigate to the specified chat if not already open.
 
     If previous_text is provided, the overlay will show tracked changes:
     - Deleted text appears with red strikethrough
@@ -120,9 +118,9 @@ async def agent_whatsapp_draft_message(message: str, user_id: str = None, websoc
 
     Args:
         message: The message text to draft for user review
+        chat_name: The name, phone number, or contact of the recipient. The tool will
+                   automatically navigate to this chat if not already open.
         previous_text: Optional. The previous version of the message for track changes display
-        chat_name: Optional. The name of the contact/chat to draft message to. If provided
-                   and the correct chat isn't open, will automatically navigate to it.
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -398,24 +396,23 @@ async def agent_sms_select_chat(contact_name: str, user_id: str = None, websocke
         }
 
 
-async def agent_sms_draft_message(message: str, user_id: str = None, websocket = None,
+async def agent_sms_draft_message(message: str, contact_name: str, user_id: str = None, websocket = None,
                             tool_result_handler = None, conversation_id: str = None,
-                            previous_text: str = None, contact_name: str = None) -> dict:
+                            previous_text: str = None) -> dict:
     """
     Draft an SMS message with a visual overlay for user confirmation before sending.
 
-    If contact_name is provided and the correct conversation isn't already open, the tool will
-    automatically navigate to that contact's conversation first before drafting the message.
+    The tool will automatically navigate to the specified contact's conversation if not already open.
 
     Args:
         message: The message text to draft
+        contact_name: The name or phone number of the contact to send the message to.
+                      The tool will automatically navigate to this conversation if not already open.
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
         conversation_id: The conversation ID for context
         previous_text: Optional previous version of the message (for tracked changes)
-        contact_name: Optional. The name of the contact to draft message to. If provided
-                      and the correct conversation isn't open, will automatically navigate to it.
 
     Returns:
         A dictionary containing the result of the draft operation
@@ -614,7 +611,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_whatsapp_draft_message",
-        "description": "Draft a message for WhatsApp and show it in an overlay for user review. If chat_name is provided, the tool will automatically open that chat if not already open (no need to call whatsapp_select_chat first). If chat_name is not provided, WhatsApp chat must already be open. Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "description": "Draft a message for WhatsApp and show it in an overlay for user review. The tool will automatically open the specified chat if not already open (no need to call whatsapp_select_chat first). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -624,14 +621,14 @@ messaging_tools = [
                 },
                 "chat_name": {
                     "type": "string",
-                    "description": "Optional. The name of the contact or group chat to send to. If provided and the correct chat isn't open, will automatically navigate to it."
+                    "description": "The name, phone number, or contact of the recipient to send the message to. The tool will automatically navigate to this chat if not already open."
                 },
                 "previous_text": {
                     "type": "string",
                     "description": "Optional. The previous version of the message text. When provided, the overlay will show tracked changes (deletions in red strikethrough, additions in blue)"
                 }
             },
-            "required": ["message"]
+            "required": ["message", "chat_name"]
         }
     },
     {
@@ -667,7 +664,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_sms_draft_message",
-        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. If contact_name is provided, the tool will automatically open that conversation if not already open (no need to call sms_select_chat first). If contact_name is not provided, an SMS conversation must already be open. Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. The tool will automatically open the specified conversation if not already open (no need to call sms_select_chat first). Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -677,14 +674,14 @@ messaging_tools = [
                 },
                 "contact_name": {
                     "type": "string",
-                    "description": "Optional. The name or phone number of the contact to send to. If provided and the correct conversation isn't open, will automatically navigate to it."
+                    "description": "The name or phone number of the contact to send the message to. The tool will automatically navigate to this conversation if not already open."
                 },
                 "previous_text": {
                     "type": "string",
                     "description": "Optional. The previous version of the message text. When provided, the overlay will show tracked changes (deletions in red strikethrough, additions in blue)"
                 }
             },
-            "required": ["message"]
+            "required": ["message", "contact_name"]
         }
     },
     {
