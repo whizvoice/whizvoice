@@ -65,7 +65,7 @@ def set_music_app_preference(user_id: str, music_app: str) -> tuple[bool, str]:
 
 # ================== Music Playback Functions ==================
 
-async def agent_play_youtube_music(query: str, allow_playlist: bool = False, allow_episode: bool = False,
+async def agent_play_youtube_music(query: str, content_type: str = "song",
                             user_id: str = None, websocket = None,
                             tool_result_handler = None, conversation_id: str = None) -> dict:
     """
@@ -73,8 +73,7 @@ async def agent_play_youtube_music(query: str, allow_playlist: bool = False, all
 
     Args:
         query: The song, artist, album, or playlist to search for
-        allow_playlist: If True, allows clicking on Album/Playlist results (for soundtrack/album requests)
-        allow_episode: If True, allows clicking on Episode/Podcast results (for podcast requests)
+        content_type: Type of content to play - "song", "album", "artist", "episode", "video", or "community_playlist"
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -87,7 +86,7 @@ async def agent_play_youtube_music(query: str, allow_playlist: bool = False, all
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
-        logger.info(f"Playing YouTube Music: '{query}' (user: {user_id}, request: {tool_request_id}, allow_playlist={allow_playlist}, allow_episode={allow_episode})")
+        logger.info(f"Playing YouTube Music: '{query}' (user: {user_id}, request: {tool_request_id}, content_type={content_type})")
 
         # If no WebSocket provided, return error
         if not websocket:
@@ -104,8 +103,7 @@ async def agent_play_youtube_music(query: str, allow_playlist: bool = False, all
             "request_id": tool_request_id,
             "params": {
                 "query": query,
-                "allow_playlist": allow_playlist,
-                "allow_episode": allow_episode
+                "content_type": content_type
             },
             "conversation_id": conversation_id
         }
@@ -280,24 +278,21 @@ music_tools = [
     {
         "type": "custom",
         "name": "agent_play_youtube_music",
-        "description": "Play a song, album, artist, or playlist on YouTube Music. This tool automatically opens YouTube Music. It will search for the query and play the first matching result. By default, only Songs and Videos are clickable. Use allow_playlist=true for album/soundtrack/playlist requests. Use allow_episode=true for podcast requests. If the user hasn't specified a music app, please check their music app preference first.",
+        "description": "Play music on YouTube Music. This tool automatically opens YouTube Music, searches for the query, and plays the first matching result. You MUST specify the content_type to filter results appropriately. If the user hasn't specified a music app, please check their music app preference first.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The song name, artist, album, or playlist to play on YouTube Music. Examples: 'Bohemian Rhapsody', 'Taylor Swift', 'Abbey Road album', 'Chill playlist'"
+                    "description": "The song name, artist, album, or playlist to play on YouTube Music. Examples: 'Bohemian Rhapsody', 'Taylor Swift', 'Abbey Road', 'Chill vibes'"
                 },
-                "allow_playlist": {
-                    "type": "boolean",
-                    "description": "Set to true when the user wants to play an album, soundtrack, or playlist. Default is false (only Songs and Videos are clickable)."
-                },
-                "allow_episode": {
-                    "type": "boolean",
-                    "description": "Set to true when the user wants to play a podcast or podcast episode. Default is false."
+                "content_type": {
+                    "type": "string",
+                    "enum": ["song", "album", "artist", "video", "episode", "community_playlist"],
+                    "description": "The type of content to play. Use 'song' for specific songs (default). Use 'album' for albums or soundtracks. Use 'artist' for artist pages/radio. Use 'video' for music videos. Use 'episode' for podcasts. Use 'community_playlist' for user-created playlists or genre-based requests like 'play some 90s pop'."
                 }
             },
-            "required": ["query"]
+            "required": ["query", "content_type"]
         }
     },
     {
