@@ -848,6 +848,8 @@ TOOL_REGISTRY = {
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
             args.get('query'),
+            args.get('allow_playlist', False),
+            args.get('allow_episode', False),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
