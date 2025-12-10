@@ -670,7 +670,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_select_location_from_list",
-        "description": "Select a specific location from a Google Maps search results list. This tool automatically opens Google Maps. This must be used after user responds to search_google_maps_phrase results, to select the user's choice. This function can select by position (1 for first item, 2 for second, etc.) or by matching part of the business name or address. If your goal was to get directions for the location, you MUST call get_google_maps_directions afterwards.",
+        "description": "Select a specific location from a Google Maps search results list WITHOUT getting directions. This tool automatically opens Google Maps. Use this ONLY if you need to select a location but NOT get directions. If your goal is to get directions, use agent_get_google_maps_directions directly with the position or fragment parameters instead - it combines selection and directions in one step and is more efficient.",
         "input_schema": {
             "type": "object",
             "properties": {
