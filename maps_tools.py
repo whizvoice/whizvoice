@@ -477,14 +477,17 @@ async def agent_fullscreen_google_maps(user_id: str = None, websocket = None,
 
 
 async def agent_get_google_maps_directions(mode: Optional[str] = None, already_in_directions: bool = False,
+                                     position: Optional[int] = None, fragment: Optional[str] = None,
                                      user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
     """
-    Get directions to a location that's currently displayed in Google Maps.
+    Get directions to a location that's currently displayed in Google Maps, or select a location from a search results list and get directions to it.
 
     Args:
         mode: Optional. Mode of transportation - 'drive', 'walk', 'bike', or 'transit'. If not specified, uses Google Maps' currently selected mode (usually the user's last used mode).
         already_in_directions: Optional. Set to true if already viewing directions for the SAME DESTINATION and want to get directions to a different place. This will press back first before getting new directions.
+        position: Optional. If selecting from a search results list, the position to select (1 for first, 2 for second, etc.)
+        fragment: Optional. If selecting from a search results list, match by part of the business name or address (e.g., 'Fulton', 'Market St')
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -505,7 +508,7 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None, already_i
                 logger.warning(f"Invalid transportation mode '{mode}', will use default")
                 mode = None
 
-        logger.info(f"Getting Google Maps directions with mode '{mode}', already_in_directions={already_in_directions} (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Getting Google Maps directions with mode '{mode}', already_in_directions={already_in_directions}, position={position}, fragment={fragment} (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
@@ -516,14 +519,20 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None, already_i
             }
 
         # Create the WebSocket message for the Android app
+        params = {
+            "mode": mode,
+            "already_in_directions": already_in_directions
+        }
+        if position is not None:
+            params["position"] = position
+        if fragment is not None:
+            params["fragment"] = fragment
+
         tool_execution_message = {
             "type": "tool_execution",
             "tool": "agent_get_google_maps_directions",
             "request_id": tool_request_id,
-            "params": {
-                "mode": mode,
-                "already_in_directions": already_in_directions
-            },
+            "params": params,
             "conversation_id": conversation_id
         }
 
@@ -613,7 +622,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_get_google_maps_directions",
-        "description": "Get directions to a location that's currently displayed in Google Maps. This tool automatically opens Google Maps. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation. A location must already be displayed in Google Maps - this tool is meant to be used after search_google_maps_location or select_location_from_list. If you have JUST already called get_google_maps_directions successfully and are just changing the mode of transportation, you will have to set already_in_directions to true, otherwise, make sure it is set to false or leave it as its default value.",
+        "description": "Get directions to a location in Google Maps. This tool automatically opens Google Maps. Can either get directions to the currently displayed location, OR select a location from a search results list first (using position or fragment) and then get directions. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation. If you have JUST already called get_google_maps_directions successfully and are just changing the mode of transportation, you will have to set already_in_directions to true.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -625,6 +634,14 @@ maps_tools = [
                 "already_in_directions": {
                     "type": "boolean",
                     "description": "Set to true if already viewing directions. This will press back first before getting new directions. Defaults to false."
+                },
+                "position": {
+                    "type": "integer",
+                    "description": "If selecting from a search results list, the position to select (1 for first, 2 for second, etc.). Use this when user says 'the first one', 'the second one', etc."
+                },
+                "fragment": {
+                    "type": "string",
+                    "description": "If selecting from a search results list, match by part of the business name or address (e.g., 'Fulton', 'Market St'). Use this when user refers to a specific location by name or street."
                 }
             },
             "required": []
