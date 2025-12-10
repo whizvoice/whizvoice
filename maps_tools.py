@@ -622,7 +622,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_get_google_maps_directions",
-        "description": "Get directions to a location in Google Maps. This tool automatically opens Google Maps. Can either get directions to the currently displayed location, OR select a location from a search results list first (using position or fragment) and then get directions. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation. If you have JUST already called get_google_maps_directions successfully and are just changing the mode of transportation, you will have to set already_in_directions to true.",
+        "description": "Get directions to a location in Google Maps. This tool automatically opens Google Maps and detects the current screen state. Can either get directions to the currently displayed location, OR select a location from a search results list first (using position or fragment) and then get directions. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -630,10 +630,6 @@ maps_tools = [
                     "type": "string",
                     "description": "Mode of transportation. Valid options: 'drive' (car), 'walk' (walking), 'bike' (bicycle), or 'transit' (public transportation). No specific mode of transporation is selected if not provided, which defaults to the mode last used by Google Maps.",
                     "enum": ["drive", "walk", "bike", "transit"]
-                },
-                "already_in_directions": {
-                    "type": "boolean",
-                    "description": "Set to true if already viewing directions. This will press back first before getting new directions. Defaults to false."
                 },
                 "position": {
                     "type": "integer",
