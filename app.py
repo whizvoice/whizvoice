@@ -924,7 +924,6 @@ TOOL_REGISTRY = {
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
             args.get('mode'),
-            args.get('already_in_directions', False),
             args.get('position'),
             args.get('fragment'),
             user_id,
