@@ -42,7 +42,8 @@ from models import (
     ConversationResponse, MessageCreate, MessageResponse,
     DialogflowWebhookRequest, DialogflowWebhookResponse,
     CreateCheckoutSessionRequest, CreateCheckoutSessionResponse,
-    CancelSubscriptionResponse, SubscriptionStatusResponse
+    CancelSubscriptionResponse, SubscriptionStatusResponse,
+    UiDumpCreate, UiDumpResponse
 )
 from database import (
     load_conversation_history,
@@ -3534,6 +3535,71 @@ async def get_request_state_endpoint(
         raise HTTPException(status_code=403, detail="Access denied")
     
     return state
+
+@app.post("/ui-dumps", response_model=UiDumpResponse)
+async def create_ui_dump(
+    ui_dump: UiDumpCreate,
+    current_user: Dict = Depends(get_current_user)
+):
+    """
+    Upload a UI hierarchy dump from the screen agent when navigation fails.
+    Used for debugging and improving screen agent code.
+    """
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+
+    try:
+        # Build the insert data
+        insert_data = {
+            "user_id": user_id,
+            "dump_reason": ui_dump.dump_reason,
+            "ui_hierarchy": ui_dump.ui_hierarchy,
+        }
+
+        # Add optional fields if provided
+        if ui_dump.error_message:
+            insert_data["error_message"] = ui_dump.error_message
+        if ui_dump.package_name:
+            insert_data["package_name"] = ui_dump.package_name
+        if ui_dump.device_model:
+            insert_data["device_model"] = ui_dump.device_model
+        if ui_dump.device_manufacturer:
+            insert_data["device_manufacturer"] = ui_dump.device_manufacturer
+        if ui_dump.android_version:
+            insert_data["android_version"] = ui_dump.android_version
+        if ui_dump.screen_width:
+            insert_data["screen_width"] = ui_dump.screen_width
+        if ui_dump.screen_height:
+            insert_data["screen_height"] = ui_dump.screen_height
+        if ui_dump.app_version:
+            insert_data["app_version"] = ui_dump.app_version
+        if ui_dump.conversation_id:
+            insert_data["conversation_id"] = ui_dump.conversation_id
+        if ui_dump.recent_actions:
+            insert_data["recent_actions"] = ui_dump.recent_actions
+        if ui_dump.screen_agent_context:
+            insert_data["screen_agent_context"] = ui_dump.screen_agent_context
+
+        # Insert into Supabase
+        result = supabase.table("screen_agent_ui_dumps").insert(insert_data).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to save UI dump")
+
+        row = result.data[0]
+        logger.info(f"Saved UI dump for user {user_id}: reason={ui_dump.dump_reason}, id={row['id']}")
+
+        return UiDumpResponse(
+            id=row["id"],
+            created_at=row["created_at"]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving UI dump for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to save UI dump")
+
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
