@@ -476,7 +476,7 @@ async def agent_fullscreen_google_maps(user_id: str = None, websocket = None,
         }
 
 
-async def agent_get_google_maps_directions(mode: Optional[str] = None, already_in_directions: bool = False,
+async def agent_get_google_maps_directions(mode: Optional[str] = None,
                                      position: Optional[int] = None, fragment: Optional[str] = None,
                                      user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
@@ -485,7 +485,6 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None, already_i
 
     Args:
         mode: Optional. Mode of transportation - 'drive', 'walk', 'bike', or 'transit'. If not specified, uses Google Maps' currently selected mode (usually the user's last used mode).
-        already_in_directions: Optional. Set to true if already viewing directions for the SAME DESTINATION and want to get directions to a different place. This will press back first before getting new directions.
         position: Optional. If selecting from a search results list, the position to select (1 for first, 2 for second, etc.)
         fragment: Optional. If selecting from a search results list, match by part of the business name or address (e.g., 'Fulton', 'Market St')
         user_id: The user ID (for logging purposes)
@@ -508,7 +507,7 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None, already_i
                 logger.warning(f"Invalid transportation mode '{mode}', will use default")
                 mode = None
 
-        logger.info(f"Getting Google Maps directions with mode '{mode}', already_in_directions={already_in_directions}, position={position}, fragment={fragment} (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Getting Google Maps directions with mode '{mode}', position={position}, fragment={fragment} (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
@@ -520,8 +519,7 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None, already_i
 
         # Create the WebSocket message for the Android app
         params = {
-            "mode": mode,
-            "already_in_directions": already_in_directions
+            "mode": mode
         }
         if position is not None:
             params["position"] = position
@@ -592,7 +590,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_search_google_maps_location",
-        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and automatically select the first result. This tool automatically opens Google Maps. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. This tool results in a single location displayed on the map. After calling this tool, you can call get_google_maps_directions if the user wants directions to the place.",
+        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and show the first result with the location details. This tool automatically opens Google Maps. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. Also, if the user is looking for directions, DO NOT use this, use get_google_maps_directions instead.",
         "input_schema": {
             "type": "object",
             "properties": {
