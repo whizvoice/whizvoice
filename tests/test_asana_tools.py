@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from asana_tools import (
     get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date,
-    get_parent_tasks, get_new_asana_task_id, change_task_parent, delete_asana_task
+    get_parent_tasks, get_new_asana_task_id, delete_asana_task
 )
 
 class TestAsanaTools(unittest.TestCase):
@@ -325,40 +325,6 @@ class TestAsanaTools(unittest.TestCase):
                 'notes': 'Subtask notes'
             }},
             task_gid='parent_task1',
-            opts={'opt_fields': 'name,due_on,completed,projects.name'}
-        )
-
-    @patch('asana_tools.get_decrypted_preference_key')
-    @patch('asana.TasksApi')
-    @patch('asana.ApiClient')
-    def test_change_task_parent(self, mock_client, mock_tasks_api, mock_get_token):
-        """Test changing a task's parent"""
-        # Setup mocks
-        mock_get_token.return_value = "fake_token"
-        
-        # Mock task API
-        mock_task_api = MagicMock()
-        mock_tasks_api.return_value = mock_task_api
-        
-        # Create a mock response for set_parent_for_task
-        mock_response = {
-            'gid': 'task123',
-            'name': 'Test Task',
-            'parent': {'gid': 'parent456', 'name': 'New Parent Task'}
-        }
-        mock_task_api.set_parent_for_task.return_value = mock_response
-        
-        # Test setting a new parent
-        result = change_task_parent(self.test_user_id, 'task123', 'parent456')
-        
-        # Assert - The function returns the updated task object
-        self.assertEqual(result['gid'], 'task123')
-        self.assertEqual(result['parent']['gid'], 'parent456')
-        
-        # Verify correct API calls
-        mock_task_api.set_parent_for_task.assert_called_once_with(
-            body={'data': {'parent': 'parent456'}},
-            task_gid='task123',
             opts={'opt_fields': 'name,due_on,completed,projects.name'}
         )
 
