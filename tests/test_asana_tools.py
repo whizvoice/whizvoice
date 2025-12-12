@@ -281,7 +281,7 @@ class TestAsanaTools(unittest.TestCase):
                 'due_on': '2024-03-20',
                 'notes': 'Task notes'
             }},
-            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+            opts={'opt_fields': 'gid,name,due_on,completed,projects.name'}
         )
 
     @patch('asana_tools.get_current_date')
@@ -325,7 +325,7 @@ class TestAsanaTools(unittest.TestCase):
                 'notes': 'Subtask notes'
             }},
             task_gid='parent_task1',
-            opts={'opt_fields': 'name,due_on,completed,projects.name'}
+            opts={'opt_fields': 'gid,name,due_on,completed,projects.name'}
         )
 
     @patch('asana_tools.get_decrypted_preference_key')
