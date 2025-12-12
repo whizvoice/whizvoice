@@ -147,3 +147,25 @@ class SubscriptionStatusResponse(BaseModel):
     status: Optional[str] = None
     current_period_end: Optional[int] = None
     cancel_at_period_end: Optional[bool] = None
+
+
+# Screen agent UI dump models
+class UiDumpCreate(BaseModel):
+    dump_reason: str
+    error_message: Optional[str] = None
+    ui_hierarchy: Optional[str] = None
+    package_name: Optional[str] = None
+    device_model: Optional[str] = None
+    device_manufacturer: Optional[str] = None
+    android_version: Optional[str] = None
+    screen_width: Optional[int] = None
+    screen_height: Optional[int] = None
+    app_version: Optional[str] = None
+    conversation_id: Optional[int] = None
+    recent_actions: Optional[List[str]] = None
+    screen_agent_context: Optional[Dict[str, Any]] = None
+
+
+class UiDumpResponse(BaseModel):
+    id: int
+    created_at: str

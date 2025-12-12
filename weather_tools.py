@@ -6,7 +6,7 @@ import logging
 import json
 from typing import Dict, Any, Optional
 import httpx
-from preferences import get_preference
+from preferences import get_preference, set_preference
 from location_tools import geocode_location
 
 # Configure logging
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 WEATHER_GOV_USER_AGENT = "WhizVoice/1.0 (contact@whizvoice.com)"
 
 
-async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = None) -> dict:
+async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = None, temperature_units: Optional[str] = None) -> dict:
     """
     Get weather forecast for a specific number of days ahead.
 
@@ -24,6 +24,7 @@ async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = N
         days_ahead: Number of days ahead to get forecast for (0 = today, 1 = tomorrow, etc., max 6)
         user_id: The user ID
         location: Location to use.
+        temperature_units: Temperature units - "us" for Fahrenheit or "si" for Celsius. If not provided, uses saved preference or defaults to "us".
 
     Returns:
         Dictionary with weather forecast data or error
@@ -101,6 +102,33 @@ async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = N
 
         logger.info(f"Fetching weather for {location_name} ({latitude}, {longitude})")
 
+        # Get temperature units preference
+        saved_preference = get_preference(user_id, 'temperature_units')
+
+        # Determine units to use and save preference if needed
+        if not saved_preference:
+            # No saved preference exists
+            if temperature_units:
+                # Parameter provided, save it
+                logger.info(f"No saved temperature preference found, saving provided units: {temperature_units}")
+                set_preference(user_id, 'temperature_units', temperature_units)
+                units_to_use = temperature_units
+            else:
+                # No parameter provided, save default "us"
+                logger.info(f"No saved temperature preference found and no parameter provided, saving default: us")
+                set_preference(user_id, 'temperature_units', 'us')
+                units_to_use = "us"
+        elif temperature_units:
+            # Saved preference exists, but parameter provided - use parameter
+            if saved_preference != temperature_units:
+                set_preference(user_id, 'temperature_units', temperature_units)
+            units_to_use = temperature_units
+        else:
+            # Use saved preference
+            units_to_use = saved_preference
+
+        logger.info(f"Using temperature units: {units_to_use}")
+
         # Step 1: Get forecast URL from points endpoint
         points_url = f"https://api.weather.gov/points/{latitude},{longitude}"
         headers = {"User-Agent": WEATHER_GOV_USER_AGENT}
@@ -135,9 +163,11 @@ async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = N
                     "error": "Weather.gov did not return a forecast URL for this location"
                 }
 
-            # Step 2: Get the actual forecast
+            # Step 2: Get the actual forecast with temperature units
             try:
-                forecast_response = await client.get(forecast_url, headers=headers, timeout=10.0)
+                # Add units parameter to the forecast URL
+                forecast_params = {"units": units_to_use}
+                forecast_response = await client.get(forecast_url, headers=headers, params=forecast_params, timeout=10.0)
                 forecast_response.raise_for_status()
                 forecast_data = forecast_response.json()
             except Exception as e:
@@ -223,6 +253,58 @@ async def get_weather(days_ahead: int, user_id: str, location: Optional[str] = N
         }
 
 
+async def set_temperature_units(unit: str, user_id: str) -> dict:
+    """
+    Set the user's preferred temperature unit for weather forecasts.
+
+    Args:
+        unit: Temperature unit - either "us" for Fahrenheit or "si" for Celsius
+        user_id: The user ID
+
+    Returns:
+        Dictionary with success status and message
+    """
+    try:
+        # Validate the unit parameter
+        if unit not in ["us", "si"]:
+            logger.warning(f"Invalid temperature unit value: {unit}")
+            return {
+                "success": False,
+                "error": "Invalid temperature unit. Must be 'us' (Fahrenheit) or 'si' (Celsius)."
+            }
+
+        # Check if the value is already set
+        current = get_preference(user_id, 'temperature_units')
+        if current == unit:
+            unit_name = "Fahrenheit" if unit == "us" else "Celsius"
+            return {
+                "success": True,
+                "message": f"Temperature unit already set to {unit_name}. No update needed."
+            }
+
+        # Set the preference
+        if set_preference(user_id, 'temperature_units', unit):
+            unit_name = "Fahrenheit" if unit == "us" else "Celsius"
+            logger.info(f"Successfully set temperature units to {unit} ({unit_name}) for user {user_id}")
+            return {
+                "success": True,
+                "message": f"Successfully set temperature unit to {unit_name}."
+            }
+        else:
+            logger.error(f"Failed to save temperature_units preference for user {user_id}")
+            return {
+                "success": False,
+                "error": "Failed to save temperature unit preference."
+            }
+
+    except Exception as e:
+        logger.error(f"Error in set_temperature_units for user {user_id}: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "error": f"Error setting temperature units: {str(e)}"
+        }
+
+
 # Define the weather tools for Claude
 weather_tools = [
     {
@@ -239,9 +321,30 @@ weather_tools = [
                 "location": {
                     "type": "string",
                     "description": "Location string. Do not submit this parameter if the user did not specify, so that the user's default weather location can be used."
+                },
+                "temperature_units": {
+                    "type": "string",
+                    "description": "Temperature units: 'us' for Fahrenheit or 'si' for Celsius. Do not submit this parameter unless user asked for Fahrenheit or Celsius specifically as their temperature_units preference will be used by default.",
+                    "enum": ["us", "si"]
                 }
             },
             "required": ["days_ahead"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "set_temperature_units",
+        "description": "Set the user's preferred temperature unit. Use 'us' for Fahrenheit or 'si' for Celsius. Use this when the user asks you to remember their preference for Fahrenheit or Celsius.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "unit": {
+                    "type": "string",
+                    "description": "Temperature unit: 'us' for Fahrenheit or 'si' for Celsius",
+                    "enum": ["us", "si"]
+                }
+            },
+            "required": ["unit"]
         }
     }
 ]

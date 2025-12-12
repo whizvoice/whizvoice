@@ -50,35 +50,63 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         result = supabase.table("messages").select("*").eq("conversation_id", actual_conversation_id).order("timestamp", desc=False).execute()
 
         # Convert database messages to Claude format
-        # Group consecutive messages by role ONLY (not request_id) to ensure proper alternation
-        # This is critical because Claude API requires strict user/assistant alternation
+        # Group consecutive messages by role with special handling for tool boundaries
+        # This is critical because:
+        # 1. Claude API requires strict user/assistant alternation
+        # 2. ASSISTANT messages with tool_use must be followed by USER tool_results
+        # 3. USER messages should only be merged if they share the same request_id
         claude_messages = []
-        current_group = None  # (role, content_blocks)
+        current_group = None  # (role, request_id, content_blocks)
 
         for row in result.data:
-            message_role = "user" if row["message_sender"] == "USER" else "assistant"
+            # Skip cancelled messages
+            if row.get("cancelled"):
+                continue
 
-            # Determine if this row belongs to current group (same role)
-            should_group = (
-                current_group is not None and
-                message_role == current_group[0]
-            )
+            message_role = "user" if row["message_sender"] == "USER" else "assistant"
+            row_request_id = row.get("request_id")
+
+            # Check if current row contains a tool_use block
+            has_tool_use = False
+            if row.get("tool_content"):
+                for block in row["tool_content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        has_tool_use = True
+                        break
+
+            # Determine if this row belongs to current group
+            if current_group is not None and message_role == current_group[0]:
+                # Same role - but should we merge?
+                if message_role == "assistant":
+                    # ASSISTANT: Can merge UNLESS the current group already has a tool_use
+                    # Once we have a tool_use, we must close the group (need USER tool_result next)
+                    # But we CAN add text-only messages before hitting the tool_use
+                    should_group = not current_group[3]  # Don't merge if group already has tool_use
+                elif message_role == "user":
+                    # USER: Only merge if same request_id
+                    should_group = (row_request_id == current_group[1])
+                else:
+                    should_group = False
+            else:
+                should_group = False
 
             if should_group:
                 # Add to current group
                 # Handle messages that may have BOTH text content and tool_content
-                # (e.g., tool_use messages with text_before merged)
                 # Text must come before tool_use blocks
                 if row.get("content") and row["content"].strip():
-                    current_group[1].append({"type": "text", "text": row["content"]})
+                    current_group[2].append({"type": "text", "text": row["content"]})
                 if row.get("tool_content"):
-                    current_group[1].extend(row["tool_content"])
+                    current_group[2].extend(row["tool_content"])
+                # Update has_tool_use flag for the group
+                if has_tool_use:
+                    current_group[3] = True
             else:
                 # Flush current group if exists
-                if current_group and current_group[1]:
+                if current_group and current_group[2]:
                     claude_messages.append({
                         "role": current_group[0],
-                        "content": current_group[1]
+                        "content": current_group[2]
                     })
 
                 # Start new group
@@ -90,13 +118,13 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 if row.get("tool_content"):
                     content_blocks.extend(row["tool_content"])
 
-                current_group = [message_role, content_blocks]
+                current_group = [message_role, row_request_id, content_blocks, has_tool_use]
 
         # Flush final group
-        if current_group and current_group[1]:
+        if current_group and current_group[2]:
             claude_messages.append({
                 "role": current_group[0],
-                "content": current_group[1]
+                "content": current_group[2]
             })
 
         return claude_messages
@@ -154,8 +182,8 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         return []
 
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None) -> Optional[Tuple[int, int]]:
-    """Save a message to the database and return (conversation_id, message_id)
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False) -> Optional[Tuple[int, int, List[int]]]:
+    """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids)
 
     Args:
         user_id: User ID
@@ -167,6 +195,11 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         client_timestamp: Optional timestamp from client
         content_type: Type of content - 'text', 'tool_use', 'tool_result', or 'mixed'
         tool_content: Optional JSONB content for tool-related messages
+        mark_cancelled: If True, mark the message as cancelled (for error messages from cancelled requests)
+
+    Returns:
+        Tuple of (conversation_id, message_id, cancelled_message_ids) where cancelled_message_ids
+        is a list of message IDs that were marked for cancellation (caller should broadcast deletions)
     """
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_conversation_id={client_conversation_id}, content='{content[:50] if content else '(empty)'}...'")
@@ -271,13 +304,17 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         # Save the message
         logger.info(f"Attempting to save {message_sender} message to conversation_id={conversation_id}, request_id={request_id}, content_type={content_type}")
 
-        # For ASSISTANT messages with request_id, mark any previous ASSISTANT messages with the same request_id as cancelled
+        # For ASSISTANT messages with request_id, collect any previous ASSISTANT messages with the same request_id to cancel
         # This handles the case where streaming responses create multiple intermediate messages
+        # IMPORTANT: We never cancel tool_use or tool_result messages, as they represent actual tool executions
+        # NOTE: We collect IDs here but don't cancel yet - caller will use cancel_and_broadcast_messages() helper
+        cancelled_message_ids = []
         if message_sender == "ASSISTANT" and request_id:
             try:
                 # Find all previous ASSISTANT messages with this request_id that aren't already cancelled
+                # Exclude tool_use and tool_result messages from cancellation
                 previous_messages = supabase.table("messages")\
-                    .select("id")\
+                    .select("id, content_type")\
                     .eq("conversation_id", conversation_id)\
                     .eq("request_id", request_id)\
                     .eq("message_sender", "ASSISTANT")\
@@ -285,19 +322,20 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                     .execute()
 
                 if previous_messages.data:
-                    # Mark all previous messages as cancelled
-                    message_ids = [msg["id"] for msg in previous_messages.data]
-                    logger.info(f"Marking {len(message_ids)} previous ASSISTANT message(s) as cancelled for request_id={request_id}: {message_ids}")
+                    # Filter out tool_use and tool_result messages - we never cancel these
+                    messages_to_cancel = [
+                        msg["id"] for msg in previous_messages.data
+                        if msg.get("content_type") not in ["tool_use", "tool_result"]
+                    ]
 
-                    for msg_id in message_ids:
-                        supabase.table("messages")\
-                            .update({"cancelled": "now()"})\
-                            .eq("id", msg_id)\
-                            .execute()
-
-                    logger.info(f"Successfully marked {len(message_ids)} previous ASSISTANT message(s) as cancelled")
+                    if messages_to_cancel:
+                        cancelled_message_ids = messages_to_cancel
+                        logger.info(f"Found {len(cancelled_message_ids)} previous ASSISTANT message(s) to cancel for request_id={request_id}: {cancelled_message_ids}")
+                        logger.info(f"Note: Caller should use cancel_and_broadcast_messages() to actually cancel and broadcast")
+                    else:
+                        logger.info(f"No messages to cancel for request_id={request_id} (only tool_use/tool_result messages found)")
             except Exception as e:
-                logger.error(f"Error marking previous ASSISTANT messages as cancelled for request_id={request_id}: {e}")
+                logger.error(f"Error finding previous ASSISTANT messages to cancel for request_id={request_id}: {e}")
 
         # Prepare message data
         message_data = {
@@ -307,6 +345,11 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             "content_type": content_type,
             "request_id": request_id
         }
+
+        # Mark as cancelled if requested (for error messages from cancelled requests)
+        if mark_cancelled:
+            message_data["cancelled"] = "now()"
+            logger.info(f"Marking message as cancelled for request_id={request_id}")
 
         # Add tool_content if provided
         if tool_content is not None:
@@ -396,30 +439,54 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         else:
             logger.warning(f"Failed to update conversation {conversation_id} timestamps")
 
-        return (conversation_id, message_id)
+        return (conversation_id, message_id, cancelled_message_ids)
 
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")
         return None
 
 
-def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_content: dict) -> bool:
+def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_content: dict, user_id: int = None) -> bool:
     """Update a pending tool_result message with the actual result
 
     Args:
         conversation_id: The conversation ID containing the tool result message
         tool_use_id: The tool_use_id to identify which tool_result to update
         result_content: The actual tool execution result to replace the pending content
+        user_id: The user ID (required if conversation_id is optimistic/negative)
 
     Returns:
         True if update successful, False otherwise
     """
     try:
+        # Handle optimistic conversation IDs (negative IDs)
+        if conversation_id is not None and conversation_id < 0:
+            if user_id is None:
+                logger.error(f"user_id required to resolve optimistic conversation_id {conversation_id}")
+                return False
+
+            logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
+            # Look up the real conversation using the optimistic_chat_id
+            conv_result = supabase.table("conversations")\
+                .select("id")\
+                .eq("optimistic_chat_id", str(conversation_id))\
+                .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
+                .execute()
+
+            if conv_result.data:
+                real_id = conv_result.data[0]["id"]
+                logger.info(f"Found real conversation ID {real_id} for optimistic ID {conversation_id}")
+                conversation_id = real_id
+            else:
+                logger.error(f"No conversation found for optimistic ID {conversation_id}")
+                return False
+
         logger.info(f"Updating tool_result for tool_use_id={tool_use_id} in conversation={conversation_id}")
 
         # Find the pending tool_result message
         result = supabase.table("messages")\
-            .select("id, tool_content")\
+            .select("id, tool_content, cancelled")\
             .eq("conversation_id", conversation_id)\
             .eq("content_type", "tool_result")\
             .execute()

@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any
 # Configure logging
 logger = logging.getLogger(__name__)
 
-async def whatsapp_select_chat(chat_name: str, user_id: str = None, websocket = None,
+async def agent_whatsapp_select_chat(chat_name: str, user_id: str = None, websocket = None,
                                tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Select a specific chat in WhatsApp on the user's Android device.
@@ -43,7 +43,7 @@ async def whatsapp_select_chat(chat_name: str, user_id: str = None, websocket = 
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "whatsapp_select_chat",
+            "tool": "agent_whatsapp_select_chat",
             "request_id": tool_request_id,
             "params": {
                 "chat_name": chat_name
@@ -56,7 +56,7 @@ async def whatsapp_select_chat(chat_name: str, user_id: str = None, websocket = 
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending WhatsApp select chat message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent whatsapp_select_chat command for '{chat_name}'")
+            logger.info(f"Successfully sent agent_whatsapp_select_chat command for '{chat_name}'")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -101,13 +101,15 @@ async def whatsapp_select_chat(chat_name: str, user_id: str = None, websocket = 
             "success": False
         }
 
-async def whatsapp_draft_message(message: str, user_id: str = None, websocket = None,
+async def agent_whatsapp_draft_message(message: str, chat_name: str, user_id: str = None, websocket = None,
                                 tool_result_handler = None, conversation_id: str = None, previous_text: str = None) -> dict:
     """
     Draft a message in WhatsApp by showing an overlay for user review.
 
     This tool shows a WhizVoice overlay with the message text for user confirmation
     before actually sending. Always use this before sending messages.
+
+    The tool will automatically navigate to the specified chat if not already open.
 
     If previous_text is provided, the overlay will show tracked changes:
     - Deleted text appears with red strikethrough
@@ -116,6 +118,8 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
 
     Args:
         message: The message text to draft for user review
+        chat_name: The name, phone number, or contact of the recipient. The tool will
+                   automatically navigate to this chat if not already open.
         previous_text: Optional. The previous version of the message for track changes display
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
@@ -143,10 +147,12 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
         params = {"message": message}
         if previous_text is not None:
             params["previous_text"] = previous_text
+        if chat_name is not None:
+            params["chat_name"] = chat_name
 
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "whatsapp_draft_message",
+            "tool": "agent_whatsapp_draft_message",
             "request_id": tool_request_id,
             "params": params,
             "conversation_id": conversation_id
@@ -157,7 +163,7 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending WhatsApp draft message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent whatsapp_draft_message command")
+            logger.info(f"Successfully sent agent_whatsapp_draft_message command")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -172,9 +178,11 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
 
             try:
                 # Wait for tool result with timeout
+                # Use longer timeout if chat_name provided (may need to navigate first)
+                timeout = 15.0 if chat_name else 5.0
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=5.0
+                    timeout=timeout
                 )
 
                 logger.info(f"WhatsApp message draft result for {tool_request_id}: {result}")
@@ -202,7 +210,7 @@ async def whatsapp_draft_message(message: str, user_id: str = None, websocket = 
             "success": False
         }
 
-async def whatsapp_send_message(message: str, user_id: str = None, websocket = None,
+async def agent_whatsapp_send_message(message: str, user_id: str = None, websocket = None,
                                 tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Send a message in the current WhatsApp chat on the user's Android device.
@@ -236,7 +244,7 @@ async def whatsapp_send_message(message: str, user_id: str = None, websocket = N
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "whatsapp_send_message",
+            "tool": "agent_whatsapp_send_message",
             "request_id": tool_request_id,
             "params": {
                 "message": message
@@ -249,7 +257,7 @@ async def whatsapp_send_message(message: str, user_id: str = None, websocket = N
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending WhatsApp send message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent whatsapp_send_message command")
+            logger.info(f"Successfully sent agent_whatsapp_send_message command")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -297,7 +305,7 @@ async def whatsapp_send_message(message: str, user_id: str = None, websocket = N
 
 # ========== SMS Functions ==========
 
-async def sms_select_chat(contact_name: str, user_id: str = None, websocket = None,
+async def agent_sms_select_chat(contact_name: str, user_id: str = None, websocket = None,
                           tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Select a specific SMS conversation on the user's Android device.
@@ -329,7 +337,7 @@ async def sms_select_chat(contact_name: str, user_id: str = None, websocket = No
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "sms_select_chat",
+            "tool": "agent_sms_select_chat",
             "request_id": tool_request_id,
             "params": {
                 "contact_name": contact_name
@@ -342,7 +350,7 @@ async def sms_select_chat(contact_name: str, user_id: str = None, websocket = No
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending SMS select chat message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent sms_select_chat command for '{contact_name}'")
+            logger.info(f"Successfully sent agent_sms_select_chat command for '{contact_name}'")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -388,14 +396,18 @@ async def sms_select_chat(contact_name: str, user_id: str = None, websocket = No
         }
 
 
-async def sms_draft_message(message: str, user_id: str = None, websocket = None,
+async def agent_sms_draft_message(message: str, contact_name: str, user_id: str = None, websocket = None,
                             tool_result_handler = None, conversation_id: str = None,
                             previous_text: str = None) -> dict:
     """
     Draft an SMS message with a visual overlay for user confirmation before sending.
 
+    The tool will automatically navigate to the specified contact's conversation if not already open.
+
     Args:
         message: The message text to draft
+        contact_name: The name or phone number of the contact to send the message to.
+                      The tool will automatically navigate to this conversation if not already open.
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -421,26 +433,26 @@ async def sms_draft_message(message: str, user_id: str = None, websocket = None,
             }
 
         # Create the WebSocket message for the Android app
+        params = {"message": message}
+        if previous_text:
+            params["previous_text"] = previous_text
+        if contact_name:
+            params["contact_name"] = contact_name
+
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "sms_draft_message",
+            "tool": "agent_sms_draft_message",
             "request_id": tool_request_id,
-            "params": {
-                "message": message
-            },
+            "params": params,
             "conversation_id": conversation_id
         }
-
-        # Add previous_text if provided (for tracked changes)
-        if previous_text:
-            tool_execution_message["params"]["previous_text"] = previous_text
 
         # Send to Android app via WebSocket
         try:
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending SMS draft message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent sms_draft_message command")
+            logger.info(f"Successfully sent agent_sms_draft_message command")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -454,10 +466,12 @@ async def sms_draft_message(message: str, user_id: str = None, websocket = None,
             logger.info(f"Waiting for SMS draft message result from Android device (request_id: {tool_request_id})")
 
             try:
-                # Wait for tool result with timeout (5 seconds for draft operation)
+                # Wait for tool result with timeout
+                # Use longer timeout if contact_name provided (may need to navigate first)
+                timeout = 15.0 if contact_name else 5.0
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=5.0
+                    timeout=timeout
                 )
 
                 logger.info(f"SMS draft message result for {tool_request_id}: {result}")
@@ -486,7 +500,7 @@ async def sms_draft_message(message: str, user_id: str = None, websocket = None,
         }
 
 
-async def sms_send_message(message: str, user_id: str = None, websocket = None,
+async def agent_sms_send_message(message: str, user_id: str = None, websocket = None,
                            tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Send an SMS message. Must have already drafted the message for user confirmation.
@@ -518,7 +532,7 @@ async def sms_send_message(message: str, user_id: str = None, websocket = None,
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "sms_send_message",
+            "tool": "agent_sms_send_message",
             "request_id": tool_request_id,
             "params": {
                 "message": message
@@ -531,7 +545,7 @@ async def sms_send_message(message: str, user_id: str = None, websocket = None,
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending SMS send message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent sms_send_message command")
+            logger.info(f"Successfully sent agent_sms_send_message command")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -581,8 +595,8 @@ async def sms_send_message(message: str, user_id: str = None, websocket = None,
 messaging_tools = [
     {
         "type": "custom",
-        "name": "whatsapp_select_chat",
-        "description": "Select a specific chat in WhatsApp by contact or group name. IMPORTANT: WhatsApp must already be open - use launch_app tool first to open WhatsApp if needed. Use this when the user wants to open a conversation with a specific person or group in WhatsApp.",
+        "name": "agent_whatsapp_select_chat",
+        "description": "Select a specific chat in WhatsApp by contact or group name. This tool automatically opens WhatsApp if not already open. Use this when the user wants to open a conversation with a specific person or group in WhatsApp.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -596,8 +610,8 @@ messaging_tools = [
     },
     {
         "type": "custom",
-        "name": "whatsapp_draft_message",
-        "description": "Draft a message for WhatsApp and show it in an overlay for user review. IMPORTANT: WhatsApp chat must be open first (use launch_app to open WhatsApp, then whatsapp_select_chat to open the chat). Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "name": "agent_whatsapp_draft_message",
+        "description": "Draft a message for WhatsApp and show it in an overlay for user review. This tool automatically opens WhatsApp and navigates to the specified chat. Always use this BEFORE sending any WhatsApp message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -605,18 +619,22 @@ messaging_tools = [
                     "type": "string",
                     "description": "The message text to draft for user review before sending"
                 },
+                "chat_name": {
+                    "type": "string",
+                    "description": "The name, phone number, or contact of the recipient to send the message to. The tool will automatically navigate to this chat if not already open."
+                },
                 "previous_text": {
                     "type": "string",
                     "description": "Optional. The previous version of the message text. When provided, the overlay will show tracked changes (deletions in red strikethrough, additions in blue)"
                 }
             },
-            "required": ["message"]
+            "required": ["message", "chat_name"]
         }
     },
     {
         "type": "custom",
-        "name": "whatsapp_send_message",
-        "description": "Send a message in WhatsApp. IMPORTANT: You MUST have already: 1) Opened WhatsApp (launch_app), 2) Selected a chat (whatsapp_select_chat), 3) Drafted the message (whatsapp_draft_message), 4) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in WhatsApp.",
+        "name": "agent_whatsapp_send_message",
+        "description": "Send a message in WhatsApp. This tool automatically opens WhatsApp if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (whatsapp_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in WhatsApp.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -630,8 +648,8 @@ messaging_tools = [
     },
     {
         "type": "custom",
-        "name": "sms_select_chat",
-        "description": "Select a specific SMS conversation by contact name or phone number in Google Messages. IMPORTANT: Google Messages app must already be open - use launch_app tool first to open 'Messages' if needed. Use this when the user wants to open an SMS/text message conversation with a specific contact or phone number.",
+        "name": "agent_sms_select_chat",
+        "description": "Select a specific SMS conversation by contact name or phone number in Google Messages. This tool automatically opens Google Messages if not already open. Use this when the user wants to open an SMS/text message conversation with a specific contact or phone number.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -645,8 +663,8 @@ messaging_tools = [
     },
     {
         "type": "custom",
-        "name": "sms_draft_message",
-        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. IMPORTANT: SMS conversation must be open first (use launch_app to open Messages, then sms_select_chat to open the conversation). Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "name": "agent_sms_draft_message",
+        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. This tool automatically opens Google Messages and navigates to the specified conversation. Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -654,18 +672,22 @@ messaging_tools = [
                     "type": "string",
                     "description": "The SMS/text message text to draft for user review before sending"
                 },
+                "contact_name": {
+                    "type": "string",
+                    "description": "The name or phone number of the contact to send the message to. The tool will automatically navigate to this conversation if not already open."
+                },
                 "previous_text": {
                     "type": "string",
                     "description": "Optional. The previous version of the message text. When provided, the overlay will show tracked changes (deletions in red strikethrough, additions in blue)"
                 }
             },
-            "required": ["message"]
+            "required": ["message", "contact_name"]
         }
     },
     {
         "type": "custom",
-        "name": "sms_send_message",
-        "description": "Send an SMS/text message in Google Messages. IMPORTANT: You MUST have already: 1) Opened Messages app (launch_app), 2) Selected a conversation (sms_select_chat), 3) Drafted the message (sms_draft_message), 4) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in Google Messages.",
+        "name": "agent_sms_send_message",
+        "description": "Send an SMS/text message in Google Messages. This tool automatically opens Google Messages if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (sms_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in Google Messages.",
         "input_schema": {
             "type": "object",
             "properties": {

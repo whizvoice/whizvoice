@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any
 # Configure logging
 logger = logging.getLogger(__name__)
 
-async def search_google_maps_location(address_keyword: str, user_id: str = None, websocket = None,
+async def agent_search_google_maps_location(address_keyword: str, user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and automatically select the first result.
@@ -47,7 +47,7 @@ async def search_google_maps_location(address_keyword: str, user_id: str = None,
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "search_google_maps_location",
+            "tool": "agent_search_google_maps_location",
             "request_id": tool_request_id,
             "params": {
                 "address": address_keyword
@@ -60,7 +60,7 @@ async def search_google_maps_location(address_keyword: str, user_id: str = None,
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending Google Maps search message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent search_google_maps_location command for '{address_keyword}'")
+            logger.info(f"Successfully sent agent_search_google_maps_location command for '{address_keyword}'")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -106,7 +106,7 @@ async def search_google_maps_location(address_keyword: str, user_id: str = None,
         }
 
 
-async def search_google_maps_phrase(search_phrase: str, user_id: str = None, websocket = None,
+async def agent_search_google_maps_phrase(search_phrase: str, user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Search Google Maps with a discovery phrase and display the search results list without selecting any.
@@ -139,7 +139,7 @@ async def search_google_maps_phrase(search_phrase: str, user_id: str = None, web
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "search_google_maps_phrase",
+            "tool": "agent_search_google_maps_phrase",
             "request_id": tool_request_id,
             "params": {
                 "search_phrase": search_phrase
@@ -152,7 +152,7 @@ async def search_google_maps_phrase(search_phrase: str, user_id: str = None, web
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending Google Maps phrase search message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent search_google_maps_phrase command for '{search_phrase}'")
+            logger.info(f"Successfully sent agent_search_google_maps_phrase command for '{search_phrase}'")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -198,7 +198,7 @@ async def search_google_maps_phrase(search_phrase: str, user_id: str = None, web
         }
 
 
-async def recenter_google_maps(user_id: str = None, websocket = None,
+async def agent_recenter_google_maps(user_id: str = None, websocket = None,
                                tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Re-center the Google Maps view to the user's current location.
@@ -229,7 +229,7 @@ async def recenter_google_maps(user_id: str = None, websocket = None,
         # Create the WebSocket message for the Android app
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "recenter_google_maps",
+            "tool": "agent_recenter_google_maps",
             "request_id": tool_request_id,
             "params": {},
             "conversation_id": conversation_id
@@ -240,7 +240,7 @@ async def recenter_google_maps(user_id: str = None, websocket = None,
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending Google Maps recenter message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent recenter_google_maps command")
+            logger.info(f"Successfully sent agent_recenter_google_maps command")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -286,7 +286,7 @@ async def recenter_google_maps(user_id: str = None, websocket = None,
         }
 
 
-async def select_location_from_list(position: Optional[int] = None, fragment: Optional[str] = None,
+async def agent_select_location_from_list(position: Optional[int] = None, fragment: Optional[str] = None,
                                    user_id: str = None, websocket = None,
                                    tool_result_handler = None, conversation_id: str = None) -> dict:
     """
@@ -331,7 +331,7 @@ async def select_location_from_list(position: Optional[int] = None, fragment: Op
 
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "select_location_from_list",
+            "tool": "agent_select_location_from_list",
             "request_id": tool_request_id,
             "params": params,
             "conversation_id": conversation_id
@@ -342,7 +342,7 @@ async def select_location_from_list(position: Optional[int] = None, fragment: Op
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending location selection message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent select_location_from_list command: {selection_desc}")
+            logger.info(f"Successfully sent agent_select_location_from_list command: {selection_desc}")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -388,15 +388,105 @@ async def select_location_from_list(position: Optional[int] = None, fragment: Op
         }
 
 
-async def get_google_maps_directions(mode: Optional[str] = None, already_in_directions: bool = False,
+async def agent_fullscreen_google_maps(user_id: str = None, websocket = None,
+                                 tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Bring Google Maps to fullscreen/foreground when it's running in the background or shown as a small overlay.
+
+    Args:
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the fullscreen operation
+    """
+    try:
+        # Generate a unique request ID for tracking
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Fullscreening Google Maps (user: {user_id}, request: {tool_request_id})")
+
+        # If no WebSocket provided, return error
+        if not websocket:
+            logger.error("No WebSocket connection available for Google Maps fullscreen")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        # Create the WebSocket message for the Android app
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "agent_fullscreen_google_maps",
+            "request_id": tool_request_id,
+            "params": {},
+            "conversation_id": conversation_id
+        }
+
+        # Send to Android app via WebSocket
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending Google Maps fullscreen message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent agent_fullscreen_google_maps command")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        # If we have a tool_result_handler, wait for the result
+        if tool_result_handler:
+            logger.info(f"Waiting for Google Maps fullscreen result from Android device (request_id: {tool_request_id})")
+
+            try:
+                # Wait for tool result with timeout (10 seconds for fullscreen operation)
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=10.0
+                )
+
+                logger.info(f"Google Maps fullscreen result for {tool_request_id}: {result}")
+                return result
+
+            except Exception as e:
+                logger.error(f"Error waiting for Google Maps fullscreen result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            # If no handler, just return success after sending
+            return {
+                "status": "sent",
+                "message": "Command to fullscreen map sent to device",
+                "request_id": tool_request_id
+            }
+
+    except Exception as e:
+        logger.error(f"Error in fullscreen_google_maps for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to fullscreen Google Maps: {str(e)}",
+            "success": False
+        }
+
+
+async def agent_get_google_maps_directions(mode: Optional[str] = None,
+                                     position: Optional[int] = None, fragment: Optional[str] = None,
                                      user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
     """
-    Get directions to a location that's currently displayed in Google Maps.
+    Get directions to a location that's currently displayed in Google Maps, or select a location from a search results list and get directions to it.
 
     Args:
         mode: Optional. Mode of transportation - 'drive', 'walk', 'bike', or 'transit'. If not specified, uses Google Maps' currently selected mode (usually the user's last used mode).
-        already_in_directions: Optional. Set to true if already viewing directions for the SAME DESTINATION and want to get directions to a different place. This will press back first before getting new directions.
+        position: Optional. If selecting from a search results list, the position to select (1 for first, 2 for second, etc.)
+        fragment: Optional. If selecting from a search results list, match by part of the business name or address (e.g., 'Fulton', 'Market St')
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -417,7 +507,7 @@ async def get_google_maps_directions(mode: Optional[str] = None, already_in_dire
                 logger.warning(f"Invalid transportation mode '{mode}', will use default")
                 mode = None
 
-        logger.info(f"Getting Google Maps directions with mode '{mode}', already_in_directions={already_in_directions} (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Getting Google Maps directions with mode '{mode}', position={position}, fragment={fragment} (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
@@ -428,14 +518,19 @@ async def get_google_maps_directions(mode: Optional[str] = None, already_in_dire
             }
 
         # Create the WebSocket message for the Android app
+        params = {
+            "mode": mode
+        }
+        if position is not None:
+            params["position"] = position
+        if fragment is not None:
+            params["fragment"] = fragment
+
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "get_google_maps_directions",
+            "tool": "agent_get_google_maps_directions",
             "request_id": tool_request_id,
-            "params": {
-                "mode": mode,
-                "already_in_directions": already_in_directions
-            },
+            "params": params,
             "conversation_id": conversation_id
         }
 
@@ -444,7 +539,7 @@ async def get_google_maps_directions(mode: Optional[str] = None, already_in_dire
             message_json = json.dumps(tool_execution_message)
             logger.debug(f"Sending Google Maps directions message to Android: {tool_execution_message}")
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent get_google_maps_directions command with mode '{mode}'")
+            logger.info(f"Successfully sent agent_get_google_maps_directions command with mode '{mode}'")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -494,8 +589,8 @@ async def get_google_maps_directions(mode: Optional[str] = None, already_in_dire
 maps_tools = [
     {
         "type": "custom",
-        "name": "search_google_maps_location",
-        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and automatically select the first result. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. This tool results in a single location displayed on the map. After calling this tool, you can call get_google_maps_directions if the user wants directions to the place. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "name": "agent_search_google_maps_location",
+        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and show the first result with the location details. This tool automatically opens Google Maps. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. Also, if the user is looking for directions, DO NOT use this, use get_google_maps_directions instead.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -509,8 +604,8 @@ maps_tools = [
     },
     {
         "type": "custom",
-        "name": "search_google_maps_phrase",
-        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list. After using this tool, you MUST ask the user to select one. Based on what they say, you can use the select_location_from_list tool to actually select an item from the list of results. IMPORTANT: Google Maps must already be open - use launch_app tool first to open Google Maps if needed.",
+        "name": "agent_search_google_maps_phrase",
+        "description": "Search Google Maps with a discovery/browsing phrase and display the list of results WITHOUT selecting any. This tool automatically opens Google Maps. Use this when the user wants to BROWSE or DISCOVER options like 'korean food', 'cafes near me', 'pizza restaurants', 'gas stations', etc. This tool shows the search results list. After using this tool, you MUST ask the user to select one. Based on what they say, you can use the select_location_from_list tool to actually select an item from the list of results.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -524,8 +619,8 @@ maps_tools = [
     },
     {
         "type": "custom",
-        "name": "get_google_maps_directions",
-        "description": "Get directions to a location that's currently displayed in Google Maps. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation. IMPORTANT: A location must already be displayed in Google Maps - this tool is menat to be used after search_google_maps_location or select_location_from_list. If you have JUST already called get_google_maps_directions sucessfully and are just changing the mode of transportation, you will have to set already_in_directions to true, otherwise, make sure it is set to false or leave it as its default value.",
+        "name": "agent_get_google_maps_directions",
+        "description": "Get directions to a location in Google Maps. This tool automatically opens Google Maps and detects the current screen state. Can either get directions to the currently displayed location, OR select a location from a search results list first (using position or fragment) and then get directions. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -534,9 +629,13 @@ maps_tools = [
                     "description": "Mode of transportation. Valid options: 'drive' (car), 'walk' (walking), 'bike' (bicycle), or 'transit' (public transportation). No specific mode of transporation is selected if not provided, which defaults to the mode last used by Google Maps.",
                     "enum": ["drive", "walk", "bike", "transit"]
                 },
-                "already_in_directions": {
-                    "type": "boolean",
-                    "description": "Set to true if already viewing directions. This will press back first before getting new directions. Defaults to false."
+                "position": {
+                    "type": "integer",
+                    "description": "If selecting from a search results list, the position to select (1 for first, 2 for second, etc.). Use this when user says 'the first one', 'the second one', etc."
+                },
+                "fragment": {
+                    "type": "string",
+                    "description": "If selecting from a search results list, match by part of the business name or address (e.g., 'Fulton', 'Market St'). Use this when user refers to a specific location by name or street."
                 }
             },
             "required": []
@@ -544,8 +643,8 @@ maps_tools = [
     },
     {
         "type": "custom",
-        "name": "recenter_google_maps",
-        "description": "Re-center the Google Maps view to the user's current location. This is useful during navigation when the user wants to see their current position on the map.",
+        "name": "agent_recenter_google_maps",
+        "description": "Re-center the Google Maps view to the user's current location. This tool automatically opens Google Maps. This is useful during navigation when the user wants to see their current position on the map.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -554,8 +653,18 @@ maps_tools = [
     },
     {
         "type": "custom",
-        "name": "select_location_from_list",
-        "description": "Select a specific location from a Google Maps search results list. This must be used after user responds to search_google_maps_phrase results, to select the user's choice. This function can select by position (1 for first item, 2 for second, etc.) or by matching part of the business name or address. If your goal was to get directions for the location, you MUST call get_google_maps_directions afterwards.",
+        "name": "agent_fullscreen_google_maps",
+        "description": "Bring Google Maps to fullscreen/foreground when it's running in the background or shown as a small overlay. This tool automatically opens Google Maps. Use this when the user asks you to make Google Maps big or fullscreen.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_select_location_from_list",
+        "description": "Select a specific location from a Google Maps search results list WITHOUT getting directions. This tool automatically opens Google Maps. Use this ONLY if you need to select a location but NOT get directions. If your goal is to get directions, use agent_get_google_maps_directions directly with the position or fragment parameters instead - it combines selection and directions in one step and is more efficient.",
         "input_schema": {
             "type": "object",
             "properties": {

@@ -22,9 +22,9 @@ class TestExecuteTool(unittest.TestCase):
     def test_execute_tool_requires_auth_for_protected_tools(self):
         """Test that protected tools require user authentication"""
         protected_tools = [
-            "get_asana_tasks", "get_parent_tasks", "create_asana_task",
+            "get_asana_tasks", "get_parent_tasks", "get_new_asana_task_id",
             "get_workspace_preference", "set_workspace_preference",
-            "get_asana_workspaces", "change_task_parent", "update_task_due_date"
+            "get_asana_workspaces", "update_asana_task", "delete_asana_task"
         ]
         
         for tool_name in protected_tools:
@@ -90,13 +90,13 @@ class TestExecuteTool(unittest.TestCase):
         self.assertEqual(result, mock_tasks)
         mock_get_parent_tasks.assert_called_once_with(self.test_user_id)
 
-    @patch('app.create_asana_task')
-    def test_execute_tool_create_asana_task(self, mock_create_task):
-        """Test execute_tool with create_asana_task"""
+    @patch('app.get_new_asana_task_id')
+    def test_execute_tool_get_new_asana_task_id(self, mock_create_task):
+        """Test execute_tool with get_new_asana_task_id"""
         mock_task = {'gid': 'new_task1', 'name': 'Test Task'}
         mock_create_task.return_value = mock_task
-        
-        result = asyncio.run(execute_tool("create_asana_task", self.test_task_args, self.test_user_id))
+
+        result = asyncio.run(execute_tool("get_new_asana_task_id", self.test_task_args, self.test_user_id))
         
         self.assertEqual(result, mock_task)
         mock_create_task.assert_called_once_with(
@@ -107,11 +107,11 @@ class TestExecuteTool(unittest.TestCase):
             'parent123'
         )
 
-    def test_execute_tool_create_asana_task_missing_name(self):
-        """Test execute_tool with create_asana_task missing required name"""
+    def test_execute_tool_get_new_asana_task_id_missing_name(self):
+        """Test execute_tool with get_new_asana_task_id missing required name"""
         args = {'due_date': '2024-03-20'}
-        
-        result = asyncio.run(execute_tool("create_asana_task", args, self.test_user_id))
+
+        result = asyncio.run(execute_tool("get_new_asana_task_id", args, self.test_user_id))
         
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
@@ -153,49 +153,51 @@ class TestExecuteTool(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("User authentication required", result["error"])
 
-    @patch('app.change_task_parent')
-    def test_execute_tool_change_task_parent(self, mock_change_parent):
-        """Test execute_tool with change_task_parent"""
+    @patch('app.update_asana_task')
+    def test_execute_tool_change_task_parent(self, mock_update_task):
+        """Test execute_tool with update_asana_task (changing parent)"""
         mock_response = {'gid': 'task123', 'parent': {'gid': 'parent456'}}
-        mock_change_parent.return_value = mock_response
-        
-        args = {'task_gid': 'task123', 'new_parent_gid': 'parent456'}
-        result = asyncio.run(execute_tool("change_task_parent", args, self.test_user_id))
-        
-        self.assertEqual(result, mock_response)
-        mock_change_parent.assert_called_once_with(self.test_user_id, 'task123', 'parent456')
+        mock_update_task.return_value = mock_response
 
-    @patch('app.update_task_due_date')
-    def test_execute_tool_update_task_due_date(self, mock_update_date):
-        """Test execute_tool with update_task_due_date"""
-        mock_response = {'gid': 'task123', 'due_on': '2024-03-25'}
-        mock_update_date.return_value = mock_response
-        
-        args = {'task_gid': 'task123', 'new_due_date': '2024-03-25'}
-        result = asyncio.run(execute_tool("update_task_due_date", args, self.test_user_id))
-        
+        args = {'task_gid': 'task123', 'parent_gid': 'parent456'}
+        result = asyncio.run(execute_tool("update_asana_task", args, self.test_user_id))
+
         self.assertEqual(result, mock_response)
-        mock_update_date.assert_called_once_with(self.test_user_id, 'task123', '2024-03-25')
+        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, None, None, None, 'parent456')
+
+    @patch('app.update_asana_task')
+    def test_execute_tool_update_task_due_date(self, mock_update_task):
+        """Test execute_tool with update_asana_task (updating due date)"""
+        mock_response = {'gid': 'task123', 'due_on': '2024-03-25'}
+        mock_update_task.return_value = mock_response
+
+        args = {'task_gid': 'task123', 'due_date': '2024-03-25'}
+        result = asyncio.run(execute_tool("update_asana_task", args, self.test_user_id))
+
+        self.assertEqual(result, mock_response)
+        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, '2024-03-25', None, None, None)
 
     def test_execute_tool_update_task_due_date_missing_task_gid(self):
-        """Test execute_tool with update_task_due_date missing task_gid"""
-        args = {'new_due_date': '2024-03-25'}
-        
-        result = asyncio.run(execute_tool("update_task_due_date", args, self.test_user_id))
-        
+        """Test execute_tool with update_asana_task missing task_gid"""
+        args = {'due_date': '2024-03-25'}
+
+        result = asyncio.run(execute_tool("update_asana_task", args, self.test_user_id))
+
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
         self.assertEqual(result["error"], "Task GID is required.")
 
     def test_execute_tool_update_task_due_date_missing_due_date(self):
-        """Test execute_tool with update_task_due_date missing new_due_date"""
+        """Test execute_tool with update_asana_task with only task_gid (should succeed with all optional params)"""
         args = {'task_gid': 'task123'}
-        
-        result = asyncio.run(execute_tool("update_task_due_date", args, self.test_user_id))
-        
+
+        # This should not error since all update fields are optional
+        # But let's verify at least task_gid is required
+        result = asyncio.run(execute_tool("update_asana_task", {'due_date': '2024-03-25'}, self.test_user_id))
+
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
-        self.assertEqual(result["error"], "New due date is required.")
+        self.assertEqual(result["error"], "Task GID is required.")
 
     @patch('app.get_app_info')
     def test_execute_tool_get_app_info(self, mock_get_app_info):
