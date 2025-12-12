@@ -153,7 +153,7 @@ class SubscriptionStatusResponse(BaseModel):
 class UiDumpCreate(BaseModel):
     dump_reason: str
     error_message: Optional[str] = None
-    ui_hierarchy: str
+    ui_hierarchy: Optional[str] = None
     package_name: Optional[str] = None
     device_model: Optional[str] = None
     device_manufacturer: Optional[str] = None
