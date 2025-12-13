@@ -477,14 +477,16 @@ async def agent_fullscreen_google_maps(user_id: str = None, websocket = None,
 
 
 async def agent_get_google_maps_directions(mode: Optional[str] = None,
+                                     search: Optional[str] = None,
                                      position: Optional[int] = None, fragment: Optional[str] = None,
                                      user_id: str = None, websocket = None,
                                      tool_result_handler = None, conversation_id: str = None) -> dict:
     """
-    Get directions to a location that's currently displayed in Google Maps, or select a location from a search results list and get directions to it.
+    Get directions to a location in Google Maps. Can search for a location, select from a list, or use currently displayed location.
 
     Args:
         mode: Optional. Mode of transportation - 'drive', 'walk', 'bike', or 'transit'. If not specified, uses Google Maps' currently selected mode (usually the user's last used mode).
+        search: Optional. Search query to find a location (e.g., 'Slice House', '123 Main St'). Will search, select the first non-sponsored result, and get directions.
         position: Optional. If selecting from a search results list, the position to select (1 for first, 2 for second, etc.)
         fragment: Optional. If selecting from a search results list, match by part of the business name or address (e.g., 'Fulton', 'Market St')
         user_id: The user ID (for logging purposes)
@@ -507,7 +509,7 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None,
                 logger.warning(f"Invalid transportation mode '{mode}', will use default")
                 mode = None
 
-        logger.info(f"Getting Google Maps directions with mode '{mode}', position={position}, fragment={fragment} (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Getting Google Maps directions with mode '{mode}', search='{search}', position={position}, fragment={fragment} (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
@@ -521,6 +523,8 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None,
         params = {
             "mode": mode
         }
+        if search is not None:
+            params["search"] = search
         if position is not None:
             params["position"] = position
         if fragment is not None:
@@ -590,7 +594,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_search_google_maps_location",
-        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and show the first result with the location details. This tool automatically opens Google Maps. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. Also, if the user is looking for directions, DO NOT use this, use get_google_maps_directions instead.",
+        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and show the first result with the location details. This tool automatically opens Google Maps. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. Use this ONLY if you need to select a location but NOT get directions. To get directions to a location, it is more efficient to use agent_get_google_maps_directions directly which will search the location AND get directions.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -620,7 +624,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_get_google_maps_directions",
-        "description": "Get directions to a location in Google Maps. This tool automatically opens Google Maps and detects the current screen state. Can either get directions to the currently displayed location, OR select a location from a search results list first (using position or fragment) and then get directions. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation.",
+        "description": "Get directions to a location in Google Maps. This tool automatically opens Google Maps. Use 'search' to find a location and get directions in one step (e.g., search='Slice House'). If already on a search results list, use 'position' or 'fragment' to select from it. If already on a location details page, no parameters needed. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -629,13 +633,17 @@ maps_tools = [
                     "description": "Mode of transportation. Valid options: 'drive' (car), 'walk' (walking), 'bike' (bicycle), or 'transit' (public transportation). No specific mode of transporation is selected if not provided, which defaults to the mode last used by Google Maps.",
                     "enum": ["drive", "walk", "bike", "transit"]
                 },
+                "search": {
+                    "type": "string",
+                    "description": "Search query to find a location and get directions to it (e.g., 'Slice House', '123 Main St', 'Golden Gate Bridge'). This searches, selects the first non-sponsored result, and gets directions - all in one step. Use this when the user asks for directions to a place by name or address."
+                },
                 "position": {
                     "type": "integer",
-                    "description": "If selecting from a search results list, the position to select (1 for first, 2 for second, etc.). Use this when user says 'the first one', 'the second one', etc."
+                    "description": "If already on a search results list, the position to select (1 for first, 2 for second, etc.). Use this when user says 'the first one', 'the second one', etc."
                 },
                 "fragment": {
                     "type": "string",
-                    "description": "If selecting from a search results list, match by part of the business name or address (e.g., 'Fulton', 'Market St'). Use this when user refers to a specific location by name or street."
+                    "description": "If already on a search results list, match by part of the business name or address (e.g., 'Fulton', 'Market St'). Use this when user refers to a specific location by name or street."
                 }
             },
             "required": []
@@ -664,7 +672,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_select_location_from_list",
-        "description": "Select a specific location from a Google Maps search results list WITHOUT getting directions. This tool automatically opens Google Maps. Use this ONLY if you need to select a location but NOT get directions. If your goal is to get directions, use agent_get_google_maps_directions directly with the position or fragment parameters instead - it combines selection and directions in one step and is more efficient.",
+        "description": "Select a specific location from a Google Maps search results list WITHOUT getting directions so the user can look at it. This tool automatically opens Google Maps. If you want to get directions use agent_get_google_maps_directions instead.",
         "input_schema": {
             "type": "object",
             "properties": {
