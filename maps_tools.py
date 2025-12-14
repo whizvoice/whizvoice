@@ -594,7 +594,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_search_google_maps_location",
-        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and show the first result with the location details. This tool automatically opens Google Maps. Use this for addresses ('1885 Mission St'), cross streets ('Mission and 5th'), landmarks ('Golden Gate Bridge'), or specific named places. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those. Use this ONLY if you need to select a location but NOT get directions. To get directions to a location, it is more efficient to use agent_get_google_maps_directions directly which will search the location AND get directions.",
+        "description": "Search for a SPECIFIC ADDRESS or LOCATION in Google Maps and show the first result with the location details. This tool automatically opens Google Maps. Use this ONLY if you need to select a location but NOT get directions. To get directions to a location, it is more efficient to use agent_get_google_maps_directions directly which will search the location AND get directions. Do NOT use for general searches like 'coffee' or 'restaurants' - use search_google_maps_phrase for those.",
         "input_schema": {
             "type": "object",
             "properties": {
