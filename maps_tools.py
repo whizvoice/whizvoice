@@ -557,10 +557,10 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None,
             logger.info(f"Waiting for Google Maps directions result from Android device (request_id: {tool_request_id})")
 
             try:
-                # Wait for tool result with timeout (15 seconds for directions operations)
+                # Wait for tool result with timeout (25 seconds for directions operations)
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=15.0
+                    timeout=25.0
                 )
 
                 logger.info(f"Google Maps directions result for {tool_request_id}: {result}")
