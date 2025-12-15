@@ -4427,16 +4427,22 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # Text must come BEFORE tool_use, so we use explicit timestamps
             from datetime import datetime, timedelta
 
-            # Get user message timestamp
-            user_msg_result = supabase.table("messages")\
-                .select("timestamp")\
-                .eq("conversation_id", session_conversation_id)\
-                .eq("request_id", request_id)\
-                .eq("message_sender", "USER")\
-                .execute()
+            # Use client_timestamp directly instead of querying database (avoids race condition)
+            # client_timestamp is passed from the original WebSocket message
+            user_timestamp = client_timestamp
 
-            if user_msg_result.data:
-                user_timestamp = user_msg_result.data[0]["timestamp"]
+            # If client_timestamp not available, try database as fallback
+            if not user_timestamp:
+                user_msg_result = supabase.table("messages")\
+                    .select("timestamp")\
+                    .eq("conversation_id", session_conversation_id)\
+                    .eq("request_id", request_id)\
+                    .eq("message_sender", "USER")\
+                    .execute()
+                if user_msg_result.data:
+                    user_timestamp = user_msg_result.data[0]["timestamp"]
+
+            if user_timestamp:
                 # Parse and normalize timestamp
                 timestamp_str = user_timestamp.replace('Z', '+00:00')
                 if '.' in timestamp_str:
@@ -4458,13 +4464,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 tool_result_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
                 text_after_timestamp = (user_dt + timedelta(milliseconds=3)).isoformat().replace('+00:00', 'Z')
                 last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
-                logger.info(f"Using explicit timestamps: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}, text_after={text_after_timestamp}")
+                logger.info(f"Using explicit timestamps from client_timestamp: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}, text_after={text_after_timestamp}")
             else:
                 # Fallback: no explicit timestamps
                 text_before_and_tool_use_timestamp = None
                 tool_result_timestamp = None
                 text_after_timestamp = None
-                logger.warning(f"No USER message found with request_id {request_id}, using default timestamps")
+                logger.warning(f"No client_timestamp and no USER message found with request_id {request_id}, using default timestamps")
 
             # Save assistant message to Redis BEFORE executing the tool
             # IMPORTANT: Only include text BEFORE tool_use, not after
