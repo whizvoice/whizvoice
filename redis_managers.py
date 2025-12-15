@@ -17,60 +17,100 @@ SERVER_ID = os.getenv("SERVER_ID", f"server_{os.getpid()}")
 
 
 class ChatSessionManager:
-    """Manages chat message history in Redis"""
-    
+    """Manages chat message history in Redis using ZSET for automatic timestamp ordering"""
+
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
         self.ttl = 900  # 15 minutes
-        
-    async def get(self, session_id: str) -> List[Dict]:
-        """Get chat history for a session"""
-        data = await self.redis.get(f"chat_session:{session_id}")
-        return json.loads(data) if data else []
-    
+
+    def _timestamp_to_score(self, timestamp: Optional[str]) -> float:
+        """Convert ISO timestamp string to epoch float for ZSET score"""
+        if timestamp:
+            from datetime import datetime
+            try:
+                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                return dt.timestamp()
+            except (ValueError, AttributeError):
+                pass
+        # Fallback to current time if no valid timestamp
+        return time.time()
+
+    async def get(self, session_id: str, include_cancelled: bool = False) -> List[Dict]:
+        """Get chat history for a session, ordered by timestamp"""
+        key = f"chat_session:{session_id}"
+        # ZRANGE returns members in score order (lowest to highest = oldest to newest)
+        members = await self.redis.zrange(key, 0, -1)
+        messages = []
+        for member in members:
+            msg = json.loads(member)
+            # Filter out cancelled messages unless explicitly requested
+            if include_cancelled or not msg.get("_cancelled"):
+                messages.append(msg)
+        return messages
+
     async def set(self, session_id: str, messages: List[Dict]):
-        """Set entire chat history"""
-        await self.redis.set(
-            f"chat_session:{session_id}",
-            json.dumps(messages),
-            ex=self.ttl
-        )
-    
+        """Set entire chat history using ZSET"""
+        key = f"chat_session:{session_id}"
+        # Delete existing data
+        await self.redis.delete(key)
+
+        if messages:
+            # Add all messages with their timestamps as scores
+            for msg in messages:
+                timestamp = msg.get("_timestamp")
+                score = self._timestamp_to_score(timestamp)
+                await self.redis.zadd(key, {json.dumps(msg): score})
+
+            await self.redis.expire(key, self.ttl)
+
     async def set_messages(self, session_id: str, messages: List[Dict]):
         """Alias for set() method - for backward compatibility"""
         await self.set(session_id, messages)
-    
+
     async def get_messages(self, session_id: str) -> List[Dict]:
         """Alias for get() method - for backward compatibility"""
         return await self.get(session_id)
-    
-    async def add_message(self, session_id: str, message: Dict):
-        """Alias for append() method - for backward compatibility"""
-        await self.append(session_id, message)
-    
+
+    async def add_message(self, session_id: str, message: Dict, timestamp: str = None, request_id: str = None):
+        """Add a message to the session using ZSET for automatic ordering"""
+        # Add metadata to message
+        if timestamp:
+            message["_timestamp"] = timestamp
+        if request_id:
+            message["_request_id"] = request_id
+
+        # Convert timestamp to epoch float for score
+        score = self._timestamp_to_score(timestamp)
+
+        key = f"chat_session:{session_id}"
+        await self.redis.zadd(key, {json.dumps(message): score})
+        await self.redis.expire(key, self.ttl)
+
+        # Trim if too long (keep messages with highest scores = most recent by timestamp)
+        count = await self.redis.zcard(key)
+        if count > 100:
+            # Remove oldest messages (lowest scores)
+            await self.redis.zremrangebyrank(key, 0, count - 101)
+
     async def append(self, session_id: str, message: Dict):
-        """Append a message to chat history"""
-        # Get existing messages
-        messages = await self.get(session_id)
-        messages.append(message)
-        
-        # Trim if too long (keep last 100 messages)
-        if len(messages) > 100:
-            messages = messages[-100:]
-        
-        await self.set(session_id, messages)
-    
+        """Append a message to chat history - backward compatible, uses current time as timestamp"""
+        await self.add_message(session_id, message)
+
     async def extend(self, session_id: str, new_messages: List[Dict]):
         """Extend chat history with multiple messages"""
-        messages = await self.get(session_id)
-        messages.extend(new_messages)
-        
+        key = f"chat_session:{session_id}"
+        for msg in new_messages:
+            timestamp = msg.get("_timestamp")
+            score = self._timestamp_to_score(timestamp)
+            await self.redis.zadd(key, {json.dumps(msg): score})
+
+        await self.redis.expire(key, self.ttl)
+
         # Trim if too long
-        if len(messages) > 100:
-            messages = messages[-100:]
-        
-        await self.set(session_id, messages)
-    
+        count = await self.redis.zcard(key)
+        if count > 100:
+            await self.redis.zremrangebyrank(key, 0, count - 101)
+
     async def delete(self, session_id: str):
         """Delete a session"""
         await self.redis.delete(f"chat_session:{session_id}")
@@ -82,6 +122,18 @@ class ChatSessionManager:
     async def exists(self, session_id: str) -> bool:
         """Check if session exists"""
         return await self.redis.exists(f"chat_session:{session_id}")
+
+    async def mark_cancelled(self, session_id: str, request_id: str):
+        """Mark all messages with given request_id as cancelled"""
+        key = f"chat_session:{session_id}"
+        members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
+        for member, score in members_with_scores:
+            msg = json.loads(member)
+            if msg.get("_request_id") == request_id:
+                # Remove old message and add updated one with same score
+                await self.redis.zrem(key, member)
+                msg["_cancelled"] = True
+                await self.redis.zadd(key, {json.dumps(msg): score})
 
 
 class UserSessionManager:

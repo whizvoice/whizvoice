@@ -51,11 +51,16 @@ async def get_chat_messages(session_id: str) -> List[Dict]:
             return chat_sessions.get(session_id, [])
 
 
-async def add_chat_message(session_id: str, message: Dict):
+async def add_chat_message(session_id: str, message: Dict, timestamp: str = None, request_id: str = None):
     """Add a chat message to a session in Redis or local storage"""
     if redis_managers:
-        await redis_managers["chat_sessions"].add_message(session_id, message)
+        await redis_managers["chat_sessions"].add_message(session_id, message, timestamp, request_id)
     else:
+        # Local fallback - add metadata and append
+        if timestamp:
+            message["_timestamp"] = timestamp
+        if request_id:
+            message["_request_id"] = request_id
         async with chat_sessions_lock:
             if session_id not in chat_sessions:
                 chat_sessions[session_id] = []
@@ -79,6 +84,18 @@ async def clear_chat_session(session_id: str):
         async with chat_sessions_lock:
             if session_id in chat_sessions:
                 del chat_sessions[session_id]
+
+
+async def mark_chat_messages_cancelled(session_id: str, request_id: str):
+    """Mark messages with given request_id as cancelled"""
+    if redis_managers:
+        await redis_managers["chat_sessions"].mark_cancelled(session_id, request_id)
+    else:
+        async with chat_sessions_lock:
+            if session_id in chat_sessions:
+                for msg in chat_sessions[session_id]:
+                    if msg.get("_request_id") == request_id:
+                        msg["_cancelled"] = True
 
 
 # User Session Management

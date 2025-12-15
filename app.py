@@ -73,7 +73,7 @@ except ImportError:
     STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 from redis_helpers import (
     # Chat session functions
-    get_chat_messages, add_chat_message, set_chat_messages, clear_chat_session,
+    get_chat_messages, add_chat_message, set_chat_messages, clear_chat_session, mark_chat_messages_cancelled,
     # User session functions  
     get_user_sessions, add_user_session, remove_user_session, get_all_user_sessions,
     # Session timestamp functions
@@ -236,6 +236,13 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     """
     # Get messages from session
     messages = await get_chat_messages(session_id)
+
+    # Strip internal metadata fields before sending to Claude
+    # These fields (_timestamp, _request_id, _cancelled) are used for Redis ordering
+    for msg in messages:
+        msg.pop("_timestamp", None)
+        msg.pop("_request_id", None)
+        msg.pop("_cancelled", None)
 
     # SAFETY NET: If context is empty but we have a conversation_id, try to load from database
     # This handles edge cases where Redis session might have been cleared unexpectedly
@@ -2388,7 +2395,8 @@ async def cancel_and_broadcast_messages(
     message_ids: List[int],
     conversation_id: int,
     request_id: str,
-    reason: str
+    reason: str,
+    session_id: str = None
 ):
     """
     Cancel messages in database and broadcast DeleteMessage notifications to all clients.
@@ -2401,11 +2409,20 @@ async def cancel_and_broadcast_messages(
         conversation_id: Conversation ID for broadcasting
         request_id: Request ID for client matching
         reason: Reason for cancellation (e.g., "superseded_by_new_message", "superseded_by_new_request")
+        session_id: Optional session ID for marking messages as cancelled in Redis
     """
     if not message_ids:
         return
 
     logger.info(f"Cancelling {len(message_ids)} message(s) and broadcasting to conversation {conversation_id}: {message_ids}")
+
+    # Mark messages as cancelled in Redis (for proper filtering during concurrent requests)
+    if session_id and request_id:
+        try:
+            await mark_chat_messages_cancelled(session_id, request_id)
+            logger.info(f"Marked messages for request {request_id} as cancelled in Redis")
+        except Exception as e:
+            logger.error(f"Failed to mark messages as cancelled in Redis: {e}")
 
     # Mark messages as cancelled in database
     for msg_id in message_ids:
@@ -2518,7 +2535,8 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                     message_ids=[bot_message_id],
                     conversation_id=conversation_id,
                     request_id=request_id,
-                    reason="superseded_by_new_request"
+                    reason="superseded_by_new_request",
+                    session_id=session_id
                 )
             
     except Exception as e:
@@ -4479,8 +4497,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "tool_use_id": tool_block.id,
                     "content": "Result pending..."
                 }
-                await add_chat_message(session_id, {"role": "assistant", "content": assistant_content})
-                await add_chat_message(session_id, {"role": "user", "content": [pending_tool_result_dict]})
+                await add_chat_message(session_id, {"role": "assistant", "content": assistant_content}, timestamp=text_before_and_tool_use_timestamp, request_id=request_id)
+                await add_chat_message(session_id, {"role": "user", "content": [pending_tool_result_dict]}, timestamp=tool_result_timestamp, request_id=request_id)
 
                 # Save merged text_before+tool_use to database as ONE message
                 # content_type is "tool_use" even though it may also contain text content
@@ -4666,7 +4684,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
                     if not updated:
                         logger.warning(f"Could not find USER message with tool_result for tool_use_id={tool_block.id}, adding as separate message")
-                        await add_chat_message(session_id, {"role": "assistant", "content": text_after_tool})
+                        await add_chat_message(session_id, {"role": "assistant", "content": text_after_tool}, timestamp=text_after_timestamp, request_id=request_id)
 
                     # Save to database with timestamp after tool_result
                     # NOTE: text_after must be saved as USER message to maintain proper grouping
@@ -4811,30 +4829,37 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Log final response details
         logger.info(f"Final AI response - stop_reason: {response.stop_reason}")
         logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': getattr(block, 'text', '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
-        
+
+        # Extract text content from response
+        assistant_response_text = ""
+        content_list = []
+        if response.content:
+            for block in response.content:
+                if block.type == 'text':
+                    content_list.append({"type": "text", "text": block.text})
+                    if not assistant_response_text:
+                        assistant_response_text = block.text
+                # Skip tool_use blocks - they were already added in the tool loop
+
+        # Calculate timestamp for final assistant text (after tool_result if applicable)
+        final_text_timestamp = None
+        if last_tool_result_timestamp:  # last_tool_result_timestamp was set in the tool loop
+            # Parse tool_result timestamp and add 1ms to ensure final text comes after
+            try:
+                from datetime import datetime, timedelta
+                tool_result_dt = datetime.fromisoformat(last_tool_result_timestamp.replace('Z', '+00:00'))
+                final_text_timestamp = (tool_result_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
+                logger.info(f"Setting final assistant text timestamp to {final_text_timestamp} (after tool_result)")
+            except:
+                pass
+
         # Add assistant final response to session history (if not an intercepted error)
         # IMPORTANT: Only add text blocks here, NOT tool_use blocks
         # Tool_use blocks were already added in the tool loop above
         async with chat_sessions_lock:
-            # Convert response.content to serializable format - ONLY text blocks
-            content_list = []
-            for block in response.content:
-                if block.type == 'text':
-                    content_list.append({"type": "text", "text": block.text})
-                # Skip tool_use blocks - they were already added in the tool loop
-
             # Only add message if there's text content
             if content_list:
-                await add_chat_message(session_id, {"role": "assistant", "content": content_list})
-        
-        # Extract and save assistant response to database
-        # Look for text in ANY content block, not just the first one
-        assistant_response_text = ""
-        if response.content:
-            for block in response.content:
-                if block.type == 'text':
-                    assistant_response_text = block.text
-                    break
+                await add_chat_message(session_id, {"role": "assistant", "content": content_list}, timestamp=final_text_timestamp, request_id=request_id)
 
         # Check if request was cancelled
         request_cancelled = False
@@ -4850,19 +4875,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         if assistant_response_text:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
 
-            # If this is a response after tool execution, ensure it has a timestamp AFTER the tool_result
-            # to maintain proper message ordering when loading from database
-            final_text_timestamp = None
-            if last_tool_result_timestamp:  # last_tool_result_timestamp was set in the tool loop
-                # Parse tool_result timestamp and add 1ms to ensure final text comes after
-                try:
-                    from datetime import datetime, timedelta
-                    tool_result_dt = datetime.fromisoformat(last_tool_result_timestamp.replace('Z', '+00:00'))
-                    final_text_timestamp = (tool_result_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
-                    logger.info(f"Setting final assistant text timestamp to {final_text_timestamp} (after tool_result)")
-                except:
-                    pass
-
             save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text", client_timestamp=final_text_timestamp)
             if save_result:
                 saved_conversation_id, bot_message_id, cancelled_ids = save_result
@@ -4874,7 +4886,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         message_ids=cancelled_ids,
                         conversation_id=saved_conversation_id,
                         request_id=request_id,
-                        reason="superseded_by_new_message"
+                        reason="superseded_by_new_message",
+                        session_id=session_id
                     )
 
                 # If cancelled, cancel and broadcast
@@ -4883,7 +4896,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         message_ids=[bot_message_id],
                         conversation_id=saved_conversation_id,
                         request_id=request_id,
-                        reason="request_cancelled"
+                        reason="request_cancelled",
+                        session_id=session_id
                     )
             else:
                 logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
