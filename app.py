@@ -287,13 +287,17 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                         logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
                         continue
 
+                    logger.info(f"📥 DB load: tool_use, db_timestamp={msg.get('timestamp')}")
                     redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
                 elif content_type == 'tool_result' and tool_content:
+                    logger.info(f"📥 DB load: tool_result, db_timestamp={msg.get('timestamp')}")
                     redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
                 # Handle regular text messages
                 elif msg['message_sender'] == 'USER':
+                    logger.info(f"📥 DB load: USER text, db_timestamp={msg.get('timestamp')}")
                     redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
                 elif msg['message_sender'] == 'ASSISTANT':
+                    logger.info(f"📥 DB load: ASSISTANT text, db_timestamp={msg.get('timestamp')}")
                     redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
 
             if redis_messages:
@@ -3745,6 +3749,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
                             continue
 
+                        logger.info(f"📥 DB load (process_message_task): tool_use, db_timestamp={msg.get('timestamp')}")
                         redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
                     elif content_type == 'tool_result' and tool_content:
                         # Skip orphaned tool_results whose tool_use was cancelled
@@ -3758,11 +3763,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             logger.warning(f"Skipping orphaned tool_result (tool_use was cancelled): {tool_use_id}")
                             continue
 
+                        logger.info(f"📥 DB load (process_message_task): tool_result, db_timestamp={msg.get('timestamp')}")
                         redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
                     # Handle regular text messages
                     elif msg['message_sender'] == 'USER':
+                        logger.info(f"📥 DB load (process_message_task): USER text, db_timestamp={msg.get('timestamp')}")
                         redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
                     elif msg['message_sender'] == 'ASSISTANT':
+                        logger.info(f"📥 DB load (process_message_task): ASSISTANT text, db_timestamp={msg.get('timestamp')}")
                         redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
 
                 # Populate Redis session with conversation history

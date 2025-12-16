@@ -31,7 +31,9 @@ class ChatSessionManager:
                 dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                 return dt.timestamp()
             except (ValueError, AttributeError):
-                pass
+                logger.warning(f"⚠️ _timestamp_to_score: Invalid timestamp format: {timestamp}, using time.time() fallback")
+        else:
+            logger.warning(f"⚠️ _timestamp_to_score: No timestamp provided, using time.time() fallback")
         # Fallback to current time if no valid timestamp
         return time.time()
 
@@ -55,10 +57,14 @@ class ChatSessionManager:
         await self.redis.delete(key)
 
         if messages:
+            logger.info(f"📝 set() called for session {session_id} with {len(messages)} messages")
             # Add all messages with their timestamps as scores
-            for msg in messages:
+            for i, msg in enumerate(messages):
                 timestamp = msg.get("_timestamp")
                 score = self._timestamp_to_score(timestamp)
+                role = msg.get("role", "unknown")
+                content_preview = str(msg.get("content", ""))[:50]
+                logger.info(f"📝 set() msg[{i}]: role={role}, _timestamp={timestamp}, score={score}, content={content_preview}...")
                 await self.redis.zadd(key, {json.dumps(msg): score})
 
             await self.redis.expire(key, self.ttl)
