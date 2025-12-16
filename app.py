@@ -287,14 +287,14 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                         logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
                         continue
 
-                    redis_messages.append({"role": "assistant", "content": tool_content})
+                    redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
                 elif content_type == 'tool_result' and tool_content:
-                    redis_messages.append({"role": "user", "content": tool_content})
+                    redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
                 # Handle regular text messages
                 elif msg['message_sender'] == 'USER':
-                    redis_messages.append({"role": "user", "content": msg['content']})
+                    redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
                 elif msg['message_sender'] == 'ASSISTANT':
-                    redis_messages.append({"role": "assistant", "content": msg['content']})
+                    redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
 
             if redis_messages:
                 await set_chat_messages(session_id, redis_messages)
@@ -3745,7 +3745,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
                             continue
 
-                        redis_messages.append({"role": "assistant", "content": tool_content})
+                        redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
                     elif content_type == 'tool_result' and tool_content:
                         # Skip orphaned tool_results whose tool_use was cancelled
                         tool_use_id = None
@@ -3758,12 +3758,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             logger.warning(f"Skipping orphaned tool_result (tool_use was cancelled): {tool_use_id}")
                             continue
 
-                        redis_messages.append({"role": "user", "content": tool_content})
+                        redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
                     # Handle regular text messages
                     elif msg['message_sender'] == 'USER':
-                        redis_messages.append({"role": "user", "content": msg['content']})
+                        redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
                     elif msg['message_sender'] == 'ASSISTANT':
-                        redis_messages.append({"role": "assistant", "content": msg['content']})
+                        redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
 
                 # Populate Redis session with conversation history
                 if redis_messages:
@@ -3899,14 +3899,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                                     logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
                                     continue
 
-                                redis_messages.append({"role": "assistant", "content": tool_content})
+                                redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
                             elif content_type == 'tool_result' and tool_content:
-                                redis_messages.append({"role": "user", "content": tool_content})
+                                redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
                             # Handle regular text messages
                             elif msg['message_sender'] == 'USER':
-                                redis_messages.append({"role": "user", "content": msg['content']})
+                                redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
                             elif msg['message_sender'] == 'ASSISTANT':
-                                redis_messages.append({"role": "assistant", "content": msg['content']})
+                                redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
 
                         if redis_messages:
                             await set_chat_messages(session_id, redis_messages)
