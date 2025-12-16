@@ -106,7 +106,8 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 if current_group and current_group[2]:
                     claude_messages.append({
                         "role": current_group[0],
-                        "content": current_group[2]
+                        "content": current_group[2],
+                        "_timestamp": current_group[4]
                     })
 
                 # Start new group
@@ -118,13 +119,14 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 if row.get("tool_content"):
                     content_blocks.extend(row["tool_content"])
 
-                current_group = [message_role, row_request_id, content_blocks, has_tool_use]
+                current_group = [message_role, row_request_id, content_blocks, has_tool_use, row.get("timestamp")]
 
         # Flush final group
         if current_group and current_group[2]:
             claude_messages.append({
                 "role": current_group[0],
-                "content": current_group[2]
+                "content": current_group[2],
+                "_timestamp": current_group[4]
             })
 
         return claude_messages
