@@ -634,7 +634,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_whatsapp_send_message",
-        "description": "Send a message in WhatsApp. This tool automatically opens WhatsApp if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (whatsapp_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in WhatsApp.",
+        "description": "Send a message in WhatsApp. This tool automatically opens WhatsApp if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (whatsapp_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will fill out the text input field and then click the send button in WhatsApp.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -687,7 +687,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_sms_send_message",
-        "description": "Send an SMS/text message in Google Messages. This tool automatically opens Google Messages if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (sms_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will click the send button in Google Messages.",
+        "description": "Send an SMS/text message in Google Messages. This tool automatically opens Google Messages if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (sms_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will fill out the text input field and then click the send button in Google Messages.",
         "input_schema": {
             "type": "object",
             "properties": {
