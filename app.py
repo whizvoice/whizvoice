@@ -3797,7 +3797,18 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         real_conversation_id, user_message_id, cancelled_ids = save_result
         logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}, message_id: {user_message_id}")
         # Note: USER messages shouldn't have cancelled_ids (only ASSISTANT messages cancel previous ones)
-        
+
+        # Debug logging for optimistic ID migration investigation
+        logger.info(f"🔧 MIGRATION_DEBUG: session_conversation_id={session_conversation_id}, real_conversation_id={real_conversation_id}")
+        logger.info(f"🔧 MIGRATION_DEBUG: client_conversation_id={client_conversation_id}")
+        logger.info(f"🔧 MIGRATION_DEBUG: Is migration? {real_conversation_id and real_conversation_id != session_conversation_id}")
+        logger.info(f"🔧 MIGRATION_DEBUG: websocket is {'present' if websocket else 'None'}")
+        if websocket:
+            try:
+                logger.info(f"🔧 MIGRATION_DEBUG: websocket.client_state={websocket.client_state}")
+            except Exception as state_err:
+                logger.warning(f"🔧 MIGRATION_DEBUG: Could not get websocket.client_state: {state_err}")
+
         # Update optimistic → real mapping if client provided optimistic ID
         if client_conversation_id and client_conversation_id < 0 and real_conversation_id:
             if redis_managers and "session_mappings" in redis_managers:
@@ -4600,6 +4611,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
             # ===== Now execute the tool =====
             try:
+                # Debug logging for optimistic ID migration investigation
+                logger.info(f"🔧 TOOL_DEBUG execute_tool: About to execute {tool_block.name}")
+                logger.info(f"🔧 TOOL_DEBUG execute_tool: session_id={session_id}, conversation_id={session_conversation_id}")
+                logger.info(f"🔧 TOOL_DEBUG execute_tool: websocket is {'present' if websocket else 'None'}")
+                if websocket:
+                    try:
+                        logger.info(f"🔧 TOOL_DEBUG execute_tool: websocket.client_state={websocket.client_state}")
+                    except Exception as state_err:
+                        logger.warning(f"🔧 TOOL_DEBUG execute_tool: Could not get websocket.client_state: {state_err}")
+                logger.info(f"🔧 TOOL_DEBUG execute_tool: client_conversation_id={client_conversation_id} (optimistic ID migration: {client_conversation_id is not None and client_conversation_id < 0})")
+
                 # Pass WebSocket context for tools that need it (like launch_app)
                 tool_execution_result = await execute_tool(
                     tool_block.name,

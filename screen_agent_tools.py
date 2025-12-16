@@ -33,10 +33,21 @@ async def agent_launch_app(app_name: str, user_id: str = None, websocket = None,
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
+        # Debug logging for optimistic ID migration investigation
+        logger.info(f"🔧 TOOL_DEBUG agent_launch_app: app_name={app_name}, user_id={user_id}")
+        logger.info(f"🔧 TOOL_DEBUG agent_launch_app: websocket is {'present' if websocket else 'None'}")
+        logger.info(f"🔧 TOOL_DEBUG agent_launch_app: conversation_id={conversation_id}")
+        if websocket:
+            try:
+                logger.info(f"🔧 TOOL_DEBUG agent_launch_app: websocket.client_state={websocket.client_state}")
+            except Exception as state_err:
+                logger.warning(f"🔧 TOOL_DEBUG agent_launch_app: Could not get websocket.client_state: {state_err}")
+
         logger.info(f"Launching app '{app_name}' (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
+            logger.error(f"🔧 TOOL_DEBUG agent_launch_app: FAILED - No WebSocket, user_id={user_id}, conversation_id={conversation_id}")
             logger.error("No WebSocket connection available for app launch")
             return {
                 "error": "No connection to device available",
@@ -122,10 +133,21 @@ async def agent_disable_continuous_listening(user_id: str = None, websocket = No
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
+        # Debug logging for optimistic ID migration investigation
+        logger.info(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: user_id={user_id}")
+        logger.info(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: websocket is {'present' if websocket else 'None'}")
+        logger.info(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: conversation_id={conversation_id}")
+        if websocket:
+            try:
+                logger.info(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: websocket.client_state={websocket.client_state}")
+            except Exception as state_err:
+                logger.warning(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: Could not get websocket.client_state: {state_err}")
+
         logger.info(f"Disabling continuous listening (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
+            logger.error(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: FAILED - No WebSocket, user_id={user_id}, conversation_id={conversation_id}")
             logger.error("No WebSocket connection available for disable_continuous_listening")
             return {
                 "error": "No connection to device available",
@@ -210,10 +232,21 @@ async def agent_set_tts_enabled(enabled: bool, user_id: str = None, websocket = 
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
+        # Debug logging for optimistic ID migration investigation
+        logger.info(f"🔧 TOOL_DEBUG agent_set_tts_enabled: enabled={enabled}, user_id={user_id}")
+        logger.info(f"🔧 TOOL_DEBUG agent_set_tts_enabled: websocket is {'present' if websocket else 'None'}")
+        logger.info(f"🔧 TOOL_DEBUG agent_set_tts_enabled: conversation_id={conversation_id}")
+        if websocket:
+            try:
+                logger.info(f"🔧 TOOL_DEBUG agent_set_tts_enabled: websocket.client_state={websocket.client_state}")
+            except Exception as state_err:
+                logger.warning(f"🔧 TOOL_DEBUG agent_set_tts_enabled: Could not get websocket.client_state: {state_err}")
+
         logger.info(f"Setting TTS enabled to {enabled} (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
+            logger.error(f"🔧 TOOL_DEBUG agent_set_tts_enabled: FAILED - No WebSocket, user_id={user_id}, conversation_id={conversation_id}")
             logger.error("No WebSocket connection available for set_tts_enabled")
             return {
                 "error": "No connection to device available",
