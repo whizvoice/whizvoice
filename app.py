@@ -3917,8 +3917,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
                 # No separator needed - USER messages with tool_result will naturally merge with
                 # subsequent user messages, and the tool_result will remain first in the merged content
-                # Now add the current message
-                await asyncio.shield(add_chat_message(session_id, {"role": "user", "content": message}))
+                # Now add the current message (with client_timestamp to ensure correct ZSET ordering)
+                await asyncio.shield(add_chat_message(session_id, {"role": "user", "content": message}, timestamp=client_timestamp))
                 logger.info(f"Added current message to Redis session for conversation {processing_conversation_id}")
 
                 # CRITICAL: After adding message, check if Redis now has incomplete tool_use blocks
