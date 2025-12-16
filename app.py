@@ -73,7 +73,7 @@ except ImportError:
     STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 from redis_helpers import (
     # Chat session functions
-    get_chat_messages, add_chat_message, set_chat_messages, clear_chat_session, mark_chat_messages_cancelled,
+    get_chat_messages, get_chat_messages_for_claude, add_chat_message, set_chat_messages, clear_chat_session, mark_chat_messages_cancelled,
     # User session functions  
     get_user_sessions, add_user_session, remove_user_session, get_all_user_sessions,
     # Session timestamp functions
@@ -234,15 +234,9 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     conversation_id: Optional - if provided, will reload context from DB if empty
     with_tools: Whether to include tools in the request (default True)
     """
-    # Get messages from session
-    messages = await get_chat_messages(session_id)
-
-    # Strip internal metadata fields before sending to Claude
-    # These fields (_timestamp, _request_id, _cancelled) are used for Redis ordering
-    for msg in messages:
-        msg.pop("_timestamp", None)
-        msg.pop("_request_id", None)
-        msg.pop("_cancelled", None)
+    # Get messages from session (without internal metadata fields like _timestamp)
+    # This returns new dicts, so we don't mutate the original messages in Redis
+    messages = await get_chat_messages_for_claude(session_id)
 
     # SAFETY NET: If context is empty but we have a conversation_id, try to load from database
     # This handles edge cases where Redis session might have been cleared unexpectedly

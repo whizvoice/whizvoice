@@ -51,6 +51,20 @@ async def get_chat_messages(session_id: str) -> List[Dict]:
             return chat_sessions.get(session_id, [])
 
 
+async def get_chat_messages_for_claude(session_id: str) -> List[Dict]:
+    """Get chat messages for sending to Claude API, with internal metadata stripped.
+
+    Returns new message dicts without _timestamp, _request_id, _cancelled fields.
+    Does NOT mutate the original messages in Redis.
+    """
+    messages = await get_chat_messages(session_id)
+    # Create new dicts without internal metadata fields
+    return [
+        {k: v for k, v in msg.items() if k not in ('_timestamp', '_request_id', '_cancelled')}
+        for msg in messages
+    ]
+
+
 async def add_chat_message(session_id: str, message: Dict, timestamp: str = None, request_id: str = None):
     """Add a chat message to a session in Redis or local storage"""
     if redis_managers:
