@@ -625,7 +625,7 @@ messaging_tools = [
                 },
                 "previous_text": {
                     "type": "string",
-                    "description": "The previous version of the message text. You MUST provide this when modifying a perviously drafted message to show tracked changes (deletions in red strikethrough, additions in blue). If there isn't a previously drafted version, don't use this parameter."
+                    "description": "The previous version of the message text. You MUST provide this when modifying a previously drafted message to show tracked changes (deletions in red strikethrough, additions in blue). If there isn't a previously drafted version, don't use this parameter."
                 }
             },
             "required": ["message", "chat_name"]
@@ -664,7 +664,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_sms_draft_message",
-        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. This tool automatically opens Google Messages and navigates to the specified conversation. Always use this BEFORE sending any SMS/text message. This allows the user to review and confirm the message text before it's sent. The message will appear in a yellow overlay. You MUST use this method to draft the message before you send the message so that you can confirm with the user before sending. Optional: If you are editing/correcting a previously drafted message, provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. This tool automatically opens Google Messages and navigates to the specified conversation. You MUST use this BEFORE sending any SMS/text message, so that the user can review and confirm the message text before it's sent. The message will appear in a yellow overlay. If you are editing/correcting a previously drafted message, you MUST provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -678,7 +678,7 @@ messaging_tools = [
                 },
                 "previous_text": {
                     "type": "string",
-                    "description": "Optional. The previous version of the message text. When provided, the overlay will show tracked changes (deletions in red strikethrough, additions in blue)"
+                    "description": "The previous version of the message text. You MUST provide this when modifying a previously drafted message to show tracked changes (deletions in red strikethrough, additions in blue). If there isn't a previously drafted version, don't use this parameter."
                 }
             },
             "required": ["message", "contact_name"]
