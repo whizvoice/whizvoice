@@ -27,11 +27,24 @@ class ChatSessionManager:
         """Convert ISO timestamp string to epoch float for ZSET score"""
         if timestamp:
             from datetime import datetime
+            import re
             try:
-                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                # Normalize the timestamp for Python's fromisoformat()
+                ts = timestamp.replace('Z', '+00:00')
+
+                # Fix fractional seconds: Python < 3.11 requires exactly 3 or 6 digits
+                # Match pattern like ".4+00:00" or ".40+00:00" and pad to 3 digits
+                match = re.match(r'^(.+\.)(\d{1,6})([+-].*)$', ts)
+                if match:
+                    prefix, frac, suffix = match.groups()
+                    # Pad or truncate to exactly 6 digits for consistency
+                    frac_padded = frac.ljust(6, '0')[:6]
+                    ts = f"{prefix}{frac_padded}{suffix}"
+
+                dt = datetime.fromisoformat(ts)
                 return dt.timestamp()
-            except (ValueError, AttributeError):
-                logger.warning(f"⚠️ _timestamp_to_score: Invalid timestamp format: {timestamp}, using time.time() fallback")
+            except (ValueError, AttributeError) as e:
+                logger.warning(f"⚠️ _timestamp_to_score: Invalid timestamp format: {timestamp}, error: {e}, using time.time() fallback")
         else:
             logger.warning(f"⚠️ _timestamp_to_score: No timestamp provided, using time.time() fallback")
         # Fallback to current time if no valid timestamp

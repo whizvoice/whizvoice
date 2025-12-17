@@ -4031,7 +4031,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                                 if tool_use_id and tool_use_id not in tool_use_ids_with_results:
                                     logger.warning(f"Skipping incomplete tool_use in reload: {tool_use_id}")
                                     continue
-                                redis_messages.append({"role": "assistant", "content": tool_content})
+                                redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
                             elif content_type == 'tool_result' and tool_content:
                                 # Skip orphaned tool_results whose tool_use was cancelled
                                 tool_use_id = None
@@ -4044,11 +4044,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                                     logger.warning(f"Skipping orphaned tool_result in reload (tool_use was cancelled): {tool_use_id}")
                                     continue
 
-                                redis_messages.append({"role": "user", "content": tool_content})
+                                redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
                             elif msg['message_sender'] == 'USER':
-                                redis_messages.append({"role": "user", "content": msg['content']})
+                                redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
                             elif msg['message_sender'] == 'ASSISTANT':
-                                redis_messages.append({"role": "assistant", "content": msg['content']})
+                                redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
 
                         if redis_messages:
                             await set_chat_messages(session_id, redis_messages)
