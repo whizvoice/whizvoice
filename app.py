@@ -1829,7 +1829,11 @@ async def websocket_endpoint(websocket: WebSocket):
                                 session_conversation_id = message_conversation_id
                             # else: conversation_id matches, no update needed
                         
-                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}")
+                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}, client_timestamp: {client_timestamp}")
+
+                        # Log warning if client_timestamp is missing - this helps debug timestamp ordering issues
+                        if client_timestamp is None:
+                            logger.warning(f"⚠️ CLIENT_TIMESTAMP_MISSING: No timestamp in WebSocket message. request_id={request_id}, type={message_type}, message_preview='{message[:50] if message else '(empty)'}...'")
                         
                         # Validate client_conversation_id immediately
                         # Convert to int if it's a string number, and check if positive
