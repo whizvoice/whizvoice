@@ -847,6 +847,19 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "enabled parameter is required."} if args.get('enabled') is None else None
     },
+    "agent_close_app": {
+        "function_name": "agent_close_app",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
     "agent_play_youtube_music": {
         "function_name": "agent_play_youtube_music",
         "requires_auth": False,
@@ -4479,11 +4492,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
                 logger.info(f"Using explicit timestamps from client_timestamp: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}, text_after={text_after_timestamp}")
             else:
-                # Fallback: no explicit timestamps
-                text_before_and_tool_use_timestamp = None
-                tool_result_timestamp = None
-                text_after_timestamp = None
-                logger.warning(f"No client_timestamp and no USER message found with request_id {request_id}, using default timestamps")
+                # Fallback: generate timestamps using current time as base to ensure proper ordering
+                # This prevents None timestamps which cause ZSET score issues in Redis
+                fallback_base = datetime.utcnow()
+                text_before_and_tool_use_timestamp = (fallback_base + timedelta(milliseconds=1)).isoformat() + 'Z'
+                tool_result_timestamp = (fallback_base + timedelta(milliseconds=2)).isoformat() + 'Z'
+                text_after_timestamp = (fallback_base + timedelta(milliseconds=3)).isoformat() + 'Z'
+                last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
+                logger.warning(f"No client_timestamp and no USER message found with request_id {request_id}, using fallback timestamps: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}")
 
             # Save assistant message to Redis BEFORE executing the tool
             # IMPORTANT: Only include text BEFORE tool_use, not after
@@ -4880,8 +4896,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 tool_result_dt = datetime.fromisoformat(last_tool_result_timestamp.replace('Z', '+00:00'))
                 final_text_timestamp = (tool_result_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
                 logger.info(f"Setting final assistant text timestamp to {final_text_timestamp} (after tool_result)")
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to parse tool_result timestamp '{last_tool_result_timestamp}': {e}")
+                # Use fallback: current time + 1ms to ensure proper ordering
+                final_text_timestamp = (datetime.utcnow() + timedelta(milliseconds=1)).isoformat() + 'Z'
+                logger.warning(f"Using fallback final_text_timestamp: {final_text_timestamp}")
 
         # Add assistant final response to session history (if not an intercepted error)
         # IMPORTANT: Only add text blocks here, NOT tool_use blocks
