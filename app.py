@@ -4437,27 +4437,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "input": tb.input
                 })
 
-            # Extract text blocks from response, separating text BEFORE and AFTER tool_use
-            # Text BEFORE tool_use should be saved with tool_use in Redis
-            # Text AFTER tool_use should be saved separately (after tool execution completes)
+            # Extract ALL text blocks from response - all text goes BEFORE tool_uses
+            # Claude API expects: ASSISTANT [text, tool_use_A, tool_use_B] then USER [tool_result_A, tool_result_B]
             text_before_tool = []
-            text_after_tool = []
-            found_tool_use = False
             assistant_response_text_before = ""
 
             for block in response.content:
-                if block.type == 'tool_use':
-                    found_tool_use = True
-                elif block.type == 'text':
+                if block.type == 'text':
                     text_dict = {"type": "text", "text": block.text}
-                    if not found_tool_use:
-                        # Text comes before tool_use
-                        text_before_tool.append(text_dict)
-                        if not assistant_response_text_before:
-                            assistant_response_text_before = block.text
-                    else:
-                        # Text comes after tool_use - will be added to Redis later
-                        text_after_tool.append(text_dict)
+                    text_before_tool.append(text_dict)
+                    if not assistant_response_text_before:
+                        assistant_response_text_before = block.text
 
             # Calculate timestamps to ensure correct ordering in database
             # Text must come BEFORE tool_use, so we use explicit timestamps
@@ -4494,20 +4484,18 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             timestamp_str = f"{parts[0]}.{frac}-{tz}"
 
                 user_dt = datetime.fromisoformat(timestamp_str)
-                # Set timestamps: text_before+tool_use (T+1ms), tool_result (T+2ms), text_after (T+3ms)
+                # Set timestamps: text_before+tool_use (T+1ms), tool_result (T+2ms)
                 # text_before and tool_use are merged into ONE message with timestamp T+1ms
                 text_before_and_tool_use_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
                 tool_result_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
-                text_after_timestamp = (user_dt + timedelta(milliseconds=3)).isoformat().replace('+00:00', 'Z')
                 last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
-                logger.info(f"Using explicit timestamps from client_timestamp: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}, text_after={text_after_timestamp}")
+                logger.info(f"Using explicit timestamps from client_timestamp: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}")
             else:
                 # Fallback: generate timestamps using current time as base to ensure proper ordering
                 # This prevents None timestamps which cause ZSET score issues in Redis
                 fallback_base = datetime.utcnow()
                 text_before_and_tool_use_timestamp = (fallback_base + timedelta(milliseconds=1)).isoformat() + 'Z'
                 tool_result_timestamp = (fallback_base + timedelta(milliseconds=2)).isoformat() + 'Z'
-                text_after_timestamp = (fallback_base + timedelta(milliseconds=3)).isoformat() + 'Z'
                 last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
                 logger.warning(f"No client_timestamp and no USER message found with request_id {request_id}, using fallback timestamps: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}")
 
@@ -4741,55 +4729,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # The broadcast will happen at the END of the conversation turn,
                 # after Claude returns with stop_reason != 'tool_use'.
                 # This prevents premature broadcasts while Claude is still in a tool loop.
-
-                # Save text AFTER tool_use to both Redis and database (if any)
-                # This text should come AFTER the tool_results in the conversation
-                if text_after_tool:
-                    # Add to Redis - append to the USER message containing the tool_results
-                    # to maintain proper ordering: USER message = [tool_result, ..., text_after]
-                    messages = await get_chat_messages(session_id)
-                    updated = False
-                    tool_use_ids_set = {tb.id for tb in tool_blocks}
-                    for i in range(len(messages) - 1, -1, -1):
-                        msg = messages[i]
-                        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
-                            # Check if this message contains any of our tool_results
-                            has_our_result = any(
-                                isinstance(block, dict) and
-                                block.get("type") == "tool_result" and
-                                block.get("tool_use_id") in tool_use_ids_set
-                                for block in msg["content"]
-                            )
-                            if has_our_result:
-                                # Append text_after to this USER message (after tool_results)
-                                messages[i]["content"].extend(text_after_tool)
-                                await set_chat_messages(session_id, messages)
-                                logger.info(f"✅ Appended text AFTER tool_results to USER message in Redis")
-                                updated = True
-                                break
-
-                    if not updated:
-                        logger.warning(f"Could not find USER message with tool_results, adding as separate message")
-                        await add_chat_message(session_id, {"role": "assistant", "content": text_after_tool}, timestamp=text_after_timestamp, request_id=request_id)
-
-                    # Save to database with timestamp after tool_result
-                    # NOTE: text_after must be saved as USER message to maintain proper grouping
-                    # when messages are loaded from database (USER: [tool_result, text_after])
-                    text_after_content = " ".join([block["text"] for block in text_after_tool if block.get("type") == "text"])
-                    if text_after_content:
-                        text_after_save_result = save_message_to_db(
-                            user_id=user_id,
-                            conversation_id=session_conversation_id,
-                            content=text_after_content,
-                            message_sender="USER",
-                            request_id=request_id,
-                            content_type="text",
-                            client_timestamp=text_after_timestamp
-                        )
-                        if text_after_save_result:
-                            logger.info(f"✅ Saved text AFTER tool to database: '{text_after_content[:50]}...'")
-                        else:
-                            logger.error(f"❌ Failed to save text AFTER tool to database")
             finally:
                 # Always decrement counter for ALL tools, even if tool execution or saving fails
                 for _ in tool_blocks:
