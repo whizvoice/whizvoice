@@ -154,6 +154,36 @@ class ChatSessionManager:
                 msg["_cancelled"] = True
                 await self.redis.zadd(key, {json.dumps(msg): score})
 
+    async def update_pending_result_timestamp(self, session_id: str, tool_use_ids: List[str], new_timestamp: str):
+        """Update timestamp for pending tool_result message to sync with DB.
+
+        In a ZSET, the member (JSON string) is the key, so we must:
+        1. Remove the old member
+        2. Update _timestamp in the message
+        3. Add the new member with new score
+        """
+        key = f"chat_session:{session_id}"
+        members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
+
+        for member, old_score in members_with_scores:
+            msg = json.loads(member)
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                # Check if this message contains any of our pending tool_results
+                has_pending = any(
+                    block.get("tool_use_id") in tool_use_ids and block.get("content") == "Result pending..."
+                    for block in msg.get("content", [])
+                    if isinstance(block, dict)
+                )
+                if has_pending:
+                    # Remove old, update timestamp, add new
+                    await self.redis.zrem(key, member)
+                    msg["_timestamp"] = new_timestamp
+                    new_score = self._timestamp_to_score(new_timestamp)
+                    await self.redis.zadd(key, {json.dumps(msg): new_score})
+                    logger.info(f"Updated pending result timestamp in Redis: {new_timestamp}")
+                    return True
+        return False
+
 
 class UserSessionManager:
     """Manages user -> sessions mapping in Redis"""

@@ -112,6 +112,15 @@ async def mark_chat_messages_cancelled(session_id: str, request_id: str):
                         msg["_cancelled"] = True
 
 
+async def update_pending_result_timestamp(session_id: str, tool_use_ids: List[str], new_timestamp: str) -> bool:
+    """Update pending tool_result timestamp in Redis to sync with DB"""
+    if redis_managers:
+        return await redis_managers["chat_sessions"].update_pending_result_timestamp(
+            session_id, tool_use_ids, new_timestamp
+        )
+    return False
+
+
 # User Session Management
 async def get_user_sessions(user_id: str) -> List[str]:
     """Get all session IDs for a user"""

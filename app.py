@@ -73,7 +73,7 @@ except ImportError:
     STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 from redis_helpers import (
     # Chat session functions
-    get_chat_messages, get_chat_messages_for_claude, add_chat_message, set_chat_messages, clear_chat_session, mark_chat_messages_cancelled,
+    get_chat_messages, get_chat_messages_for_claude, add_chat_message, set_chat_messages, clear_chat_session, mark_chat_messages_cancelled, update_pending_result_timestamp,
     # User session functions  
     get_user_sessions, add_user_session, remove_user_session, get_all_user_sessions,
     # Session timestamp functions
@@ -4608,6 +4608,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 )
                 tool_use_ids = [tb.id for tb in tool_blocks]
                 logger.info(f"✅ Saved {len(tool_blocks)} PENDING tool_result(s) to database BEFORE execution: tool_use_ids={tool_use_ids}")
+
+                # Sync Redis with the recalculated timestamp (DB uses tool_use + 1ms)
+                await update_pending_result_timestamp(session_id, tool_use_ids, tool_result_timestamp)
 
                 # Lock will be released in finally block - other workers can now see the pending tool_result
 
