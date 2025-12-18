@@ -514,13 +514,22 @@ def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_cont
             return False
 
         message_id = message_to_update["id"]
+        existing_tool_content = message_to_update.get("tool_content", [])
 
-        # Update the tool_content with the actual result
-        updated_tool_content = [{
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": json.dumps(result_content)
-        }]
+        # Update only the SPECIFIC tool_result block, keep others intact
+        # This is important when multiple tool_results are in the same message
+        updated_tool_content = []
+        for block in existing_tool_content:
+            if isinstance(block, dict) and block.get("tool_use_id") == tool_use_id:
+                # Replace this specific block with actual result
+                updated_tool_content.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": json.dumps(result_content)
+                })
+            else:
+                # Keep other blocks unchanged
+                updated_tool_content.append(block)
 
         # Update the message in the database
         update_result = supabase.table("messages")\
