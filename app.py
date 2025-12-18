@@ -4399,8 +4399,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             logger.info(f"AI response stop_reason: {response.stop_reason}")
             logger.info(f"AI response content blocks: {[{'type': block.type, 'name': getattr(block, 'name', None)} for block in response.content]}")
             
-            tool_block = next((block for block in response.content if block.type == 'tool_use'), None)
-            if not tool_block:
+            # Extract ALL tool_uses from response (not just first one)
+            # Claude can return multiple tool_uses in one response
+            tool_blocks = [block for block in response.content if block.type == 'tool_use']
+            if not tool_blocks:
                 logger.error("Stop reason is tool_use but no tool_use block found.")
                 # Send some error or break, as this is an unexpected state
                 error_payload = {
@@ -4412,24 +4414,28 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 await safe_websocket_send(error_payload)
                 return
 
-            logger.info(f"AI attempting to execute tool: {tool_block.name}")
-            logger.info(f"Tool input parameters: {json.dumps(tool_block.input, indent=2)}")
-            logger.debug(f"Executing tool: {tool_block.name} for user_id: {user_id} with input: {tool_block.input}")
+            logger.info(f"AI attempting to execute {len(tool_blocks)} tool(s): {[tb.name for tb in tool_blocks]}")
+            for tb in tool_blocks:
+                logger.info(f"Tool '{tb.name}' input parameters: {json.dumps(tb.input, indent=2)}")
+                logger.debug(f"Executing tool: {tb.name} for user_id: {user_id} with input: {tb.input}")
 
-            # Increment pending tool counter before execution
-            await increment_pending_tools(session_conversation_id)
+            # Increment pending tool counter before execution (once per tool)
+            for _ in tool_blocks:
+                await increment_pending_tools(session_conversation_id)
 
             # ===== CRITICAL: Save tool_use, TEXT, and PENDING tool_result IMMEDIATELY =====
             # This prevents race conditions where Claude sees incomplete conversation history
             # and triggers the same tool multiple times
 
-            # Convert tool_block to a serializable dict
-            tool_block_dict = {
-                "type": "tool_use",
-                "id": tool_block.id,
-                "name": tool_block.name,
-                "input": tool_block.input
-            }
+            # Convert ALL tool_blocks to serializable dicts
+            tool_block_dicts = []
+            for tb in tool_blocks:
+                tool_block_dicts.append({
+                    "type": "tool_use",
+                    "id": tb.id,
+                    "name": tb.name,
+                    "input": tb.input
+                })
 
             # Extract text blocks from response, separating text BEFORE and AFTER tool_use
             # Text BEFORE tool_use should be saved with tool_use in Redis
@@ -4526,20 +4532,23 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     logger.warning(f"Using local lock (not distributed) for conversation {session_conversation_id}")
                     await chat_sessions_lock.acquire()
 
-                # Build assistant content: text_before + tool_use (NO text_after)
-                assistant_content = text_before_tool + [tool_block_dict]
+                # Build assistant content: text_before + ALL tool_uses (NO text_after)
+                assistant_content = text_before_tool + tool_block_dicts
 
-                # CRITICAL: Create pending tool_result IMMEDIATELY and add BOTH to Redis TOGETHER
+                # CRITICAL: Create pending tool_result for EACH tool_use IMMEDIATELY
+                # Add BOTH assistant message and pending results to Redis TOGETHER
                 # This prevents race condition where another worker reads tool_use without its tool_result
-                pending_tool_result_dict = {
-                    "type": "tool_result",
-                    "tool_use_id": tool_block.id,
-                    "content": "Result pending..."
-                }
+                pending_tool_result_dicts = []
+                for tb in tool_blocks:
+                    pending_tool_result_dicts.append({
+                        "type": "tool_result",
+                        "tool_use_id": tb.id,
+                        "content": "Result pending..."
+                    })
                 await add_chat_message(session_id, {"role": "assistant", "content": assistant_content}, timestamp=text_before_and_tool_use_timestamp, request_id=request_id)
-                await add_chat_message(session_id, {"role": "user", "content": [pending_tool_result_dict]}, timestamp=tool_result_timestamp, request_id=request_id)
+                await add_chat_message(session_id, {"role": "user", "content": pending_tool_result_dicts}, timestamp=tool_result_timestamp, request_id=request_id)
 
-                # Save merged text_before+tool_use to database as ONE message
+                # Save merged text_before+ALL tool_uses to database as ONE message
                 # content_type is "tool_use" even though it may also contain text content
                 # This ensures proper timestamp ordering: merged message at T+1ms
                 tool_use_save_result = save_message_to_db(
@@ -4549,13 +4558,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     message_sender="ASSISTANT",
                     request_id=request_id,
                     content_type="tool_use",  # Type is tool_use even with text content
-                    tool_content=[tool_block_dict],
+                    tool_content=tool_block_dicts,  # ALL tool_uses
                     client_timestamp=text_before_and_tool_use_timestamp
                 )
+                tool_names = [tb.name for tb in tool_blocks]
                 if assistant_response_text_before:
-                    logger.info(f"✅ Saved merged text+tool_use message to database: text='{assistant_response_text_before[:50]}...', tool={tool_block.name}")
+                    logger.info(f"✅ Saved merged text+tool_use message to database: text='{assistant_response_text_before[:50]}...', tools={tool_names}")
                 else:
-                    logger.info(f"✅ Saved tool_use message to database (no text_before): tool={tool_block.name}")
+                    logger.info(f"✅ Saved tool_use message to database (no text_before): tools={tool_names}")
 
                 # Get the actual timestamp of the tool_use message we just saved
                 # This is critical for ensuring the tool_result has the correct timestamp (+1ms after tool_use)
@@ -4594,10 +4604,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     logger.warning("tool_use_save_result is None, using fallback timestamp")
                     tool_result_timestamp = (user_dt + timedelta(milliseconds=2)).isoformat().replace('+00:00', 'Z')
 
-                # pending_tool_result_dict was already created and added to Redis above (atomically with tool_use)
+                # pending_tool_result_dicts was already created and added to Redis above (atomically with tool_use)
                 # Now save it to the database with the calculated timestamp
 
-                # Save PENDING tool_result to database with timestamp after tool_use
+                # Save ALL PENDING tool_results to database with timestamp after tool_use
                 pending_result_save = save_message_to_db(
                     user_id=user_id,
                     conversation_id=session_conversation_id,
@@ -4605,10 +4615,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     message_sender="USER",
                     request_id=request_id,
                     content_type="tool_result",
-                    tool_content=[pending_tool_result_dict],
+                    tool_content=pending_tool_result_dicts,  # ALL pending results
                     client_timestamp=tool_result_timestamp
                 )
-                logger.info(f"✅ Saved PENDING tool_result to database BEFORE execution: tool_use_id={tool_block.id}")
+                tool_use_ids = [tb.id for tb in tool_blocks]
+                logger.info(f"✅ Saved {len(tool_blocks)} PENDING tool_result(s) to database BEFORE execution: tool_use_ids={tool_use_ids}")
 
                 # Lock will be released in finally block - other workers can now see the pending tool_result
 
@@ -4629,10 +4640,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         chat_sessions_lock.release()
                         logger.debug(f"Released local conversation lock")
 
-            # ===== Now execute the tool =====
+            # ===== Now execute ALL tools in parallel =====
             try:
-                # Debug logging for optimistic ID migration investigation
-                logger.info(f"🔧 TOOL_DEBUG execute_tool: About to execute {tool_block.name}")
+                # Debug logging
+                logger.info(f"🔧 TOOL_DEBUG execute_tool: About to execute {len(tool_blocks)} tool(s): {[tb.name for tb in tool_blocks]}")
                 logger.info(f"🔧 TOOL_DEBUG execute_tool: session_id={session_id}, conversation_id={session_conversation_id}")
                 logger.info(f"🔧 TOOL_DEBUG execute_tool: websocket is {'present' if websocket else 'None'}")
                 if websocket:
@@ -4642,65 +4653,89 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         logger.warning(f"🔧 TOOL_DEBUG execute_tool: Could not get websocket.client_state: {state_err}")
                 logger.info(f"🔧 TOOL_DEBUG execute_tool: client_conversation_id={client_conversation_id} (optimistic ID migration: {client_conversation_id is not None and client_conversation_id < 0})")
 
-                # Pass WebSocket context for tools that need it (like launch_app)
-                tool_execution_result = await execute_tool(
-                    tool_block.name,
-                    tool_block.input,
-                    user_id,
-                    websocket=websocket,
-                    tool_result_handler=tool_result_handler,
-                    conversation_id=session_conversation_id
-                )
-
-                # Check if the tool_execution_result is our specific Asana auth error
-                if isinstance(tool_execution_result, dict) and \
-                   tool_execution_result.get("status_code") == 401 and \
-                   "Asana authentication failed" in tool_execution_result.get("error", ""):
-                    logger.info(f"Tool {tool_block.name} resulted in Asana auth error. Sending directly to client.")
-                    # Add request_id and client context to Asana error response
-                    tool_execution_result["request_id"] = request_id
-                    tool_execution_result["client_conversation_id"] = client_conversation_id
-                    await safe_websocket_send(tool_execution_result)
-                    raise StopIteration("AsanaAuthErrorHandled") # Signal to skip normal response
-
-                # The launch_app tool now handles WebSocket communication directly,
-                # so we don't need special handling here anymore
-
-                # ===== Update the PENDING tool_result with actual result =====
-                async with chat_sessions_lock:
-                    # Update Redis session with actual result
-                    actual_tool_result_dict = {
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": json.dumps(tool_execution_result)
-                    }
-
-                    # Replace the pending result in Redis
-                    messages = await get_chat_messages(session_id)
-                    for i in range(len(messages) - 1, -1, -1):  # Search backwards for efficiency
-                        msg = messages[i]
-                        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
-                            for j, block in enumerate(msg["content"]):
-                                if isinstance(block, dict) and \
-                                   block.get("type") == "tool_result" and \
-                                   block.get("tool_use_id") == tool_block.id:
-                                    # Found the pending result, update only this specific block
-                                    messages[i]["content"][j] = actual_tool_result_dict
-                                    await set_chat_messages(session_id, messages)
-                                    logger.info(f"✅ Updated Redis with actual tool_result for tool_use_id={tool_block.id}")
-                                    break
-
-                    # Update database with actual result
-                    update_success = update_tool_result_in_db(
-                        conversation_id=session_conversation_id,
-                        tool_use_id=tool_block.id,
-                        result_content=tool_execution_result,
-                        user_id=user_id
+                # Execute ALL tools in parallel using asyncio.gather
+                async def execute_single_tool(tb):
+                    """Execute a single tool and return (tool_block, result)"""
+                    result = await execute_tool(
+                        tb.name,
+                        tb.input,
+                        user_id,
+                        websocket=websocket,
+                        tool_result_handler=tool_result_handler,
+                        conversation_id=session_conversation_id
                     )
-                    if update_success:
-                        logger.info(f"✅ Updated database with actual tool_result for tool: {tool_block.name}")
-                    else:
-                        logger.error(f"❌ Failed to update database with actual tool_result for tool: {tool_block.name}")
+                    return (tb, result)
+
+                tool_tasks = [execute_single_tool(tb) for tb in tool_blocks]
+                tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
+
+                # Process results and check for special errors
+                tool_execution_results = {}  # Maps tool_use_id -> result
+                asana_auth_error = None
+                for item in tool_results:
+                    if isinstance(item, Exception):
+                        logger.error(f"Tool execution failed with exception: {item}")
+                        continue
+                    tb, result = item
+                    tool_execution_results[tb.id] = result
+
+                    # Check for Asana auth error
+                    if isinstance(result, dict) and \
+                       result.get("status_code") == 401 and \
+                       "Asana authentication failed" in result.get("error", ""):
+                        logger.info(f"Tool {tb.name} resulted in Asana auth error. Sending directly to client.")
+                        result["request_id"] = request_id
+                        result["client_conversation_id"] = client_conversation_id
+                        await safe_websocket_send(result)
+                        asana_auth_error = result
+
+                if asana_auth_error:
+                    raise StopIteration("AsanaAuthErrorHandled")
+
+                # ===== Update ALL PENDING tool_results with actual results =====
+                async with chat_sessions_lock:
+                    # Get current messages from Redis
+                    messages = await get_chat_messages(session_id)
+
+                    # Update each pending result in Redis
+                    for tb in tool_blocks:
+                        if tb.id not in tool_execution_results:
+                            logger.warning(f"No result for tool_use_id={tb.id}, skipping update")
+                            continue
+
+                        actual_tool_result_dict = {
+                            "type": "tool_result",
+                            "tool_use_id": tb.id,
+                            "content": json.dumps(tool_execution_results[tb.id])
+                        }
+
+                        # Replace the pending result in Redis
+                        for i in range(len(messages) - 1, -1, -1):  # Search backwards for efficiency
+                            msg = messages[i]
+                            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                                for j, block in enumerate(msg["content"]):
+                                    if isinstance(block, dict) and \
+                                       block.get("type") == "tool_result" and \
+                                       block.get("tool_use_id") == tb.id:
+                                        # Found the pending result, update only this specific block
+                                        messages[i]["content"][j] = actual_tool_result_dict
+                                        logger.info(f"✅ Updated Redis with actual tool_result for tool_use_id={tb.id}")
+                                        break
+
+                        # Update database with actual result
+                        update_success = update_tool_result_in_db(
+                            conversation_id=session_conversation_id,
+                            tool_use_id=tb.id,
+                            result_content=tool_execution_results[tb.id],
+                            user_id=user_id
+                        )
+                        if update_success:
+                            logger.info(f"✅ Updated database with actual tool_result for tool: {tb.name}")
+                        else:
+                            logger.error(f"❌ Failed to update database with actual tool_result for tool: {tb.name}")
+
+                    # Save all updated messages back to Redis once
+                    await set_chat_messages(session_id, messages)
 
                 # NOTE: We no longer broadcast after each tool result replacement.
                 # The broadcast will happen at the END of the conversation turn,
@@ -4708,32 +4743,33 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # This prevents premature broadcasts while Claude is still in a tool loop.
 
                 # Save text AFTER tool_use to both Redis and database (if any)
-                # This text should come AFTER the tool_result in the conversation
+                # This text should come AFTER the tool_results in the conversation
                 if text_after_tool:
-                    # Add to Redis - append to the USER message containing the tool_result
-                    # to maintain proper ordering: USER message = [tool_result, text_after]
+                    # Add to Redis - append to the USER message containing the tool_results
+                    # to maintain proper ordering: USER message = [tool_result, ..., text_after]
                     messages = await get_chat_messages(session_id)
                     updated = False
+                    tool_use_ids_set = {tb.id for tb in tool_blocks}
                     for i in range(len(messages) - 1, -1, -1):
                         msg = messages[i]
                         if msg.get("role") == "user" and isinstance(msg.get("content"), list):
-                            # Check if this message contains our tool_result
+                            # Check if this message contains any of our tool_results
                             has_our_result = any(
                                 isinstance(block, dict) and
                                 block.get("type") == "tool_result" and
-                                block.get("tool_use_id") == tool_block.id
+                                block.get("tool_use_id") in tool_use_ids_set
                                 for block in msg["content"]
                             )
                             if has_our_result:
-                                # Append text_after to this USER message (after tool_result)
+                                # Append text_after to this USER message (after tool_results)
                                 messages[i]["content"].extend(text_after_tool)
                                 await set_chat_messages(session_id, messages)
-                                logger.info(f"✅ Appended text AFTER tool_result to USER message in Redis")
+                                logger.info(f"✅ Appended text AFTER tool_results to USER message in Redis")
                                 updated = True
                                 break
 
                     if not updated:
-                        logger.warning(f"Could not find USER message with tool_result for tool_use_id={tool_block.id}, adding as separate message")
+                        logger.warning(f"Could not find USER message with tool_results, adding as separate message")
                         await add_chat_message(session_id, {"role": "assistant", "content": text_after_tool}, timestamp=text_after_timestamp, request_id=request_id)
 
                     # Save to database with timestamp after tool_result
@@ -4755,8 +4791,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         else:
                             logger.error(f"❌ Failed to save text AFTER tool to database")
             finally:
-                # Always decrement counter, even if tool execution or saving fails
-                await decrement_pending_tools(session_conversation_id)
+                # Always decrement counter for ALL tools, even if tool execution or saving fails
+                for _ in tool_blocks:
+                    await decrement_pending_tools(session_conversation_id)
             
             # Use async API call for tool response
             try:
