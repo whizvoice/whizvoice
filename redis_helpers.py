@@ -121,6 +121,43 @@ async def update_pending_result_timestamp(session_id: str, tool_use_ids: List[st
     return False
 
 
+async def update_tool_results(session_id: str, tool_updates: Dict[str, str]) -> int:
+    """Update pending tool_results with actual results.
+
+    Only updates the specific messages that changed, not all messages.
+
+    Args:
+        session_id: The session ID
+        tool_updates: Dict mapping tool_use_id -> actual result content (JSON string)
+
+    Returns:
+        Number of messages updated
+    """
+    if redis_managers:
+        return await redis_managers["chat_sessions"].update_tool_results(session_id, tool_updates)
+    else:
+        # Local fallback - do a full replacement (less efficient but works)
+        async with chat_sessions_lock:
+            if session_id not in chat_sessions:
+                return 0
+            messages = chat_sessions[session_id]
+            updated = 0
+            for msg in messages:
+                if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                    for i, block in enumerate(msg["content"]):
+                        if isinstance(block, dict) and \
+                           block.get("type") == "tool_result" and \
+                           block.get("tool_use_id") in tool_updates:
+                            tool_use_id = block["tool_use_id"]
+                            msg["content"][i] = {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": tool_updates[tool_use_id]
+                            }
+                            updated += 1
+            return updated
+
+
 # User Session Management
 async def get_user_sessions(user_id: str) -> List[str]:
     """Get all session IDs for a user"""

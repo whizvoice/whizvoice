@@ -184,6 +184,69 @@ class ChatSessionManager:
                     return True
         return False
 
+    async def update_tool_results(self, session_id: str, tool_updates: Dict[str, str]) -> int:
+        """Update pending tool_results with actual results.
+
+        Only removes and re-adds the specific messages that contain updated tool_results,
+        rather than replacing all messages in the zset.
+
+        Args:
+            session_id: The session ID
+            tool_updates: Dict mapping tool_use_id -> actual result content (JSON string)
+
+        Returns:
+            Number of messages updated
+        """
+        key = f"chat_session:{session_id}"
+        members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
+
+        updated_count = 0
+        tool_ids_to_update = set(tool_updates.keys())
+
+        for member, score in members_with_scores:
+            msg = json.loads(member)
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                # Check if this message contains any pending tool_results we need to update
+                needs_update = False
+                for block in msg.get("content", []):
+                    if isinstance(block, dict) and \
+                       block.get("type") == "tool_result" and \
+                       block.get("tool_use_id") in tool_ids_to_update:
+                        needs_update = True
+                        break
+
+                if needs_update:
+                    # Remove old message
+                    await self.redis.zrem(key, member)
+
+                    # Update the tool_result blocks
+                    for i, block in enumerate(msg["content"]):
+                        if isinstance(block, dict) and \
+                           block.get("type") == "tool_result" and \
+                           block.get("tool_use_id") in tool_updates:
+                            tool_use_id = block["tool_use_id"]
+                            msg["content"][i] = {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": tool_updates[tool_use_id]
+                            }
+                            logger.info(f"Updated tool_result for tool_use_id={tool_use_id}")
+
+                    # Add updated message back with same score
+                    await self.redis.zadd(key, {json.dumps(msg): score})
+                    updated_count += 1
+
+                    # Remove updated IDs from the set we're looking for
+                    for block in msg.get("content", []):
+                        if isinstance(block, dict) and block.get("tool_use_id") in tool_ids_to_update:
+                            tool_ids_to_update.discard(block.get("tool_use_id"))
+
+                    # Exit early if we've found all the tool_results
+                    if not tool_ids_to_update:
+                        break
+
+        return updated_count
+
 
 class UserSessionManager:
     """Manages user -> sessions mapping in Redis"""

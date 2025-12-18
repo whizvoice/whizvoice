@@ -73,7 +73,7 @@ except ImportError:
     STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 from redis_helpers import (
     # Chat session functions
-    get_chat_messages, get_chat_messages_for_claude, add_chat_message, set_chat_messages, clear_chat_session, mark_chat_messages_cancelled, update_pending_result_timestamp,
+    get_chat_messages, get_chat_messages_for_claude, add_chat_message, set_chat_messages, clear_chat_session, mark_chat_messages_cancelled, update_pending_result_timestamp, update_tool_results,
     # User session functions  
     get_user_sessions, add_user_session, remove_user_session, get_all_user_sessions,
     # Session timestamp functions
@@ -4684,49 +4684,31 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     raise StopIteration("AsanaAuthErrorHandled")
 
                 # ===== Update ALL PENDING tool_results with actual results =====
-                async with chat_sessions_lock:
-                    # Get current messages from Redis
-                    messages = await get_chat_messages(session_id)
+                # Build a dict of tool_updates: tool_use_id -> result content (JSON string)
+                tool_updates = {}
+                for tb in tool_blocks:
+                    if tb.id not in tool_execution_results:
+                        logger.warning(f"No result for tool_use_id={tb.id}, skipping update")
+                        continue
 
-                    # Update each pending result in Redis
-                    for tb in tool_blocks:
-                        if tb.id not in tool_execution_results:
-                            logger.warning(f"No result for tool_use_id={tb.id}, skipping update")
-                            continue
+                    tool_updates[tb.id] = json.dumps(tool_execution_results[tb.id])
 
-                        actual_tool_result_dict = {
-                            "type": "tool_result",
-                            "tool_use_id": tb.id,
-                            "content": json.dumps(tool_execution_results[tb.id])
-                        }
+                    # Update database with actual result
+                    update_success = update_tool_result_in_db(
+                        conversation_id=session_conversation_id,
+                        tool_use_id=tb.id,
+                        result_content=tool_execution_results[tb.id],
+                        user_id=user_id
+                    )
+                    if update_success:
+                        logger.info(f"✅ Updated database with actual tool_result for tool: {tb.name}")
+                    else:
+                        logger.error(f"❌ Failed to update database with actual tool_result for tool: {tb.name}")
 
-                        # Replace the pending result in Redis
-                        for i in range(len(messages) - 1, -1, -1):  # Search backwards for efficiency
-                            msg = messages[i]
-                            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
-                                for j, block in enumerate(msg["content"]):
-                                    if isinstance(block, dict) and \
-                                       block.get("type") == "tool_result" and \
-                                       block.get("tool_use_id") == tb.id:
-                                        # Found the pending result, update only this specific block
-                                        messages[i]["content"][j] = actual_tool_result_dict
-                                        logger.info(f"✅ Updated Redis with actual tool_result for tool_use_id={tb.id}")
-                                        break
-
-                        # Update database with actual result
-                        update_success = update_tool_result_in_db(
-                            conversation_id=session_conversation_id,
-                            tool_use_id=tb.id,
-                            result_content=tool_execution_results[tb.id],
-                            user_id=user_id
-                        )
-                        if update_success:
-                            logger.info(f"✅ Updated database with actual tool_result for tool: {tb.name}")
-                        else:
-                            logger.error(f"❌ Failed to update database with actual tool_result for tool: {tb.name}")
-
-                    # Save all updated messages back to Redis once
-                    await set_chat_messages(session_id, messages)
+                # Efficiently update only the changed messages in Redis (not all messages)
+                if tool_updates:
+                    updated_count = await update_tool_results(session_id, tool_updates)
+                    logger.info(f"✅ Updated {updated_count} messages in Redis with actual tool_results")
 
                 # NOTE: We no longer broadcast after each tool result replacement.
                 # The broadcast will happen at the END of the conversation turn,
