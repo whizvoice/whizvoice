@@ -4313,6 +4313,19 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 else:
                     logger.error(f"Failed to save BadRequest error message to database")
 
+                # Log error to screen_agent_ui_dumps table for debugging
+                try:
+                    error_dump_data = {
+                        "user_id": user_id,
+                        "dump_reason": "BadRequestError from Claude API",
+                        "error_message": str(api_error),
+                        "conversation_id": session_conversation_id,
+                    }
+                    supabase.table("screen_agent_ui_dumps").insert(error_dump_data).execute()
+                    logger.info(f"Logged BadRequest error to screen_agent_ui_dumps for conversation {session_conversation_id}")
+                except Exception as dump_error:
+                    logger.error(f"Failed to log error to screen_agent_ui_dumps: {dump_error}")
+
                 # Try to send via WebSocket (may fail, but error is persisted in DB)
                 await safe_websocket_send(error_payload)
 
@@ -4785,48 +4798,71 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Don't raise - let the client handle the error gracefully
                 return session_conversation_id
             except Exception as tool_api_error:
-                # Check if this is a tool_use_id mismatch error (conversation history corrupted)
-                is_tool_use_id_error = (
-                    isinstance(tool_api_error, BadRequestError) and
-                    ("tool_use_id" in str(tool_api_error).lower() or "unexpected tool_use_id" in str(tool_api_error).lower())
-                )
+                # Check if this is a BadRequestError (400) from Claude API during tool use
+                if isinstance(tool_api_error, BadRequestError):
+                    # Check if this is specifically a tool_use_id mismatch error
+                    is_tool_use_id_error = (
+                        "tool_use_id" in str(tool_api_error).lower() or
+                        "unexpected tool_use_id" in str(tool_api_error).lower()
+                    )
 
-                if is_tool_use_id_error:
-                    logger.error(f"Claude API tool_use_id mismatch error during tool use for request {request_id}: {str(tool_api_error)}")
-                    logger.error(f"Conversation history corrupted - cannot continue")
-                    await set_request_state(request_id, "history_error", {
+                    if is_tool_use_id_error:
+                        logger.error(f"Claude API tool_use_id mismatch error during tool use for request {request_id}: {str(tool_api_error)}")
+                        logger.error(f"Conversation history corrupted - cannot continue")
+                        error_message = "I'm sorry, but this conversation has encountered a technical issue with the message history that prevents me from continuing. Please start a new conversation."
+                        error_code = "CONVERSATION_HISTORY_ERROR"
+                    else:
+                        # General BadRequestError during tool use (e.g., duplicate content, invalid format)
+                        logger.error(f"Claude API BadRequest (400) during tool use for request {request_id}: {str(tool_api_error)}")
+                        error_message = "I encountered an error processing your message. This might be due to a technical issue with the conversation history. Please try starting a new conversation."
+                        error_code = "CLAUDE_API_ERROR"
+
+                    await set_request_state(request_id, "bad_request_error", {
                         "session_id": session_id,
                         "conversation_id": session_conversation_id,
                         "error": str(tool_api_error)
                     })
 
-                    # Create error message for user
-                    error_message = "I'm sorry, but this conversation has encountered a technical issue with the message history that prevents me from continuing. Please start a new conversation."
-
                     # Create error payload
                     error_payload = {
-                        "type": "message",
+                        "type": "error",
+                        "code": error_code,
                         "message": error_message,
                         "request_id": request_id,
                         "conversation_id": session_conversation_id,
-                        "client_conversation_id": client_conversation_id
+                        "client_conversation_id": client_conversation_id,
+                        "client_message_id": client_message_id
                     }
 
                     # Save error as ASSISTANT message to database
-                    logger.info(f"Saving conversation history error (during tool use) as ASSISTANT message for conversation {session_conversation_id}")
+                    logger.info(f"Saving BadRequest error (during tool use) as ASSISTANT message for conversation {session_conversation_id}")
+                    error_json_content = json.dumps(error_payload)
                     save_result = save_message_to_db(
                         user_id=user_id,
                         conversation_id=session_conversation_id,
-                        content=error_message,
+                        content=error_json_content,
                         message_sender="ASSISTANT",
                         request_id=request_id,
                         content_type="text"
                     )
                     if save_result:
                         saved_conversation_id, error_message_id, cancelled_ids = save_result
-                        logger.info(f"Conversation history error saved as message {error_message_id} in conversation {saved_conversation_id}")
+                        logger.info(f"BadRequest error (during tool use) saved as message {error_message_id} in conversation {saved_conversation_id}")
                     else:
-                        logger.error(f"Failed to save conversation history error message to database")
+                        logger.error(f"Failed to save BadRequest error message to database")
+
+                    # Log error to screen_agent_ui_dumps table for debugging
+                    try:
+                        error_dump_data = {
+                            "user_id": user_id,
+                            "dump_reason": f"BadRequestError during tool use: {error_code}",
+                            "error_message": str(tool_api_error),
+                            "conversation_id": session_conversation_id,
+                        }
+                        supabase.table("screen_agent_ui_dumps").insert(error_dump_data).execute()
+                        logger.info(f"Logged BadRequest error to screen_agent_ui_dumps for conversation {session_conversation_id}")
+                    except Exception as dump_error:
+                        logger.error(f"Failed to log error to screen_agent_ui_dumps: {dump_error}")
 
                     # Try to send via WebSocket
                     await safe_websocket_send(error_payload)
@@ -4834,7 +4870,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     # Don't raise - let the client handle the error gracefully
                     return session_conversation_id
                 else:
-                    # Re-raise other exceptions
+                    # Re-raise other exceptions (non-BadRequestError)
                     raise
 
         # Log final response details
