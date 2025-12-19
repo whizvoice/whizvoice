@@ -2338,72 +2338,8 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
         except Exception as e:
             logger.error(f"Failed to publish to Redis: {str(e)}")
     
-    # Optimized local broadcasting using reverse lookups
-    if not redis_managers or "local_objects" not in redis_managers:
-        return
-    
-    local_objects = redis_managers["local_objects"]
-    
-    # Get all session mappings to find target sessions efficiently
-    all_session_mappings = await local_objects.get_all_session_mappings()
-    
-    # Find all sessions subscribed to this conversation (including optimistic IDs)
-    target_sessions = set()
-    
-    # Check for real conversation ID
-    for sid, convs in all_session_mappings.items():
-        if conversation_id in convs and sid != exclude_session:
-            target_sessions.add(sid)
-    
-    # Check for optimistic ID
-    optimistic_id = await local_objects.get_optimistic_id_cached(conversation_id)
-    if optimistic_id:
-        for sid, convs in all_session_mappings.items():
-            if optimistic_id in convs and sid != exclude_session:
-                target_sessions.add(sid)
-    
-    if not target_sessions:
-        logger.info(f"No local sessions to broadcast to for conversation {conversation_id}")
-        return
-    
-    logger.info(f"Broadcasting to {len(target_sessions)} sessions for conversation {conversation_id}")
-    
-    # Pre-serialize message once
-    message_json = json.dumps(message_payload)
-    
-    # Batch update all session activities in parallel FIRST
-    activity_tasks = [update_session_activity_redis(sid) for sid in target_sessions]
-    await asyncio.gather(*activity_tasks, return_exceptions=True)
-    
-    # Get WebSockets using reverse lookup and send in parallel
-    async def send_to_session_fast(session_id: str):
-        """Optimized send that uses reverse lookup for WebSocket retrieval"""
-        try:
-            ws = await local_objects.get_session_websocket(session_id)
-            if ws:
-                await ws.send_text(message_json)
-                return None
-            else:
-                logger.warning(f"No WebSocket found for session {session_id}")
-                return session_id
-        except Exception as e:
-            logger.warning(f"Failed to send to {session_id}: {str(e)}")
-            return session_id
-    
-    # Send to all sessions in parallel
-    results = await asyncio.gather(*[
-        send_to_session_fast(sid) for sid in target_sessions
-    ], return_exceptions=False)
-    
-    # Clean up failed sessions
-    failed_sessions = [sid for sid in results if sid is not None]
-    if failed_sessions:
-        cleanup_tasks = [
-            local_objects.unregister_conversation_websocket(sid, conversation_id)
-            for sid in failed_sessions
-        ]
-        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-        logger.info(f"Cleaned up {len(failed_sessions)} disconnected sessions")
+    # Local broadcasting removed - Redis pub/sub handles all delivery via redis_message_listener
+    # This prevents duplicate messages (sessions were receiving via both Redis and local broadcast)
 
 
 async def cancel_and_broadcast_messages(
@@ -5025,7 +4961,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 }
                 # Bot responses should go to ALL sessions - they originate from the server, not from any client session
                 # Broadcast using the real conversation ID - the broadcast function will also send to optimistic ID
-                await broadcast_to_conversation(processing_conversation_id, broadcast_payload, exclude_session=None)
+                await broadcast_to_conversation(processing_conversation_id, broadcast_payload, exclude_session=session_id)
                 logger.info(f"Broadcasted assistant message to all sessions for conversation {processing_conversation_id}")
             else:
                 logger.info(f"Skipping empty response broadcast for tool-only response (request {request_id})")
