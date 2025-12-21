@@ -4982,7 +4982,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "client_message_id": client_message_id,  # Echo back optimistic message ID
                     "type": "response"  # Indicate this is a direct response (vs broadcast)
                 }
-                if await safe_websocket_send(response_payload):
+                direct_send_succeeded = await safe_websocket_send(response_payload)
+                if direct_send_succeeded:
                     logger.info(f"Successfully sent response for request {request_id} to session {session_id}")
                 else:
                     logger.info(f"WebSocket send failed but response saved to database: conversation_id={saved_conversation_id}, request_id={request_id}, will be available on reconnect")
@@ -4999,7 +5000,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 }
                 # Bot responses should go to ALL sessions - they originate from the server, not from any client session
                 # Broadcast using the real conversation ID - the broadcast function will also send to optimistic ID
-                await broadcast_to_conversation(processing_conversation_id, broadcast_payload, exclude_session=session_id)
+                # Only exclude session if direct send succeeded - if it failed, include it in broadcast so client can receive on reconnect
+                await broadcast_to_conversation(processing_conversation_id, broadcast_payload, exclude_session=session_id if direct_send_succeeded else None)
                 logger.info(f"Broadcasted assistant message to all sessions for conversation {processing_conversation_id}")
             else:
                 logger.info(f"Skipping empty response broadcast for tool-only response (request {request_id})")
