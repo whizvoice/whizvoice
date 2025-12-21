@@ -100,6 +100,34 @@ async def clear_chat_session(session_id: str):
                 del chat_sessions[session_id]
 
 
+async def rename_chat_session(old_session_id: str, new_session_id: str) -> bool:
+    """Rename a chat session from old_session_id to new_session_id.
+
+    This is used during optimistic ID → real ID migration to ensure
+    all workers use the same session key.
+
+    The operation:
+    1. Sets a redirect from old to new (ensures in-flight operations find the right key)
+    2. Renames the Redis key if it exists
+
+    Returns True if successful.
+    """
+    if redis_managers:
+        return await redis_managers["chat_sessions"].rename_session(old_session_id, new_session_id)
+    else:
+        # Local fallback
+        async with chat_sessions_lock:
+            if old_session_id in chat_sessions and new_session_id not in chat_sessions:
+                chat_sessions[new_session_id] = chat_sessions.pop(old_session_id)
+                return True
+            elif new_session_id in chat_sessions:
+                # New session already exists, just remove old one
+                if old_session_id in chat_sessions:
+                    del chat_sessions[old_session_id]
+                return True
+        return False
+
+
 async def mark_chat_messages_cancelled(session_id: str, request_id: str):
     """Mark messages with given request_id as cancelled"""
     if redis_managers:

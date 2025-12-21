@@ -73,7 +73,7 @@ except ImportError:
     STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 from redis_helpers import (
     # Chat session functions
-    get_chat_messages, get_chat_messages_for_claude, add_chat_message, set_chat_messages, clear_chat_session, mark_chat_messages_cancelled, update_pending_result_timestamp, update_tool_results,
+    get_chat_messages, get_chat_messages_for_claude, add_chat_message, set_chat_messages, clear_chat_session, rename_chat_session, mark_chat_messages_cancelled, update_pending_result_timestamp, update_tool_results,
     # User session functions  
     get_user_sessions, add_user_session, remove_user_session, get_all_user_sessions,
     # Session timestamp functions
@@ -1646,6 +1646,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 # CRITICAL FIX: Resolve optimistic conversation IDs to real IDs before setting up the session
                 # This ensures we subscribe to the correct Redis channel and track the correct conversation
                 actual_conversation_id = conversation_id
+                optimistic_id_for_migration = None  # Track if we need to migrate an old optimistic session
+
                 if conversation_id is not None and conversation_id < 0:
                     # This is an optimistic ID, check if it has a real ID in the database
                     logger.info(f"Checking if optimistic conversation ID {conversation_id} has been migrated to a real ID")
@@ -1655,12 +1657,29 @@ async def websocket_endpoint(websocket: WebSocket):
                         .eq("optimistic_chat_id", str(conversation_id))\
                         .is_("deleted_at", "null")\
                         .execute()
-                    
+
                     if opt_result.data and len(opt_result.data) > 0:
                         actual_conversation_id = opt_result.data[0]["id"]
                         logger.info(f"Optimistic ID {conversation_id} has been migrated to real ID {actual_conversation_id}, will use real ID for session")
                     else:
                         logger.info(f"Optimistic ID {conversation_id} has not been migrated yet, will use optimistic ID")
+
+                elif conversation_id is not None and conversation_id > 0:
+                    # This is a real ID - check if there's an optimistic ID that maps to it
+                    # This handles the case where a client reconnects with the real ID after disconnect
+                    logger.info(f"Client connected with real conversation ID {conversation_id}, checking for optimistic session to migrate")
+                    opt_result = supabase.table("conversations")\
+                        .select("optimistic_chat_id")\
+                        .eq("id", conversation_id)\
+                        .eq("user_id", user_id)\
+                        .is_("deleted_at", "null")\
+                        .execute()
+
+                    if opt_result.data and len(opt_result.data) > 0:
+                        opt_chat_id = opt_result.data[0].get("optimistic_chat_id")
+                        if opt_chat_id:
+                            optimistic_id_for_migration = int(opt_chat_id)
+                            logger.info(f"Found optimistic ID {optimistic_id_for_migration} for real conversation {conversation_id}")
                 
                 # Load conversation history and initialize session
                 # Create a unique session ID per conversation, not just per user
@@ -1671,11 +1690,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     # If no specific conversation, create a session for a new conversation
                     session_id = f"ws_{user_id}_new_{int(time.time())}"
-                
+
+                # MIGRATE OLD OPTIMISTIC SESSION: If we found an optimistic ID that maps to this real conversation,
+                # migrate the old session to prevent forked contexts (fixes duplicate Asana task bug)
+                if optimistic_id_for_migration is not None:
+                    old_session_id = f"ws_{user_id}_conv_{optimistic_id_for_migration}"
+                    if old_session_id != session_id:
+                        logger.info(f"Migrating optimistic session {old_session_id} → {session_id}")
+                        await rename_chat_session(old_session_id, session_id)
+
                 # IMPORTANT: Track session immediately to ensure cleanup even if errors occur
                 await update_session_activity_redis(session_id)
                 resources_allocated = True  # Mark that we've started allocating resources
-                
+
                 # Use actual_conversation_id for loading history (it already handles optimistic IDs internally,
                 # but we've already resolved it so we can pass the real ID directly)
                 conversation_history = load_conversation_history(user_id, actual_conversation_id)
@@ -3777,6 +3804,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             client_conversation_id, real_conversation_id
                         )
                         logger.info(f"Cached mapping in local_objects: {client_conversation_id} → {real_conversation_id}")
+
+                    # PROACTIVE SESSION MIGRATION: Rename the session to use the real ID
+                    # This ensures that if the client reconnects with the real ID, they get the same session
+                    old_session_id = f"ws_{user_id}_conv_{client_conversation_id}"
+                    new_session_id = f"ws_{user_id}_conv_{real_conversation_id}"
+                    if old_session_id != new_session_id:
+                        await rename_chat_session(old_session_id, new_session_id)
+                        logger.info(f"Proactively migrated session: {old_session_id} → {new_session_id}")
+                        # Update local session_id variable to use new ID for rest of this request
+                        session_id = new_session_id
+
                 except ValueError as e:
                     # This shouldn't happen in normal operation, but if it does, log it and continue
                     logger.error(f"Failed to set optimistic mapping: {str(e)}")

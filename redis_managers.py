@@ -50,8 +50,74 @@ class ChatSessionManager:
         # Fallback to current time if no valid timestamp
         return time.time()
 
+    # --- Session Redirect Methods (for optimistic ID migration) ---
+
+    async def set_redirect(self, old_session_id: str, new_session_id: str):
+        """Store a redirect from old session_id to new session_id.
+
+        This is used when migrating from optimistic to real conversation IDs.
+        The redirect ensures that any operations on the old session_id
+        are automatically forwarded to the new session_id.
+        """
+        key = f"session_redirect:{old_session_id}"
+        await self.redis.set(key, new_session_id, ex=3600)  # 1 hour TTL
+        logger.info(f"Set session redirect: {old_session_id} → {new_session_id}")
+
+    async def get_redirect(self, session_id: str) -> Optional[str]:
+        """Get redirect target for a session_id, if one exists."""
+        key = f"session_redirect:{session_id}"
+        result = await self.redis.get(key)
+        if result:
+            return result.decode() if isinstance(result, bytes) else result
+        return None
+
+    async def resolve_session_id(self, session_id: str) -> str:
+        """Resolve a session_id to its canonical form (following redirects).
+
+        If a redirect exists, returns the target session_id.
+        Otherwise returns the original session_id.
+        """
+        redirect = await self.get_redirect(session_id)
+        if redirect:
+            logger.info(f"Resolved session redirect: {session_id} → {redirect}")
+            return redirect
+        return session_id
+
+    async def rename_session(self, old_session_id: str, new_session_id: str) -> bool:
+        """Rename a session with redirect-first for safety.
+
+        This atomically:
+        1. Sets a redirect from old to new (FIRST - critical for race condition handling)
+        2. Renames the Redis key if it exists
+
+        Any in-flight operations using the old session_id will be redirected.
+        """
+        old_key = f"chat_session:{old_session_id}"
+        new_key = f"chat_session:{new_session_id}"
+
+        # CRITICAL: Set redirect FIRST to minimize race window
+        await self.set_redirect(old_session_id, new_session_id)
+
+        # Then try to rename (best effort)
+        try:
+            if await self.redis.exists(old_key) and not await self.redis.exists(new_key):
+                await self.redis.rename(old_key, new_key)
+                logger.info(f"Renamed session {old_session_id} → {new_session_id}")
+            elif await self.redis.exists(new_key):
+                logger.info(f"Session {new_session_id} already exists, redirect set only")
+            else:
+                logger.info(f"Old session {old_session_id} doesn't exist, redirect set only")
+        except Exception as e:
+            logger.warning(f"Rename failed (redirect still set): {e}")
+
+        return True
+
+    # --- End Session Redirect Methods ---
+
     async def get(self, session_id: str, include_cancelled: bool = False) -> List[Dict]:
         """Get chat history for a session, ordered by timestamp"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         # ZRANGE returns members in score order (lowest to highest = oldest to newest)
         members = await self.redis.zrange(key, 0, -1)
@@ -65,6 +131,8 @@ class ChatSessionManager:
 
     async def set(self, session_id: str, messages: List[Dict]):
         """Set entire chat history using ZSET"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         # Delete existing data
         await self.redis.delete(key)
@@ -91,7 +159,14 @@ class ChatSessionManager:
         return await self.get(session_id)
 
     async def add_message(self, session_id: str, message: Dict, timestamp: str = None, request_id: str = None):
-        """Add a message to the session using ZSET for automatic ordering"""
+        """Add a message to the session using ZSET for automatic ordering.
+
+        Includes check-after-write pattern to handle race conditions where
+        a redirect is created while the write is in progress.
+        """
+        original_session_id = session_id
+        resolved_id = await self.resolve_session_id(session_id)
+
         # Add metadata to message
         if timestamp:
             message["_timestamp"] = timestamp
@@ -100,10 +175,21 @@ class ChatSessionManager:
 
         # Convert timestamp to epoch float for score
         score = self._timestamp_to_score(timestamp)
+        msg_json = json.dumps(message)
 
-        key = f"chat_session:{session_id}"
-        await self.redis.zadd(key, {json.dumps(message): score})
+        key = f"chat_session:{resolved_id}"
+        await self.redis.zadd(key, {msg_json: score})
         await self.redis.expire(key, self.ttl)
+
+        # CHECK-AFTER-WRITE: Handle race condition where redirect was created during our write
+        if resolved_id == original_session_id:  # We used original ID (wasn't already redirected)
+            current_redirect = await self.resolve_session_id(original_session_id)
+            if current_redirect != resolved_id:
+                # Redirect appeared! Duplicate message to correct location
+                new_key = f"chat_session:{current_redirect}"
+                await self.redis.zadd(new_key, {msg_json: score})
+                await self.redis.expire(new_key, self.ttl)
+                logger.info(f"Check-after-write: duplicated message to {current_redirect} (orphan at {resolved_id} will expire)")
 
         # Trim if too long (keep messages with highest scores = most recent by timestamp)
         count = await self.redis.zcard(key)
@@ -117,6 +203,8 @@ class ChatSessionManager:
 
     async def extend(self, session_id: str, new_messages: List[Dict]):
         """Extend chat history with multiple messages"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         for msg in new_messages:
             timestamp = msg.get("_timestamp")
@@ -132,6 +220,8 @@ class ChatSessionManager:
 
     async def delete(self, session_id: str):
         """Delete a session"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         await self.redis.delete(f"chat_session:{session_id}")
 
     async def clear(self, session_id: str):
@@ -140,10 +230,14 @@ class ChatSessionManager:
 
     async def exists(self, session_id: str) -> bool:
         """Check if session exists"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         return await self.redis.exists(f"chat_session:{session_id}")
 
     async def mark_cancelled(self, session_id: str, request_id: str):
         """Mark all messages with given request_id as cancelled"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
         for member, score in members_with_scores:
@@ -162,6 +256,8 @@ class ChatSessionManager:
         2. Update _timestamp in the message
         3. Add the new member with new score
         """
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
 
@@ -197,6 +293,8 @@ class ChatSessionManager:
         Returns:
             Number of messages updated
         """
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
 
