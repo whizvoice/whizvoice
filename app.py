@@ -296,7 +296,8 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
 
             if redis_messages:
                 await set_chat_messages(session_id, redis_messages)
-                messages = redis_messages
+                # Re-fetch with stripping to ensure _timestamp is removed before sending to Claude
+                messages = await get_chat_messages_for_claude(session_id)
                 logger.info(f"[CLAUDE_CONTEXT] Reloaded {len(redis_messages)} messages from database")
         except Exception as e:
             logger.error(f"[CLAUDE_CONTEXT] Failed to reload context from database: {e}")
