@@ -4893,10 +4893,48 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 request_cancelled = True
                 logger.info(f"Request {request_id} was cancelled, will save bot message as cancelled")
 
+        # Check for duplicate responses (race condition where multiple requests have same message set)
+        # Skip saving if another request already saved a response for this conversation after the user messages
+        skip_duplicate_response = False
+        if redis_managers and "request_messages" in redis_managers and assistant_response_text and not request_cancelled:
+            try:
+                current_request_data = await redis_managers["request_messages"].get_messages(request_id)
+                if current_request_data:
+                    current_message_ids = current_request_data.get("message_ids", [])
+                    if current_message_ids:
+                        # Get timestamp of the latest user message we're responding to
+                        max_user_message_id = max(current_message_ids)
+                        user_msg_result = supabase.table("messages")\
+                            .select("timestamp")\
+                            .eq("id", max_user_message_id)\
+                            .limit(1)\
+                            .execute()
+
+                        if user_msg_result.data:
+                            user_message_timestamp = user_msg_result.data[0]["timestamp"]
+
+                            # Check if another request already saved a response after these user messages
+                            existing_msg = supabase.table("messages")\
+                                .select("id")\
+                                .eq("conversation_id", processing_conversation_id)\
+                                .eq("message_sender", "ASSISTANT")\
+                                .eq("content_type", "text")\
+                                .is_("cancelled", "null")\
+                                .neq("request_id", request_id)\
+                                .gte("timestamp", user_message_timestamp)\
+                                .limit(1)\
+                                .execute()
+
+                            if existing_msg.data:
+                                logger.info(f"Skipping duplicate response for request {request_id} - another request already saved a response after user message {max_user_message_id}")
+                                skip_duplicate_response = True
+            except Exception as e:
+                logger.error(f"Error checking for duplicate responses: {e}")
+
         # Save assistant message to database if there's text content (always save, but mark as cancelled if needed)
         saved_conversation_id = session_conversation_id
         save_result = None
-        if assistant_response_text:
+        if assistant_response_text and not skip_duplicate_response:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
 
             save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text", client_timestamp=final_text_timestamp)
@@ -4969,7 +5007,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         except Exception as e:
             logger.error(f"Error checking for pending get_*/agent_* tool: {e}")
 
-        if not request_cancelled and not should_skip_broadcast_for_pending_get:
+        if not request_cancelled and not should_skip_broadcast_for_pending_get and not skip_duplicate_response:
             # Only send response if there's actual text content
             # Empty responses create blank message bubbles in the Android app
             if assistant_response_text and assistant_response_text.strip():
