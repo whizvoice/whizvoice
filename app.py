@@ -4876,6 +4876,23 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Use fallback: current time + 1ms to ensure proper ordering
                 final_text_timestamp = (datetime.utcnow() + timedelta(milliseconds=1)).isoformat() + 'Z'
                 logger.warning(f"Using fallback final_text_timestamp: {final_text_timestamp}")
+        else:
+            # For non-tool responses, use client_timestamp + 1ms offset
+            # This ensures assistant response is ordered immediately after user message
+            # (matches tool flow pattern and CLAUDE.md timestamp constraints)
+            from datetime import datetime, timedelta
+            if client_timestamp:
+                try:
+                    timestamp_str = client_timestamp.replace('Z', '+00:00')
+                    user_dt = datetime.fromisoformat(timestamp_str)
+                    final_text_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
+                except Exception as e:
+                    logger.error(f"Failed to parse client_timestamp '{client_timestamp}': {e}")
+                    final_text_timestamp = datetime.utcnow().isoformat() + 'Z'
+            else:
+                # Fallback if no client_timestamp
+                final_text_timestamp = datetime.utcnow().isoformat() + 'Z'
+                logger.warning(f"⚠️ CLIENT_TIMESTAMP_MISSING: No client_timestamp for non-tool response, using fallback timestamp={final_text_timestamp}")
 
         # Add assistant final response to session history (if not an intercepted error)
         # IMPORTANT: Only add text blocks here, NOT tool_use blocks
