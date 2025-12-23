@@ -1939,71 +1939,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     # Handle regular messages
                     if message_type == "message" and message:
-                        # Check for active requests and handle interrupts
-                        # IMPORTANT: Don't treat rapid-fire messages as interrupts (e.g., offline queue)
-                        # Only cancel if there's significant time between messages (>2 seconds)
-                        has_active_requests = False
-                        active_request_ids = []
-                        should_interrupt = False
-                        
-                        if redis_managers and "active_requests" in redis_managers:
-                            active_request_ids = list(await redis_managers["active_requests"].get_all(session_id))
-                            has_active_requests = len(active_request_ids) > 0
-                            # Note: We don't clear active requests here anymore since we're only cancelling streams
-                            # The tasks will remove themselves when they complete or fail
-                            
-                            # Check if this is a true interrupt (user sending new message after waiting)
-                            # vs rapid messages (offline queue, copy-paste, etc)
-                            if has_active_requests and client_timestamp:
-                                # Get timestamp of last active request to compare
-                                # For now, we'll be conservative and only interrupt if explicitly requested
-                                # This prevents offline message queues from cancelling each other
-                                should_interrupt = message_data.get("interrupt_previous", False)
-                                if should_interrupt:
-                                    logger.info("Client explicitly requested interrupt of previous messages")
-                        
-                        # Only handle interrupts if explicitly requested or clear user intent
-                        if has_active_requests and should_interrupt:
-                            # Validate interrupt context if optimistic ID provided
-                            if client_conversation_id and redis_managers and "session_mappings" in redis_managers:
-                                real_id = await redis_managers["session_mappings"].get_real_id(
-                                    session_id, client_conversation_id
-                                )
-                                
-                                if real_id and real_id != session_conversation_id:
-                                    logger.warning(f"Interrupt attempt with mismatched conversation context: "
-                                                 f"client={client_conversation_id}, session={session_conversation_id}")
-                                    
-                                logger.info(f"Validated interrupt: optimistic {client_conversation_id} → real {real_id}")
-                            
-                            logger.info(f"Interrupt detected. Cancelling {len(active_request_ids)} active requests")
-                            # Try to cancel Claude streams first, if that fails, cancel the task
-                            # The task will keep running until it checks for cancellation
-                            stream_cancelled_count = 0
-                            task_cancelled_count = 0
-                            if redis_managers and "local_objects" in redis_managers:
-                                for req_id in active_request_ids:
-                                    # First try to cancel the stream (if Claude has been called)
-                                    if await redis_managers["local_objects"].cancel_stream(req_id):
-                                        stream_cancelled_count += 1
-                                        logger.debug(f"Cancelled Claude stream for request {req_id}")
-                                    else:
-                                        # No stream yet, cancel the task instead
-                                        # The task will continue until it checks cancellation status
-                                        if await redis_managers["local_objects"].cancel_task(req_id):
-                                            task_cancelled_count += 1
-                                            logger.debug(f"Marked task for cancellation: {req_id}")
-                                logger.info(f"Cancelled {stream_cancelled_count} Claude streams and marked {task_cancelled_count} tasks for cancellation")
-                            
-                            # Send interrupt notification with client context
-                            interrupt_response = {
-                                "type": "interrupted", 
-                                "message": "Previous request cancelled due to new message",
-                                "request_id": request_id,
-                                "client_conversation_id": client_conversation_id
-                            }
-                            await websocket.send_text(json.dumps(interrupt_response))
-                        
                         # Before creating the new task, detect and cancel subset requests
                         # We'll get the message IDs after the message is saved in process_message_task
                         # But we need to do detection after the task starts to get the correct message IDs
@@ -4245,7 +4180,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 if redis_managers and "local_objects" in redis_managers:
                     await redis_managers["local_objects"].remove_stream(request_id)
 
-                # Don't send error to client - they already got an interrupt notification
+                # Don't send error to client - stream was cancelled by subset detection
+                # The newer request will provide the response
                 return session_conversation_id
 
             # Handle BadRequestError (400) from Claude API
