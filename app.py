@@ -4845,18 +4845,30 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Add assistant final response to session history (if not an intercepted error)
         # IMPORTANT: Only add text blocks here, NOT tool_use blocks
         # Tool_use blocks were already added in the tool loop above
-        async with chat_sessions_lock:
-            # Only add message if there's text content
-            if content_list:
-                await add_chat_message(session_id, {"role": "assistant", "content": content_list}, timestamp=final_text_timestamp, request_id=request_id)
 
-        # Check if request was cancelled
+        # STEP 1: Check if request was cancelled BEFORE adding to Redis
+        # This prevents race condition where cancelled message appears in context for other requests
         request_cancelled = False
         if redis_managers and "request_messages" in redis_managers:
             request_data = await redis_managers["request_messages"].get_messages(request_id)
             if request_data and request_data.get("status") == "cancelled":
                 request_cancelled = True
-                logger.info(f"Request {request_id} was cancelled, will save bot message as cancelled")
+                logger.info(f"Request {request_id} was cancelled, skipping add to Redis session")
+
+        # STEP 2: Only add to Redis if NOT cancelled
+        async with chat_sessions_lock:
+            # Only add message if there's text content AND not already cancelled
+            if content_list and not request_cancelled:
+                await add_chat_message(session_id, {"role": "assistant", "content": content_list}, timestamp=final_text_timestamp, request_id=request_id)
+
+                # STEP 3: Check AGAIN after adding to handle race condition
+                # where request was cancelled during the add operation
+                if redis_managers and "request_messages" in redis_managers:
+                    request_data = await redis_managers["request_messages"].get_messages(request_id)
+                    if request_data and request_data.get("status") == "cancelled":
+                        request_cancelled = True
+                        logger.info(f"Request {request_id} was cancelled during add, marking message as cancelled in Redis")
+                        await mark_chat_messages_cancelled(session_id, request_id)
 
         # Check for duplicate responses (race condition where multiple requests have same message set)
         # Skip saving if another request already saved a response for this conversation after the user messages
