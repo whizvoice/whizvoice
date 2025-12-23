@@ -1978,12 +1978,23 @@ async def websocket_endpoint(websocket: WebSocket):
                                     if "active_requests" in redis_managers:
                                         await redis_managers["active_requests"].remove(session_id, request_id)
                         
+                        # Calculate correct session_id per-message based on client_conversation_id
+                        # This ensures messages are routed to the correct conversation's Redis context
+                        # even if they arrive on a WebSocket that was originally opened for a different conversation
+                        if client_conversation_id is not None and client_conversation_id < 0:
+                            message_session_id = f"ws_{user_id}_conv_{client_conversation_id}"
+                            message_conversation_id = client_conversation_id
+                            logger.info(f"Routing message to per-message session_id={message_session_id} based on client_conversation_id={client_conversation_id}")
+                        else:
+                            message_session_id = session_id
+                            message_conversation_id = session_conversation_id
+
                         # Create task for processing this message
                         task = asyncio.create_task(
                             process_message_task(
                                 websocket=websocket,
-                                session_id=session_id,
-                                session_conversation_id=session_conversation_id,
+                                session_id=message_session_id,
+                                session_conversation_id=message_conversation_id,
                                 user_id=user_id,
                                 message=message,
                                 request_id=request_id,
@@ -1993,12 +2004,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             )
                         )
                         
-                        # Track the task
+                        # Track the task using the message's session_id
                         if request_id and redis_managers:
                             if "local_objects" in redis_managers:
                                 await redis_managers["local_objects"].add_task(request_id, task)
                             if "active_requests" in redis_managers:
-                                await redis_managers["active_requests"].add(session_id, request_id)
+                                await redis_managers["active_requests"].add(message_session_id, request_id)
                         
                         # Create a separate task to handle completion without blocking
                         # This allows the WebSocket loop to continue receiving messages
