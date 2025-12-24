@@ -204,7 +204,7 @@ def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_
 
         # Convert to dict and add reminder message
         result = dict(new_task)
-        result['_reminder'] = "Task created successfully. PLEASE CHECK: Does this task supersede a similar task you already created? If so, you MUST DELETE the old tasks so the user doesn't see duplicates."
+        result['_reminder'] = "Task created successfully. CRITICAL: Before responding to the user, check the conversation history for old versions of tasks you created. If you find any, you MUST call delete_asana_task for each one NOW (in your next response) to avoid duplicates."
         return result
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
@@ -380,7 +380,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "get_new_asana_task_id",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. Otherwise, confirm the parent task with the user first. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. DO NOT use this tool to recreate a task that you already made once - use update_asana_task instead. No need to tell the user the ID of the task unless they ask. THINK: If you're recreating a different version of a task MAKE SURE you delete the old task with delete_asana_task so that the user doesn't see duplicates.",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. DO NOT use this tool when you can update a task with update_asana_task instead. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. Otherwise, confirm the parent task with the user first. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -407,7 +407,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "update_asana_task",
-        "description": "Update one or more fields of an existing Asana task. You can update the task name, due date, notes, completion status, and/or parent in a single call. Only provide the fields you want to change - all parameters are optional. If the user specifies a specific due date (e.g. two weeks from now), you MUST use the get_current_date tool to calculate the due date in YYYY-MM-DD format. To mark a task as complete, set completed to true. To remove a parent (make it a standalone task), set parent_gid to null.",
+        "description": "Update an existing Asana task. You can update the task name, due date, notes, completion status, and/or parent in a single call. Only provide the fields you want to change - all parameters are optional. If the user specifies a specific due date (e.g. two weeks from now), you MUST use the get_current_date tool to calculate the due date in YYYY-MM-DD format. To mark a task as complete, set completed to true. To remove a parent (make it a standalone task), set parent_gid to null.",
         "input_schema": {
             "type": "object",
             "properties": {
