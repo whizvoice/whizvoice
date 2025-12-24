@@ -4388,32 +4388,16 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # Text must come BEFORE tool_use, so we use explicit timestamps
             from datetime import datetime, timedelta
 
-            # For subsequent tool loop iterations, we need to ensure timestamps are AFTER:
-            # 1. The previous tool_result in this loop (last_tool_result_timestamp)
-            # 2. Any new user messages that arrived during the tool loop
-            # This ensures proper ordering when new messages arrive mid-loop
-
-            # Check Redis for any messages with timestamps later than our last_tool_result_timestamp
-            # This handles the case where a user sends a new message during the tool loop
-            latest_redis_timestamp = None
-            try:
-                redis_messages = await get_chat_messages(session_id)
-                for msg in redis_messages:
-                    msg_ts = msg.get('_timestamp')
-                    if msg_ts:
-                        if latest_redis_timestamp is None or msg_ts > latest_redis_timestamp:
-                            latest_redis_timestamp = msg_ts
-            except Exception as e:
-                logger.warning(f"Failed to get latest Redis timestamp: {e}")
-
-            # Use the latest of: last_tool_result_timestamp, latest_redis_timestamp, or client_timestamp
-            if last_tool_result_timestamp and latest_redis_timestamp:
-                # Compare and use the later one
-                user_timestamp = max(last_tool_result_timestamp, latest_redis_timestamp)
-            elif last_tool_result_timestamp:
+            # For subsequent tool loop iterations, use last_tool_result_timestamp as base
+            # This ensures each iteration's messages have timestamps AFTER the previous iteration
+            # First iteration: last_tool_result_timestamp is None, use client_timestamp
+            # Subsequent iterations: use last_tool_result_timestamp so timestamps increment
+            #
+            # NOTE: We intentionally do NOT check latest_redis_timestamp from other requests
+            # because that would cause this request's timestamps to jump forward incorrectly,
+            # breaking the tool_use/tool_result ordering for this request.
+            if last_tool_result_timestamp:
                 user_timestamp = last_tool_result_timestamp
-            elif latest_redis_timestamp:
-                user_timestamp = latest_redis_timestamp
             else:
                 user_timestamp = client_timestamp
 
