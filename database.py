@@ -448,6 +448,83 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         return None
 
 
+def save_messages_to_db(messages: List[Dict], conversation_id: int, request_id: str) -> List[Optional[int]]:
+    """Save multiple messages atomically to the database using batch insert.
+
+    This is used for atomic insertion of related messages (e.g., tool_use + pending tool_result)
+    to prevent race conditions where another worker might read partial state.
+
+    Args:
+        messages: List of message dicts, each containing:
+            - content: Text content of the message
+            - message_sender: 'USER' or 'ASSISTANT'
+            - content_type: 'text', 'tool_use', 'tool_result', or 'mixed'
+            - tool_content: Optional JSONB content for tool-related messages
+            - timestamp: ISO timestamp string for message ordering
+        conversation_id: The conversation ID (must be resolved, not optimistic)
+        request_id: Request ID for tracking
+
+    Returns:
+        List of message IDs for each inserted message, or empty list on failure
+    """
+    try:
+        if not messages:
+            logger.warning("save_messages_to_db called with empty messages list")
+            return []
+
+        logger.info(f"save_messages_to_db called: conversation_id={conversation_id}, request_id={request_id}, message_count={len(messages)}")
+
+        # Prepare all message data with conversation_id and request_id
+        message_data_list = []
+        for i, msg in enumerate(messages):
+            message_data = {
+                "conversation_id": conversation_id,
+                "content": msg.get("content", ""),
+                "message_sender": msg["message_sender"],
+                "content_type": msg.get("content_type", "text"),
+                "request_id": request_id
+            }
+
+            # Add tool_content if provided
+            if msg.get("tool_content") is not None:
+                message_data["tool_content"] = msg["tool_content"]
+
+            # Add timestamp if provided
+            if msg.get("timestamp"):
+                message_data["timestamp"] = msg["timestamp"]
+
+            message_data_list.append(message_data)
+            logger.info(f"  Message {i}: sender={msg['message_sender']}, type={msg.get('content_type', 'text')}, timestamp={msg.get('timestamp', 'default')}")
+
+        # Batch insert all messages atomically
+        result = supabase.table("messages").insert(message_data_list).execute()
+
+        if not result.data:
+            logger.error(f"Failed to batch save {len(messages)} messages to conversation {conversation_id} - no data returned")
+            return []
+
+        # Extract saved message IDs
+        message_ids = [msg.get("id") for msg in result.data]
+        logger.info(f"Successfully batch saved {len(message_ids)} messages to conversation {conversation_id}: {message_ids}")
+
+        # Update conversation timestamps
+        update_result = supabase.table("conversations").update({
+            "last_message_time": "now()",
+            "updated_at": "now()"
+        }).eq("id", conversation_id).execute()
+
+        if update_result.data:
+            logger.info(f"Updated conversation {conversation_id} timestamps after batch insert")
+        else:
+            logger.warning(f"Failed to update conversation {conversation_id} timestamps after batch insert")
+
+        return message_ids
+
+    except Exception as e:
+        logger.error(f"Error batch saving messages to database: {str(e)}")
+        return []
+
+
 def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_content: dict, user_id: int = None) -> bool:
     """Update a pending tool_result message with the actual result
 

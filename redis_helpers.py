@@ -1,7 +1,7 @@
 """
 Helper functions for Redis-backed session management with fallback to local storage
 """
-from typing import List, Dict, Set, Optional, Any
+from typing import List, Dict, Set, Optional, Any, Union
 import asyncio
 import logging
 
@@ -65,20 +65,47 @@ async def get_chat_messages_for_claude(session_id: str) -> List[Dict]:
     ]
 
 
-async def add_chat_message(session_id: str, message: Dict, timestamp: str = None, request_id: str = None):
-    """Add a chat message to a session in Redis or local storage"""
+async def add_chat_message(session_id: str, message: Union[Dict, List[Dict]], timestamp: Union[str, List[str]] = None, request_id: str = None):
+    """Add chat message(s) to a session in Redis or local storage.
+
+    Args:
+        session_id: The session ID
+        message: Single message dict OR list of message dicts for atomic batch add
+        timestamp: Single timestamp OR list of timestamps (one per message if batch)
+        request_id: Request ID (applied to all messages)
+
+    When a list of messages is passed with Redis, they are added atomically
+    using a pipeline transaction. This prevents race conditions where another
+    worker might read partial state between writes.
+    """
     if redis_managers:
         await redis_managers["chat_sessions"].add_message(session_id, message, timestamp, request_id)
     else:
-        # Local fallback - add metadata and append
-        if timestamp:
-            message["_timestamp"] = timestamp
-        if request_id:
-            message["_request_id"] = request_id
-        async with chat_sessions_lock:
-            if session_id not in chat_sessions:
-                chat_sessions[session_id] = []
-            chat_sessions[session_id].append(message)
+        # Local fallback
+        if isinstance(message, list):
+            # Batch add - add each message with its corresponding timestamp
+            messages = message
+            timestamps = timestamp if isinstance(timestamp, list) else [timestamp] * len(messages)
+            async with chat_sessions_lock:
+                if session_id not in chat_sessions:
+                    chat_sessions[session_id] = []
+                for msg, ts in zip(messages, timestamps):
+                    msg_copy = msg.copy()
+                    if ts:
+                        msg_copy["_timestamp"] = ts
+                    if request_id:
+                        msg_copy["_request_id"] = request_id
+                    chat_sessions[session_id].append(msg_copy)
+        else:
+            # Single message - existing logic
+            if timestamp:
+                message["_timestamp"] = timestamp
+            if request_id:
+                message["_request_id"] = request_id
+            async with chat_sessions_lock:
+                if session_id not in chat_sessions:
+                    chat_sessions[session_id] = []
+                chat_sessions[session_id].append(message)
 
 
 async def set_chat_messages(session_id: str, messages: List[Dict]):

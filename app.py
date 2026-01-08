@@ -254,15 +254,9 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             db_messages = response.data if response.data else []
 
             redis_messages = []
-            # First pass: identify tool_use IDs that have corresponding tool_results
-            tool_use_ids_with_results = set()
-            for msg in db_messages:
-                if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
-                    for block in msg['tool_content']:
-                        if isinstance(block, dict) and block.get('tool_use_id'):
-                            tool_use_ids_with_results.add(block['tool_use_id'])
-
-            # Second pass: build messages, skipping incomplete tool_use blocks
+            # Build messages from database
+            # NOTE: With atomic writes, tool_use and tool_result are always saved together,
+            # so we no longer need to skip incomplete tool_use blocks
             for msg in db_messages:
                 if msg.get('cancelled'):
                     continue
@@ -270,18 +264,8 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 content_type = msg.get('content_type', 'text')
                 tool_content = msg.get('tool_content')
 
-                # Handle tool_use messages - skip if no corresponding tool_result
+                # Handle tool_use messages
                 if content_type == 'tool_use' and tool_content:
-                    tool_use_id = None
-                    for block in tool_content:
-                        if isinstance(block, dict) and block.get('id'):
-                            tool_use_id = block['id']
-                            break
-
-                    if tool_use_id and tool_use_id not in tool_use_ids_with_results:
-                        logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
-                        continue
-
                     logger.info(f"📥 DB load: tool_use, db_timestamp={msg.get('timestamp')}")
                     redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
                 elif content_type == 'tool_result' and tool_content:
@@ -4469,7 +4453,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 assistant_content = text_before_tool + tool_block_dicts
 
                 # CRITICAL: Create pending tool_result for EACH tool_use IMMEDIATELY
-                # Add BOTH assistant message and pending results to Redis TOGETHER
+                # Add BOTH assistant message and pending results to Redis ATOMICALLY
                 # This prevents race condition where another worker reads tool_use without its tool_result
                 pending_tool_result_dicts = []
                 for tb in tool_blocks:
@@ -4478,8 +4462,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         "tool_use_id": tb.id,
                         "content": "Result pending..."
                     })
-                await add_chat_message(session_id, {"role": "assistant", "content": assistant_content}, timestamp=text_before_and_tool_use_timestamp, request_id=request_id)
-                await add_chat_message(session_id, {"role": "user", "content": pending_tool_result_dicts}, timestamp=tool_result_timestamp, request_id=request_id)
+                # ATOMIC: Add both messages to Redis in a single transaction
+                # This ensures no other worker can read partial state (tool_use without tool_result)
+                await add_chat_message(
+                    session_id,
+                    [
+                        {"role": "assistant", "content": assistant_content},
+                        {"role": "user", "content": pending_tool_result_dicts}
+                    ],
+                    timestamp=[text_before_and_tool_use_timestamp, tool_result_timestamp],
+                    request_id=request_id
+                )
 
                 # Save merged text_before+ALL tool_uses to database as ONE message
                 # content_type is "tool_use" even though it may also contain text content

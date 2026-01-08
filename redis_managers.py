@@ -5,7 +5,7 @@ import json
 import time
 import os
 import asyncio
-from typing import Dict, List, Set, Optional, Tuple, Any
+from typing import Dict, List, Set, Optional, Tuple, Any, Union
 from fastapi import WebSocket
 import redis.asyncio as redis
 import logging
@@ -158,38 +158,86 @@ class ChatSessionManager:
         """Alias for get() method - for backward compatibility"""
         return await self.get(session_id)
 
-    async def add_message(self, session_id: str, message: Dict, timestamp: str = None, request_id: str = None):
-        """Add a message to the session using ZSET for automatic ordering.
+    async def add_message(self, session_id: str, message: Union[Dict, List[Dict]], timestamp: Union[str, List[str]] = None, request_id: str = None):
+        """Add message(s) to the session using ZSET for automatic ordering.
+
+        Args:
+            session_id: The session ID
+            message: Single message dict OR list of message dicts for atomic batch add
+            timestamp: Single timestamp OR list of timestamps (one per message if batch)
+            request_id: Request ID (applied to all messages)
+
+        When a list of messages is passed, they are added atomically using a Redis
+        pipeline with transaction=True. This prevents race conditions where another
+        worker might read partial state between writes.
 
         Includes check-after-write pattern to handle race conditions where
         a redirect is created while the write is in progress.
         """
         original_session_id = session_id
         resolved_id = await self.resolve_session_id(session_id)
-
-        # Add metadata to message
-        if timestamp:
-            message["_timestamp"] = timestamp
-        if request_id:
-            message["_request_id"] = request_id
-
-        # Convert timestamp to epoch float for score
-        score = self._timestamp_to_score(timestamp)
-        msg_json = json.dumps(message)
-
         key = f"chat_session:{resolved_id}"
-        await self.redis.zadd(key, {msg_json: score})
-        await self.redis.expire(key, self.ttl)
 
-        # CHECK-AFTER-WRITE: Handle race condition where redirect was created during our write
-        if resolved_id == original_session_id:  # We used original ID (wasn't already redirected)
-            current_redirect = await self.resolve_session_id(original_session_id)
-            if current_redirect != resolved_id:
-                # Redirect appeared! Duplicate message to correct location
-                new_key = f"chat_session:{current_redirect}"
-                await self.redis.zadd(new_key, {msg_json: score})
-                await self.redis.expire(new_key, self.ttl)
-                logger.info(f"Check-after-write: duplicated message to {current_redirect} (orphan at {resolved_id} will expire)")
+        if isinstance(message, list):
+            # ATOMIC BATCH: Use pipeline with transaction for multiple messages
+            messages = message
+            timestamps = timestamp if isinstance(timestamp, list) else [timestamp] * len(messages)
+
+            # Prepare all messages with metadata
+            prepared_messages = []
+            for msg, ts in zip(messages, timestamps):
+                msg_copy = msg.copy()
+                if ts:
+                    msg_copy["_timestamp"] = ts
+                if request_id:
+                    msg_copy["_request_id"] = request_id
+                score = self._timestamp_to_score(ts)
+                msg_json = json.dumps(msg_copy)
+                prepared_messages.append((msg_json, score))
+
+            # Atomic write using pipeline
+            async with self.redis.pipeline(transaction=True) as pipe:
+                for msg_json, score in prepared_messages:
+                    pipe.zadd(key, {msg_json: score})
+                pipe.expire(key, self.ttl)
+                await pipe.execute()
+
+            # CHECK-AFTER-WRITE: Handle race condition where redirect was created during our write
+            if resolved_id == original_session_id:
+                current_redirect = await self.resolve_session_id(original_session_id)
+                if current_redirect != resolved_id:
+                    # Redirect appeared! Duplicate all messages to correct location
+                    new_key = f"chat_session:{current_redirect}"
+                    async with self.redis.pipeline(transaction=True) as pipe:
+                        for msg_json, score in prepared_messages:
+                            pipe.zadd(new_key, {msg_json: score})
+                        pipe.expire(new_key, self.ttl)
+                        await pipe.execute()
+                    logger.info(f"Check-after-write: duplicated {len(messages)} messages to {current_redirect} (orphan at {resolved_id} will expire)")
+        else:
+            # SINGLE MESSAGE: Original logic
+            # Add metadata to message
+            if timestamp:
+                message["_timestamp"] = timestamp
+            if request_id:
+                message["_request_id"] = request_id
+
+            # Convert timestamp to epoch float for score
+            score = self._timestamp_to_score(timestamp)
+            msg_json = json.dumps(message)
+
+            await self.redis.zadd(key, {msg_json: score})
+            await self.redis.expire(key, self.ttl)
+
+            # CHECK-AFTER-WRITE: Handle race condition where redirect was created during our write
+            if resolved_id == original_session_id:  # We used original ID (wasn't already redirected)
+                current_redirect = await self.resolve_session_id(original_session_id)
+                if current_redirect != resolved_id:
+                    # Redirect appeared! Duplicate message to correct location
+                    new_key = f"chat_session:{current_redirect}"
+                    await self.redis.zadd(new_key, {msg_json: score})
+                    await self.redis.expire(new_key, self.ttl)
+                    logger.info(f"Check-after-write: duplicated message to {current_redirect} (orphan at {resolved_id} will expire)")
 
         # Trim if too long (keep messages with highest scores = most recent by timestamp)
         count = await self.redis.zcard(key)
