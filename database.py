@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Tuple
 from datetime import datetime, timedelta
 
 from supabase_client import supabase
+from redis_managers import MissingTimestampError
 
 logger = logging.getLogger(__name__)
 
@@ -406,14 +407,16 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 message_data["timestamp"] = assistant_dt.isoformat().replace('+00:00', 'Z')
                 logger.info(f"Setting ASSISTANT message timestamp to {message_data['timestamp']} (1ms after max timestamp {max_timestamp} in request)")
             else:
-                logger.warning(f"No messages found with request_id {request_id}, using default timestamp")
+                raise MissingTimestampError(f"No messages found with request_id {request_id} to calculate ASSISTANT timestamp")
 
-        # Debug: Log exactly what we're sending to Supabase
-        if "timestamp" in message_data:
-            logger.info(f"DEBUG: Inserting message with timestamp field: {message_data['timestamp']}")
-        else:
-            logger.info(f"DEBUG: Inserting message WITHOUT timestamp field (will use DB default)")
+        # Require timestamp - no fallback to DB default
+        if "timestamp" not in message_data:
+            raise MissingTimestampError(
+                f"Required timestamp missing for {message_sender} message in conversation {conversation_id}. "
+                f"USER messages require client_timestamp, ASSISTANT messages require request_id with existing messages."
+            )
 
+        logger.info(f"Inserting message with timestamp: {message_data['timestamp']}")
         result = supabase.table("messages").insert(message_data).execute()
 
         if not result.data:

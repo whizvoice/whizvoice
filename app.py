@@ -30,7 +30,7 @@ from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
 from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
 from supabase_client import supabase
-from redis_managers import create_managers
+from redis_managers import create_managers, MissingTimestampError
 import stripe
 
 # Import extracted modules
@@ -1844,10 +1844,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}, client_timestamp: {client_timestamp}")
 
-                        # Log warning if client_timestamp is missing - this helps debug timestamp ordering issues
+                        # Require client_timestamp - fail fast if missing
                         if client_timestamp is None:
-                            logger.warning(f"⚠️ CLIENT_TIMESTAMP_MISSING: No timestamp in WebSocket message. request_id={request_id}, type={message_type}, message_preview='{message[:50] if message else '(empty)'}...'")
-                        
+                            error_msg = f"Required timestamp missing in WebSocket message. request_id={request_id}, type={message_type}"
+                            logger.error(f"MISSING_TIMESTAMP: {error_msg}")
+                            await websocket.send_json({
+                                "type": "error",
+                                "code": "MISSING_TIMESTAMP",
+                                "message": error_msg,
+                                "request_id": request_id
+                            })
+                            raise MissingTimestampError(error_msg)
+
                         # Validate client_conversation_id immediately
                         # Convert to int if it's a string number, and check if positive
                         if client_conversation_id is not None:
@@ -4420,13 +4428,16 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
                 logger.info(f"Using explicit timestamps from client_timestamp: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}")
             else:
-                # Fallback: generate timestamps using current time as base to ensure proper ordering
-                # This prevents None timestamps which cause ZSET score issues in Redis
-                fallback_base = datetime.utcnow()
-                text_before_and_tool_use_timestamp = (fallback_base + timedelta(milliseconds=1)).isoformat() + 'Z'
-                tool_result_timestamp = (fallback_base + timedelta(milliseconds=2)).isoformat() + 'Z'
-                last_tool_result_timestamp = tool_result_timestamp  # Track for final message ordering
-                logger.warning(f"No client_timestamp and no USER message found with request_id {request_id}, using fallback timestamps: text_before_and_tool_use={text_before_and_tool_use_timestamp}, tool_result={tool_result_timestamp}")
+                # Fail fast if no timestamp available for tool execution
+                error_msg = f"Required timestamp missing for tool execution. No client_timestamp and no USER message found with request_id {request_id}"
+                logger.error(f"MISSING_TIMESTAMP: {error_msg}")
+                await websocket.send_json({
+                    "type": "error",
+                    "code": "MISSING_TIMESTAMP",
+                    "message": error_msg,
+                    "request_id": request_id
+                })
+                raise MissingTimestampError(error_msg)
 
             # Save assistant message to Redis BEFORE executing the tool
             # IMPORTANT: Only include text BEFORE tool_use, not after
@@ -4823,10 +4834,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 final_text_timestamp = (tool_result_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
                 logger.info(f"Setting final assistant text timestamp to {final_text_timestamp} (after tool_result)")
             except Exception as e:
-                logger.error(f"Failed to parse tool_result timestamp '{last_tool_result_timestamp}': {e}")
-                # Use fallback: current time + 1ms to ensure proper ordering
-                final_text_timestamp = (datetime.utcnow() + timedelta(milliseconds=1)).isoformat() + 'Z'
-                logger.warning(f"Using fallback final_text_timestamp: {final_text_timestamp}")
+                error_msg = f"Failed to parse tool_result timestamp '{last_tool_result_timestamp}': {e}"
+                logger.error(f"MISSING_TIMESTAMP: {error_msg}")
+                await websocket.send_json({
+                    "type": "error",
+                    "code": "MISSING_TIMESTAMP",
+                    "message": error_msg,
+                    "request_id": request_id
+                })
+                raise MissingTimestampError(error_msg)
         else:
             # For non-tool responses, use client_timestamp + 1ms offset
             # This ensures assistant response is ordered immediately after user message
@@ -4838,12 +4854,27 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     user_dt = datetime.fromisoformat(timestamp_str)
                     final_text_timestamp = (user_dt + timedelta(milliseconds=1)).isoformat().replace('+00:00', 'Z')
                 except Exception as e:
-                    logger.error(f"Failed to parse client_timestamp '{client_timestamp}': {e}")
-                    final_text_timestamp = datetime.utcnow().isoformat() + 'Z'
+                    error_msg = f"Failed to parse client_timestamp '{client_timestamp}': {e}"
+                    logger.error(f"MISSING_TIMESTAMP: {error_msg}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "code": "MISSING_TIMESTAMP",
+                        "message": error_msg,
+                        "request_id": request_id
+                    })
+                    raise MissingTimestampError(error_msg)
             else:
-                # Fallback if no client_timestamp
-                final_text_timestamp = datetime.utcnow().isoformat() + 'Z'
-                logger.warning(f"⚠️ CLIENT_TIMESTAMP_MISSING: No client_timestamp for non-tool response, using fallback timestamp={final_text_timestamp}")
+                # No client_timestamp for non-tool response - this should never happen
+                # since we validate client_timestamp at message intake
+                error_msg = f"Required timestamp missing for non-tool response. request_id={request_id}"
+                logger.error(f"MISSING_TIMESTAMP: {error_msg}")
+                await websocket.send_json({
+                    "type": "error",
+                    "code": "MISSING_TIMESTAMP",
+                    "message": error_msg,
+                    "request_id": request_id
+                })
+                raise MissingTimestampError(error_msg)
 
         # Add assistant final response to session history (if not an intercepted error)
         # IMPORTANT: Only add text blocks here, NOT tool_use blocks
