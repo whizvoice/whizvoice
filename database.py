@@ -84,8 +84,9 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                     # But we CAN add text-only messages before hitting the tool_use
                     should_group = not current_group[3]  # Don't merge if group already has tool_use
                 elif message_role == "user":
-                    # USER: Only merge if same request_id
-                    should_group = (row_request_id == current_group[1])
+                    # USER: Always merge consecutive user messages (Claude requires alternation)
+                    # tool_result blocks will be ordered before text blocks when building content
+                    should_group = True
                 else:
                     should_group = False
             else:
