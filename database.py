@@ -186,7 +186,7 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         return []
 
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False) -> Optional[Tuple[int, int, List[int]]]:
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None) -> Optional[Tuple[int, int, List[int]]]:
     """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids)
 
     Args:
@@ -200,6 +200,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         content_type: Type of content - 'text', 'tool_use', 'tool_result', or 'mixed'
         tool_content: Optional JSONB content for tool-related messages
         mark_cancelled: If True, mark the message as cancelled (for error messages from cancelled requests)
+        local_objects: Optional LocalObjectManager for caching optimistic ID mappings
 
     Returns:
         Tuple of (conversation_id, message_id, cancelled_message_ids) where cancelled_message_ids
@@ -213,21 +214,36 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         if conversation_id is not None and conversation_id < 0:
             logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
             original_optimistic_id = conversation_id
-            # Look up the real conversation using the optimistic_chat_id
-            conv_result = supabase.table("conversations")\
-                .select("id")\
-                .eq("optimistic_chat_id", str(conversation_id))\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
 
-            if conv_result.data:
-                real_id = conv_result.data[0]["id"]
-                logger.info(f"Found real conversation ID {real_id} for optimistic ID {conversation_id}")
-                conversation_id = real_id
+            # Check cache first if available (direct dict access is safe due to Python's GIL)
+            cached_real_id = None
+            if local_objects and hasattr(local_objects, 'optimistic_to_real'):
+                cached_real_id = local_objects.optimistic_to_real.get(conversation_id)
+
+            if cached_real_id:
+                logger.info(f"CACHE HIT: Found cached real ID {cached_real_id} for optimistic ID {conversation_id}")
+                conversation_id = cached_real_id
             else:
-                logger.info(f"No existing conversation found for optimistic ID {conversation_id}, will create new one")
-                conversation_id = None
+                # Cache miss - look up the real conversation using the optimistic_chat_id
+                conv_result = supabase.table("conversations")\
+                    .select("id")\
+                    .eq("optimistic_chat_id", str(conversation_id))\
+                    .eq("user_id", user_id)\
+                    .is_("deleted_at", "null")\
+                    .execute()
+
+                if conv_result.data:
+                    real_id = conv_result.data[0]["id"]
+                    logger.info(f"Found real conversation ID {real_id} for optimistic ID {conversation_id}")
+                    # Cache the mapping for future use (direct dict write is safe)
+                    if local_objects and hasattr(local_objects, 'optimistic_to_real'):
+                        local_objects.optimistic_to_real[original_optimistic_id] = real_id
+                        local_objects.real_to_optimistic[real_id] = original_optimistic_id
+                        logger.debug(f"Cached ID mapping: optimistic {original_optimistic_id} <-> real {real_id}")
+                    conversation_id = real_id
+                else:
+                    logger.info(f"No existing conversation found for optimistic ID {conversation_id}, will create new one")
+                    conversation_id = None
 
         # Validate client_conversation_id - it should ONLY be negative (optimistic) values
         # Convert to int if it's a string number for validation
@@ -247,20 +263,35 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         if conversation_id is None and client_conversation_id is not None:
             # client_conversation_id should always be negative (optimistic) at this point
             logger.info(f"No conversation_id but have optimistic client_conversation_id {client_conversation_id}, checking for existing conversation")
-            # Look up existing conversation by optimistic_chat_id
-            conv_result = supabase.table("conversations")\
-                .select("id")\
-                .eq("optimistic_chat_id", str(client_conversation_id))\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
 
-            if conv_result.data:
-                conversation_id = conv_result.data[0]["id"]
-                logger.info(f"Found existing conversation {conversation_id} for optimistic_chat_id {client_conversation_id}")
-                # Don't return here - we still need to save the message below
+            # Check cache first if available
+            cached_real_id = None
+            if local_objects and hasattr(local_objects, 'optimistic_to_real'):
+                cached_real_id = local_objects.optimistic_to_real.get(client_conversation_id)
+
+            if cached_real_id:
+                logger.info(f"CACHE HIT: Found cached conversation {cached_real_id} for optimistic_chat_id {client_conversation_id}")
+                conversation_id = cached_real_id
             else:
-                logger.info(f"No existing conversation found for optimistic_chat_id {client_conversation_id}, will create new one")
+                # Cache miss - look up existing conversation by optimistic_chat_id
+                conv_result = supabase.table("conversations")\
+                    .select("id")\
+                    .eq("optimistic_chat_id", str(client_conversation_id))\
+                    .eq("user_id", user_id)\
+                    .is_("deleted_at", "null")\
+                    .execute()
+
+                if conv_result.data:
+                    conversation_id = conv_result.data[0]["id"]
+                    logger.info(f"Found existing conversation {conversation_id} for optimistic_chat_id {client_conversation_id}")
+                    # Cache the mapping for future use
+                    if local_objects and hasattr(local_objects, 'optimistic_to_real'):
+                        local_objects.optimistic_to_real[client_conversation_id] = conversation_id
+                        local_objects.real_to_optimistic[conversation_id] = client_conversation_id
+                        logger.debug(f"Cached ID mapping: optimistic {client_conversation_id} <-> real {conversation_id}")
+                    # Don't return here - we still need to save the message below
+                else:
+                    logger.info(f"No existing conversation found for optimistic_chat_id {client_conversation_id}, will create new one")
 
         # If still no conversation_id, create a new conversation
         if conversation_id is None:

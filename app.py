@@ -3363,13 +3363,15 @@ async def check_and_retry_failed_messages(
                                 if assistant_response:
                                     # Save the new assistant response (error message already deleted)
                                     logger.info(f"Saving new assistant response for conversation {actual_conversation_id}")
+                                    local_objects = redis_managers.get("local_objects") if redis_managers else None
                                     save_result = save_message_to_db(
                                         user_id=user_id,
                                         conversation_id=actual_conversation_id,
                                         content=assistant_response,
                                         message_sender="ASSISTANT",
                                         request_id=request_id,
-                                        content_type="text"
+                                        content_type="text",
+                                        local_objects=local_objects
                                     )
 
                                     if save_result:
@@ -3404,13 +3406,15 @@ async def check_and_retry_failed_messages(
                                     "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
                                     "request_id": request_id
                                 })
+                                local_objects = redis_managers.get("local_objects") if redis_managers else None
                                 save_message_to_db(
                                     user_id=user_id,
                                     conversation_id=actual_conversation_id,
                                     content=error_content,
                                     message_sender="ASSISTANT",
                                     request_id=request_id,
-                                    content_type="text"
+                                    content_type="text",
+                                    local_objects=local_objects
                                 )
                                 return {
                                     "retried": False,
@@ -3426,14 +3430,15 @@ async def check_and_retry_failed_messages(
                                     "message": f"Claude API error: {str(api_error)}",
                                     "request_id": request_id
                                 })
-                                
+                                local_objects = redis_managers.get("local_objects") if redis_managers else None
                                 save_message_to_db(
                                     user_id=user_id,
                                     conversation_id=actual_conversation_id,
                                     content=new_error_content,
                                     message_sender="ASSISTANT",
                                     request_id=request_id,
-                                    content_type="text"
+                                    content_type="text",
+                                    local_objects=local_objects
                                 )
                                 
                                 return {
@@ -3701,7 +3706,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
-        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp, content_type="text")
+        local_objects = redis_managers.get("local_objects") if redis_managers else None
+        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp, content_type="text", local_objects=local_objects)
         if save_result is None:
             logger.error("Failed to save user message to database")
             error_payload = {
@@ -4143,13 +4149,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # Save error as ASSISTANT message to database (persists even if WebSocket fails)
             error_json_content = json.dumps(error_payload)
             logger.info(f"Saving authentication error as ASSISTANT message for conversation {session_conversation_id}")
+            local_objects = redis_managers.get("local_objects") if redis_managers else None
             save_result = save_message_to_db(
                 user_id=user_id,
                 conversation_id=session_conversation_id,
                 content=error_json_content,
                 message_sender="ASSISTANT",
                 request_id=request_id,
-                content_type="text"
+                content_type="text",
+                local_objects=local_objects
             )
             if save_result:
                 saved_conversation_id, error_message_id, cancelled_ids = save_result
@@ -4214,13 +4222,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Save error as ASSISTANT message to database (persists even if WebSocket fails)
                 logger.info(f"Saving BadRequest error as ASSISTANT message for conversation {session_conversation_id}")
                 error_json_content = json.dumps(error_payload)
+                local_objects = redis_managers.get("local_objects") if redis_managers else None
                 save_result = save_message_to_db(
                     user_id=user_id,
                     conversation_id=session_conversation_id,
                     content=error_json_content,
                     message_sender="ASSISTANT",
                     request_id=request_id,
-                    content_type="text"
+                    content_type="text",
+                    local_objects=local_objects
                 )
                 if save_result:
                     saved_conversation_id, error_message_id, cancelled_ids = save_result
@@ -4275,6 +4285,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # Save error to database
             logger.info(f"Saving generic error as ASSISTANT message for conversation {session_conversation_id}")
             error_json_content = json.dumps(error_payload)
+            local_objects = redis_managers.get("local_objects") if redis_managers else None
             try:
                 save_result = save_message_to_db(
                     user_id=user_id,
@@ -4282,7 +4293,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     content=error_json_content,
                     message_sender="ASSISTANT",
                     request_id=request_id,
-                    content_type="text"
+                    content_type="text",
+                    local_objects=local_objects
                 )
                 if save_result:
                     saved_conversation_id, error_message_id, cancelled_ids = save_result
@@ -4488,6 +4500,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Save merged text_before+ALL tool_uses to database as ONE message
                 # content_type is "tool_use" even though it may also contain text content
                 # This ensures proper timestamp ordering: merged message at T+1ms
+                local_objects = redis_managers.get("local_objects") if redis_managers else None
                 tool_use_save_result = save_message_to_db(
                     user_id=user_id,
                     conversation_id=session_conversation_id,
@@ -4496,7 +4509,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     request_id=request_id,
                     content_type="tool_use",  # Type is tool_use even with text content
                     tool_content=tool_block_dicts,  # ALL tool_uses
-                    client_timestamp=text_before_and_tool_use_timestamp
+                    client_timestamp=text_before_and_tool_use_timestamp,
+                    local_objects=local_objects
                 )
                 tool_names = [tb.name for tb in tool_blocks]
                 if assistant_response_text_before:
@@ -4553,7 +4567,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     request_id=request_id,
                     content_type="tool_result",
                     tool_content=pending_tool_result_dicts,  # ALL pending results
-                    client_timestamp=tool_result_timestamp
+                    client_timestamp=tool_result_timestamp,
+                    local_objects=local_objects
                 )
                 tool_use_ids = [tb.id for tb in tool_blocks]
                 logger.info(f"✅ Saved {len(tool_blocks)} PENDING tool_result(s) to database BEFORE execution: tool_use_ids={tool_use_ids}")
@@ -4714,20 +4729,22 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Save error as ASSISTANT message to database (persists even if WebSocket fails)
                 error_json_content = json.dumps(error_payload)
                 logger.info(f"Saving authentication error (during tool use) as ASSISTANT message for conversation {session_conversation_id}")
+                local_objects = redis_managers.get("local_objects") if redis_managers else None
                 save_result = save_message_to_db(
                     user_id=user_id,
                     conversation_id=session_conversation_id,
                     content=error_json_content,
                     message_sender="ASSISTANT",
                     request_id=request_id,
-                    content_type="text"
+                    content_type="text",
+                    local_objects=local_objects
                 )
                 if save_result:
                     saved_conversation_id, error_message_id, cancelled_ids = save_result
                     logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 else:
                     logger.error(f"Failed to save authentication error message to database")
-                
+
                 # Try to send via WebSocket (may fail, but error is persisted in DB)
                 await safe_websocket_send(error_payload)
 
@@ -4773,13 +4790,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     # Save error as ASSISTANT message to database
                     logger.info(f"Saving BadRequest error (during tool use) as ASSISTANT message for conversation {session_conversation_id}")
                     error_json_content = json.dumps(error_payload)
+                    local_objects = redis_managers.get("local_objects") if redis_managers else None
                     save_result = save_message_to_db(
                         user_id=user_id,
                         conversation_id=session_conversation_id,
                         content=error_json_content,
                         message_sender="ASSISTANT",
                         request_id=request_id,
-                        content_type="text"
+                        content_type="text",
+                        local_objects=local_objects
                     )
                     if save_result:
                         saved_conversation_id, error_message_id, cancelled_ids = save_result
@@ -4947,8 +4966,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         save_result = None
         if assistant_response_text and not skip_duplicate_response:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
-
-            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text", client_timestamp=final_text_timestamp)
+            local_objects = redis_managers.get("local_objects") if redis_managers else None
+            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text", client_timestamp=final_text_timestamp, local_objects=local_objects)
             if save_result:
                 saved_conversation_id, bot_message_id, cancelled_ids = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
@@ -5128,6 +5147,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # Try to save to database
         error_json_content = json.dumps(error_payload)
+        local_objects = redis_managers.get("local_objects") if redis_managers else None
         try:
             save_message_to_db(
                 user_id=user_id,
@@ -5136,7 +5156,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 message_sender="ASSISTANT",
                 request_id=request_id,
                 content_type="text",
-                mark_cancelled=is_cancelled  # Mark as cancelled if request was cancelled
+                mark_cancelled=is_cancelled,  # Mark as cancelled if request was cancelled
+                local_objects=local_objects
             )
         except Exception as save_error:
             logger.error(f"Failed to save unexpected error to database: {save_error}")
