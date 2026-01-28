@@ -246,7 +246,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         try:
             from supabase_client import supabase
             query = supabase.table("messages")\
-                .select("id, content, message_sender, timestamp, cancelled, content_type, tool_content")\
+                .select("id, content, message_sender, timestamp, cancelled, content_type, tool_content, request_id")\
                 .eq("conversation_id", conversation_id)\
                 .order("timestamp", desc=False)
 
@@ -267,17 +267,17 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 # Handle tool_use messages
                 if content_type == 'tool_use' and tool_content:
                     logger.info(f"📥 DB load: tool_use, db_timestamp={msg.get('timestamp')}")
-                    redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
+                    redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp'), "_request_id": msg.get('request_id')})
                 elif content_type == 'tool_result' and tool_content:
                     logger.info(f"📥 DB load: tool_result, db_timestamp={msg.get('timestamp')}")
-                    redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
+                    redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp'), "_request_id": msg.get('request_id')})
                 # Handle regular text messages
                 elif msg['message_sender'] == 'USER':
                     logger.info(f"📥 DB load: USER text, db_timestamp={msg.get('timestamp')}")
-                    redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
+                    redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp'), "_request_id": msg.get('request_id')})
                 elif msg['message_sender'] == 'ASSISTANT':
                     logger.info(f"📥 DB load: ASSISTANT text, db_timestamp={msg.get('timestamp')}")
-                    redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
+                    redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp'), "_request_id": msg.get('request_id')})
 
             if redis_messages:
                 await set_chat_messages(session_id, redis_messages)
