@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Tuple
 from datetime import datetime, timedelta
 
 from supabase_client import supabase
+from redis_managers import MissingTimestampError
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,9 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                     # But we CAN add text-only messages before hitting the tool_use
                     should_group = not current_group[3]  # Don't merge if group already has tool_use
                 elif message_role == "user":
-                    # USER: Only merge if same request_id
-                    should_group = (row_request_id == current_group[1])
+                    # USER: Always merge consecutive user messages (Claude requires alternation)
+                    # tool_result blocks will be ordered before text blocks when building content
+                    should_group = True
                 else:
                     should_group = False
             else:
@@ -106,7 +108,8 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 if current_group and current_group[2]:
                     claude_messages.append({
                         "role": current_group[0],
-                        "content": current_group[2]
+                        "content": current_group[2],
+                        "_timestamp": current_group[4]
                     })
 
                 # Start new group
@@ -118,13 +121,14 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
                 if row.get("tool_content"):
                     content_blocks.extend(row["tool_content"])
 
-                current_group = [message_role, row_request_id, content_blocks, has_tool_use]
+                current_group = [message_role, row_request_id, content_blocks, has_tool_use, row.get("timestamp")]
 
         # Flush final group
         if current_group and current_group[2]:
             claude_messages.append({
                 "role": current_group[0],
-                "content": current_group[2]
+                "content": current_group[2],
+                "_timestamp": current_group[4]
             })
 
         return claude_messages
@@ -182,7 +186,7 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         return []
 
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False) -> Optional[Tuple[int, int, List[int]]]:
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None) -> Optional[Tuple[int, int, List[int]]]:
     """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids)
 
     Args:
@@ -196,6 +200,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         content_type: Type of content - 'text', 'tool_use', 'tool_result', or 'mixed'
         tool_content: Optional JSONB content for tool-related messages
         mark_cancelled: If True, mark the message as cancelled (for error messages from cancelled requests)
+        local_objects: Optional LocalObjectManager for caching optimistic ID mappings
 
     Returns:
         Tuple of (conversation_id, message_id, cancelled_message_ids) where cancelled_message_ids
@@ -209,21 +214,36 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         if conversation_id is not None and conversation_id < 0:
             logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
             original_optimistic_id = conversation_id
-            # Look up the real conversation using the optimistic_chat_id
-            conv_result = supabase.table("conversations")\
-                .select("id")\
-                .eq("optimistic_chat_id", str(conversation_id))\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
 
-            if conv_result.data:
-                real_id = conv_result.data[0]["id"]
-                logger.info(f"Found real conversation ID {real_id} for optimistic ID {conversation_id}")
-                conversation_id = real_id
+            # Check cache first if available (direct dict access is safe due to Python's GIL)
+            cached_real_id = None
+            if local_objects and hasattr(local_objects, 'optimistic_to_real'):
+                cached_real_id = local_objects.optimistic_to_real.get(conversation_id)
+
+            if cached_real_id:
+                logger.info(f"CACHE HIT: Found cached real ID {cached_real_id} for optimistic ID {conversation_id}")
+                conversation_id = cached_real_id
             else:
-                logger.info(f"No existing conversation found for optimistic ID {conversation_id}, will create new one")
-                conversation_id = None
+                # Cache miss - look up the real conversation using the optimistic_chat_id
+                conv_result = supabase.table("conversations")\
+                    .select("id")\
+                    .eq("optimistic_chat_id", str(conversation_id))\
+                    .eq("user_id", user_id)\
+                    .is_("deleted_at", "null")\
+                    .execute()
+
+                if conv_result.data:
+                    real_id = conv_result.data[0]["id"]
+                    logger.info(f"Found real conversation ID {real_id} for optimistic ID {conversation_id}")
+                    # Cache the mapping for future use (direct dict write is safe)
+                    if local_objects and hasattr(local_objects, 'optimistic_to_real'):
+                        local_objects.optimistic_to_real[original_optimistic_id] = real_id
+                        local_objects.real_to_optimistic[real_id] = original_optimistic_id
+                        logger.debug(f"Cached ID mapping: optimistic {original_optimistic_id} <-> real {real_id}")
+                    conversation_id = real_id
+                else:
+                    logger.info(f"No existing conversation found for optimistic ID {conversation_id}, will create new one")
+                    conversation_id = None
 
         # Validate client_conversation_id - it should ONLY be negative (optimistic) values
         # Convert to int if it's a string number for validation
@@ -243,20 +263,35 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         if conversation_id is None and client_conversation_id is not None:
             # client_conversation_id should always be negative (optimistic) at this point
             logger.info(f"No conversation_id but have optimistic client_conversation_id {client_conversation_id}, checking for existing conversation")
-            # Look up existing conversation by optimistic_chat_id
-            conv_result = supabase.table("conversations")\
-                .select("id")\
-                .eq("optimistic_chat_id", str(client_conversation_id))\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
 
-            if conv_result.data:
-                conversation_id = conv_result.data[0]["id"]
-                logger.info(f"Found existing conversation {conversation_id} for optimistic_chat_id {client_conversation_id}")
-                # Don't return here - we still need to save the message below
+            # Check cache first if available
+            cached_real_id = None
+            if local_objects and hasattr(local_objects, 'optimistic_to_real'):
+                cached_real_id = local_objects.optimistic_to_real.get(client_conversation_id)
+
+            if cached_real_id:
+                logger.info(f"CACHE HIT: Found cached conversation {cached_real_id} for optimistic_chat_id {client_conversation_id}")
+                conversation_id = cached_real_id
             else:
-                logger.info(f"No existing conversation found for optimistic_chat_id {client_conversation_id}, will create new one")
+                # Cache miss - look up existing conversation by optimistic_chat_id
+                conv_result = supabase.table("conversations")\
+                    .select("id")\
+                    .eq("optimistic_chat_id", str(client_conversation_id))\
+                    .eq("user_id", user_id)\
+                    .is_("deleted_at", "null")\
+                    .execute()
+
+                if conv_result.data:
+                    conversation_id = conv_result.data[0]["id"]
+                    logger.info(f"Found existing conversation {conversation_id} for optimistic_chat_id {client_conversation_id}")
+                    # Cache the mapping for future use
+                    if local_objects and hasattr(local_objects, 'optimistic_to_real'):
+                        local_objects.optimistic_to_real[client_conversation_id] = conversation_id
+                        local_objects.real_to_optimistic[conversation_id] = client_conversation_id
+                        logger.debug(f"Cached ID mapping: optimistic {client_conversation_id} <-> real {conversation_id}")
+                    # Don't return here - we still need to save the message below
+                else:
+                    logger.info(f"No existing conversation found for optimistic_chat_id {client_conversation_id}, will create new one")
 
         # If still no conversation_id, create a new conversation
         if conversation_id is None:
@@ -404,14 +439,16 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 message_data["timestamp"] = assistant_dt.isoformat().replace('+00:00', 'Z')
                 logger.info(f"Setting ASSISTANT message timestamp to {message_data['timestamp']} (1ms after max timestamp {max_timestamp} in request)")
             else:
-                logger.warning(f"No messages found with request_id {request_id}, using default timestamp")
+                raise MissingTimestampError(f"No messages found with request_id {request_id} to calculate ASSISTANT timestamp")
 
-        # Debug: Log exactly what we're sending to Supabase
-        if "timestamp" in message_data:
-            logger.info(f"DEBUG: Inserting message with timestamp field: {message_data['timestamp']}")
-        else:
-            logger.info(f"DEBUG: Inserting message WITHOUT timestamp field (will use DB default)")
+        # Require timestamp - no fallback to DB default
+        if "timestamp" not in message_data:
+            raise MissingTimestampError(
+                f"Required timestamp missing for {message_sender} message in conversation {conversation_id}. "
+                f"USER messages require client_timestamp, ASSISTANT messages require request_id with existing messages."
+            )
 
+        logger.info(f"Inserting message with timestamp: {message_data['timestamp']}")
         result = supabase.table("messages").insert(message_data).execute()
 
         if not result.data:
@@ -444,6 +481,83 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")
         return None
+
+
+def save_messages_to_db(messages: List[Dict], conversation_id: int, request_id: str) -> List[Optional[int]]:
+    """Save multiple messages atomically to the database using batch insert.
+
+    This is used for atomic insertion of related messages (e.g., tool_use + pending tool_result)
+    to prevent race conditions where another worker might read partial state.
+
+    Args:
+        messages: List of message dicts, each containing:
+            - content: Text content of the message
+            - message_sender: 'USER' or 'ASSISTANT'
+            - content_type: 'text', 'tool_use', 'tool_result', or 'mixed'
+            - tool_content: Optional JSONB content for tool-related messages
+            - timestamp: ISO timestamp string for message ordering
+        conversation_id: The conversation ID (must be resolved, not optimistic)
+        request_id: Request ID for tracking
+
+    Returns:
+        List of message IDs for each inserted message, or empty list on failure
+    """
+    try:
+        if not messages:
+            logger.warning("save_messages_to_db called with empty messages list")
+            return []
+
+        logger.info(f"save_messages_to_db called: conversation_id={conversation_id}, request_id={request_id}, message_count={len(messages)}")
+
+        # Prepare all message data with conversation_id and request_id
+        message_data_list = []
+        for i, msg in enumerate(messages):
+            message_data = {
+                "conversation_id": conversation_id,
+                "content": msg.get("content", ""),
+                "message_sender": msg["message_sender"],
+                "content_type": msg.get("content_type", "text"),
+                "request_id": request_id
+            }
+
+            # Add tool_content if provided
+            if msg.get("tool_content") is not None:
+                message_data["tool_content"] = msg["tool_content"]
+
+            # Add timestamp if provided
+            if msg.get("timestamp"):
+                message_data["timestamp"] = msg["timestamp"]
+
+            message_data_list.append(message_data)
+            logger.info(f"  Message {i}: sender={msg['message_sender']}, type={msg.get('content_type', 'text')}, timestamp={msg.get('timestamp', 'default')}")
+
+        # Batch insert all messages atomically
+        result = supabase.table("messages").insert(message_data_list).execute()
+
+        if not result.data:
+            logger.error(f"Failed to batch save {len(messages)} messages to conversation {conversation_id} - no data returned")
+            return []
+
+        # Extract saved message IDs
+        message_ids = [msg.get("id") for msg in result.data]
+        logger.info(f"Successfully batch saved {len(message_ids)} messages to conversation {conversation_id}: {message_ids}")
+
+        # Update conversation timestamps
+        update_result = supabase.table("conversations").update({
+            "last_message_time": "now()",
+            "updated_at": "now()"
+        }).eq("id", conversation_id).execute()
+
+        if update_result.data:
+            logger.info(f"Updated conversation {conversation_id} timestamps after batch insert")
+        else:
+            logger.warning(f"Failed to update conversation {conversation_id} timestamps after batch insert")
+
+        return message_ids
+
+    except Exception as e:
+        logger.error(f"Error batch saving messages to database: {str(e)}")
+        return []
 
 
 def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_content: dict, user_id: int = None) -> bool:
@@ -512,13 +626,22 @@ def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_cont
             return False
 
         message_id = message_to_update["id"]
+        existing_tool_content = message_to_update.get("tool_content", [])
 
-        # Update the tool_content with the actual result
-        updated_tool_content = [{
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": json.dumps(result_content)
-        }]
+        # Update only the SPECIFIC tool_result block, keep others intact
+        # This is important when multiple tool_results are in the same message
+        updated_tool_content = []
+        for block in existing_tool_content:
+            if isinstance(block, dict) and block.get("tool_use_id") == tool_use_id:
+                # Replace this specific block with actual result
+                updated_tool_content.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": json.dumps(result_content)
+                })
+            else:
+                # Keep other blocks unchanged
+                updated_tool_content.append(block)
 
         # Update the message in the database
         update_result = supabase.table("messages")\

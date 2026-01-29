@@ -14,10 +14,11 @@ import pytz
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Set httpx, httpcore, and hpack loggers to INFO to reduce verbosity
+# Set httpx, httpcore, hpack, and anthropic loggers to INFO to reduce verbosity
 logging.getLogger("httpx").setLevel(logging.INFO)
 logging.getLogger("httpcore").setLevel(logging.INFO)
 logging.getLogger("hpack").setLevel(logging.INFO)
+logging.getLogger("anthropic").setLevel(logging.INFO)
 
 DEFAULT_PREFERENCES = {
     'asana_workspace_preference': None

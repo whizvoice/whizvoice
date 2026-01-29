@@ -33,10 +33,21 @@ async def agent_launch_app(app_name: str, user_id: str = None, websocket = None,
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
+        # Debug logging for optimistic ID migration investigation
+        logger.info(f"🔧 TOOL_DEBUG agent_launch_app: app_name={app_name}, user_id={user_id}")
+        logger.info(f"🔧 TOOL_DEBUG agent_launch_app: websocket is {'present' if websocket else 'None'}")
+        logger.info(f"🔧 TOOL_DEBUG agent_launch_app: conversation_id={conversation_id}")
+        if websocket:
+            try:
+                logger.info(f"🔧 TOOL_DEBUG agent_launch_app: websocket.client_state={websocket.client_state}")
+            except Exception as state_err:
+                logger.warning(f"🔧 TOOL_DEBUG agent_launch_app: Could not get websocket.client_state: {state_err}")
+
         logger.info(f"Launching app '{app_name}' (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
+            logger.error(f"🔧 TOOL_DEBUG agent_launch_app: FAILED - No WebSocket, user_id={user_id}, conversation_id={conversation_id}")
             logger.error("No WebSocket connection available for app launch")
             return {
                 "error": "No connection to device available",
@@ -122,10 +133,21 @@ async def agent_disable_continuous_listening(user_id: str = None, websocket = No
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
+        # Debug logging for optimistic ID migration investigation
+        logger.info(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: user_id={user_id}")
+        logger.info(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: websocket is {'present' if websocket else 'None'}")
+        logger.info(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: conversation_id={conversation_id}")
+        if websocket:
+            try:
+                logger.info(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: websocket.client_state={websocket.client_state}")
+            except Exception as state_err:
+                logger.warning(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: Could not get websocket.client_state: {state_err}")
+
         logger.info(f"Disabling continuous listening (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
+            logger.error(f"🔧 TOOL_DEBUG agent_disable_continuous_listening: FAILED - No WebSocket, user_id={user_id}, conversation_id={conversation_id}")
             logger.error("No WebSocket connection available for disable_continuous_listening")
             return {
                 "error": "No connection to device available",
@@ -210,10 +232,21 @@ async def agent_set_tts_enabled(enabled: bool, user_id: str = None, websocket = 
         # Generate a unique request ID for tracking
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
+        # Debug logging for optimistic ID migration investigation
+        logger.info(f"🔧 TOOL_DEBUG agent_set_tts_enabled: enabled={enabled}, user_id={user_id}")
+        logger.info(f"🔧 TOOL_DEBUG agent_set_tts_enabled: websocket is {'present' if websocket else 'None'}")
+        logger.info(f"🔧 TOOL_DEBUG agent_set_tts_enabled: conversation_id={conversation_id}")
+        if websocket:
+            try:
+                logger.info(f"🔧 TOOL_DEBUG agent_set_tts_enabled: websocket.client_state={websocket.client_state}")
+            except Exception as state_err:
+                logger.warning(f"🔧 TOOL_DEBUG agent_set_tts_enabled: Could not get websocket.client_state: {state_err}")
+
         logger.info(f"Setting TTS enabled to {enabled} (user: {user_id}, request: {tool_request_id})")
 
         # If no WebSocket provided, return error
         if not websocket:
+            logger.error(f"🔧 TOOL_DEBUG agent_set_tts_enabled: FAILED - No WebSocket, user_id={user_id}, conversation_id={conversation_id}")
             logger.error("No WebSocket connection available for set_tts_enabled")
             return {
                 "error": "No connection to device available",
@@ -281,6 +314,73 @@ async def agent_set_tts_enabled(enabled: bool, user_id: str = None, websocket = 
             "success": False
         }
 
+async def agent_close_app(user_id: str = None, websocket = None,
+                          tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Close the WhizVoice app on the user's Android device.
+    This will fully exit the application, stopping all services and activities.
+
+    Args:
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the operation
+    """
+    try:
+        # Generate a unique request ID for tracking
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Closing app (user: {user_id}, request: {tool_request_id})")
+
+        # If no WebSocket provided, return error
+        if not websocket:
+            logger.error("No WebSocket connection available for close_app")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        # Create the WebSocket message for the Android app
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "agent_close_app",
+            "request_id": tool_request_id,
+            "params": {},
+            "conversation_id": conversation_id
+        }
+
+        # Send to Android app via WebSocket
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending close_app message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent close_app command")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        # Don't wait for result - the app will be closing and the WebSocket will disconnect
+        return {
+            "status": "sent",
+            "message": "Close app command sent to device",
+            "request_id": tool_request_id,
+            "success": True
+        }
+
+    except Exception as e:
+        logger.error(f"Error in close_app for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to close app: {str(e)}",
+            "success": False
+        }
+
 # Define the Screen Agent tools for Claude
 screen_agent_tools = [
     {
@@ -321,6 +421,16 @@ screen_agent_tools = [
                 }
             },
             "required": ["enabled"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_close_app",
+        "description": "Close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, or quit the app.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     }
 ]

@@ -9,12 +9,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from asana_tools import (
     get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date,
-    get_parent_tasks, get_new_asana_task_id, delete_asana_task
+    get_parent_tasks, get_new_asana_task_id, delete_asana_task,
+    _asana_client_cache, _user_gid_cache
 )
 
 class TestAsanaTools(unittest.TestCase):
     def setUp(self):
         self.test_user_id = "test_user_123"
+        # Clear caches before each test to avoid cross-test pollution
+        _asana_client_cache.clear()
+        _user_gid_cache.clear()
         # Mock datetime to control time-based tests
         self.fixed_date = datetime(2024, 3, 15, 10, 0, 0)
         self.today = '2024-03-15'
@@ -59,12 +63,13 @@ class TestAsanaTools(unittest.TestCase):
         """Test getting workspaces when no access token is available"""
         # Mock no token
         mock_get_token.return_value = None
-        
-        # Call function
-        result = get_asana_workspaces(self.test_user_id)
-        
-        # Assert
-        self.assertEqual(result, "Error: Asana access token not found in user preferences.")
+
+        # Call function and expect ValueError
+        with self.assertRaises(ValueError) as context:
+            get_asana_workspaces('test_user_no_token_workspaces')
+
+        # Assert error message (from asana_tools.py:27)
+        self.assertEqual(str(context.exception), "Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
 
     @patch('asana_tools.get_current_date')
     @patch('asana_tools.get_preference')
@@ -124,16 +129,20 @@ class TestAsanaTools(unittest.TestCase):
         self.assertEqual(result, expected_error)
 
     @patch('asana_tools.get_decrypted_preference_key')
-    def test_get_tasks_no_token(self, mock_get_token):
+    @patch('asana_tools.get_preference')
+    def test_get_tasks_no_token(self, mock_get_preference, mock_get_token):
         """Test getting tasks when no access token is available"""
+        # Mock workspace preference to pass that check
+        mock_get_preference.return_value = 'workspace123'
         # Mock no token
         mock_get_token.return_value = None
-        
-        # Call function
-        result = get_asana_tasks(self.test_user_id)
-        
-        # Assert
-        self.assertEqual(result, "Error: Asana access token not found in user preferences.")
+
+        # Call function and expect ValueError
+        with self.assertRaises(ValueError) as context:
+            get_asana_tasks('test_user_no_token')
+
+        # Assert error message (from asana_tools.py:27)
+        self.assertEqual(str(context.exception), "Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
 
     def test_get_date_range(self):
         """Test date range parsing"""
@@ -360,11 +369,12 @@ class TestAsanaTools(unittest.TestCase):
         # Mock no token
         mock_get_token.return_value = None
 
-        # Call function
-        result = delete_asana_task(self.test_user_id, 'task123')
+        # Call function and expect ValueError
+        with self.assertRaises(ValueError) as context:
+            delete_asana_task('test_user_no_token', 'task123')
 
-        # Assert
-        self.assertEqual(result, "Error: Asana access token not found in user preferences.")
+        # Assert error message (from asana_tools.py:27)
+        self.assertEqual(str(context.exception), "Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
 
 if __name__ == '__main__':
     unittest.main() 

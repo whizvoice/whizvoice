@@ -5,74 +5,279 @@ import json
 import time
 import os
 import asyncio
-from typing import Dict, List, Set, Optional, Tuple, Any
+from typing import Dict, List, Set, Optional, Tuple, Any, Union
 from fastapi import WebSocket
 import redis.asyncio as redis
 import logging
 
 logger = logging.getLogger(__name__)
 
+
+class MissingTimestampError(ValueError):
+    """Raised when a required timestamp is missing or invalid"""
+    pass
+
+
 # Server ID for multi-server deployments
 SERVER_ID = os.getenv("SERVER_ID", f"server_{os.getpid()}")
 
 
 class ChatSessionManager:
-    """Manages chat message history in Redis"""
-    
+    """Manages chat message history in Redis using ZSET for automatic timestamp ordering"""
+
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
         self.ttl = 900  # 15 minutes
-        
-    async def get(self, session_id: str) -> List[Dict]:
-        """Get chat history for a session"""
-        data = await self.redis.get(f"chat_session:{session_id}")
-        return json.loads(data) if data else []
-    
+
+    def _timestamp_to_score(self, timestamp: Optional[str]) -> float:
+        """Convert ISO timestamp string to epoch float for ZSET score.
+
+        Raises:
+            MissingTimestampError: If timestamp is None or invalid format
+        """
+        if not timestamp:
+            raise MissingTimestampError("Required timestamp was not provided")
+
+        from datetime import datetime
+        import re
+        try:
+            # Normalize the timestamp for Python's fromisoformat()
+            ts = timestamp.replace('Z', '+00:00')
+
+            # Fix fractional seconds: Python < 3.11 requires exactly 3 or 6 digits
+            # Match pattern like ".4+00:00" or ".40+00:00" and pad to 3 digits
+            match = re.match(r'^(.+\.)(\d{1,6})([+-].*)$', ts)
+            if match:
+                prefix, frac, suffix = match.groups()
+                # Pad or truncate to exactly 6 digits for consistency
+                frac_padded = frac.ljust(6, '0')[:6]
+                ts = f"{prefix}{frac_padded}{suffix}"
+
+            dt = datetime.fromisoformat(ts)
+            return dt.timestamp()
+        except (ValueError, AttributeError) as e:
+            raise MissingTimestampError(f"Invalid timestamp format: {timestamp}, error: {e}")
+
+    # --- Session Redirect Methods (for optimistic ID migration) ---
+
+    async def set_redirect(self, old_session_id: str, new_session_id: str):
+        """Store a redirect from old session_id to new session_id.
+
+        This is used when migrating from optimistic to real conversation IDs.
+        The redirect ensures that any operations on the old session_id
+        are automatically forwarded to the new session_id.
+        """
+        key = f"session_redirect:{old_session_id}"
+        await self.redis.set(key, new_session_id, ex=3600)  # 1 hour TTL
+        logger.info(f"Set session redirect: {old_session_id} → {new_session_id}")
+
+    async def get_redirect(self, session_id: str) -> Optional[str]:
+        """Get redirect target for a session_id, if one exists."""
+        key = f"session_redirect:{session_id}"
+        result = await self.redis.get(key)
+        if result:
+            return result.decode() if isinstance(result, bytes) else result
+        return None
+
+    async def resolve_session_id(self, session_id: str) -> str:
+        """Resolve a session_id to its canonical form (following redirects).
+
+        If a redirect exists, returns the target session_id.
+        Otherwise returns the original session_id.
+        """
+        redirect = await self.get_redirect(session_id)
+        if redirect:
+            logger.info(f"Resolved session redirect: {session_id} → {redirect}")
+            return redirect
+        return session_id
+
+    async def rename_session(self, old_session_id: str, new_session_id: str) -> bool:
+        """Rename a session with redirect-first for safety.
+
+        This atomically:
+        1. Sets a redirect from old to new (FIRST - critical for race condition handling)
+        2. Renames the Redis key if it exists
+
+        Any in-flight operations using the old session_id will be redirected.
+        """
+        old_key = f"chat_session:{old_session_id}"
+        new_key = f"chat_session:{new_session_id}"
+
+        # CRITICAL: Set redirect FIRST to minimize race window
+        await self.set_redirect(old_session_id, new_session_id)
+
+        # Then try to rename (best effort)
+        try:
+            if await self.redis.exists(old_key) and not await self.redis.exists(new_key):
+                await self.redis.rename(old_key, new_key)
+                logger.info(f"Renamed session {old_session_id} → {new_session_id}")
+            elif await self.redis.exists(new_key):
+                logger.info(f"Session {new_session_id} already exists, redirect set only")
+            else:
+                logger.info(f"Old session {old_session_id} doesn't exist, redirect set only")
+        except Exception as e:
+            logger.warning(f"Rename failed (redirect still set): {e}")
+
+        return True
+
+    # --- End Session Redirect Methods ---
+
+    async def get(self, session_id: str, include_cancelled: bool = False) -> List[Dict]:
+        """Get chat history for a session, ordered by timestamp"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
+        key = f"chat_session:{session_id}"
+        # ZRANGE returns members in score order (lowest to highest = oldest to newest)
+        members = await self.redis.zrange(key, 0, -1)
+        messages = []
+        for member in members:
+            msg = json.loads(member)
+            # Filter out cancelled messages unless explicitly requested
+            if include_cancelled or not msg.get("_cancelled"):
+                messages.append(msg)
+        return messages
+
     async def set(self, session_id: str, messages: List[Dict]):
-        """Set entire chat history"""
-        await self.redis.set(
-            f"chat_session:{session_id}",
-            json.dumps(messages),
-            ex=self.ttl
-        )
-    
+        """Set entire chat history using ZSET"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
+        key = f"chat_session:{session_id}"
+        # Delete existing data
+        await self.redis.delete(key)
+
+        if messages:
+            logger.info(f"📝 set() called for session {session_id} with {len(messages)} messages")
+            # Add all messages with their timestamps as scores
+            for i, msg in enumerate(messages):
+                timestamp = msg.get("_timestamp")
+                score = self._timestamp_to_score(timestamp)
+                role = msg.get("role", "unknown")
+                content_preview = str(msg.get("content", ""))[:50]
+                logger.info(f"📝 set() msg[{i}]: role={role}, _timestamp={timestamp}, score={score}, content={content_preview}...")
+                await self.redis.zadd(key, {json.dumps(msg): score})
+
+            await self.redis.expire(key, self.ttl)
+
     async def set_messages(self, session_id: str, messages: List[Dict]):
         """Alias for set() method - for backward compatibility"""
         await self.set(session_id, messages)
-    
+
     async def get_messages(self, session_id: str) -> List[Dict]:
         """Alias for get() method - for backward compatibility"""
         return await self.get(session_id)
-    
-    async def add_message(self, session_id: str, message: Dict):
-        """Alias for append() method - for backward compatibility"""
-        await self.append(session_id, message)
-    
+
+    async def add_message(self, session_id: str, message: Union[Dict, List[Dict]], timestamp: Union[str, List[str]] = None, request_id: str = None):
+        """Add message(s) to the session using ZSET for automatic ordering.
+
+        Args:
+            session_id: The session ID
+            message: Single message dict OR list of message dicts for atomic batch add
+            timestamp: Single timestamp OR list of timestamps (one per message if batch)
+            request_id: Request ID (applied to all messages)
+
+        When a list of messages is passed, they are added atomically using a Redis
+        pipeline with transaction=True. This prevents race conditions where another
+        worker might read partial state between writes.
+
+        Includes check-after-write pattern to handle race conditions where
+        a redirect is created while the write is in progress.
+        """
+        original_session_id = session_id
+        resolved_id = await self.resolve_session_id(session_id)
+        key = f"chat_session:{resolved_id}"
+
+        if isinstance(message, list):
+            # ATOMIC BATCH: Use pipeline with transaction for multiple messages
+            messages = message
+            timestamps = timestamp if isinstance(timestamp, list) else [timestamp] * len(messages)
+
+            # Prepare all messages with metadata
+            prepared_messages = []
+            for msg, ts in zip(messages, timestamps):
+                msg_copy = msg.copy()
+                if ts:
+                    msg_copy["_timestamp"] = ts
+                if request_id:
+                    msg_copy["_request_id"] = request_id
+                score = self._timestamp_to_score(ts)
+                msg_json = json.dumps(msg_copy)
+                prepared_messages.append((msg_json, score))
+
+            # Atomic write using pipeline
+            async with self.redis.pipeline(transaction=True) as pipe:
+                for msg_json, score in prepared_messages:
+                    pipe.zadd(key, {msg_json: score})
+                pipe.expire(key, self.ttl)
+                await pipe.execute()
+
+            # CHECK-AFTER-WRITE: Handle race condition where redirect was created during our write
+            if resolved_id == original_session_id:
+                current_redirect = await self.resolve_session_id(original_session_id)
+                if current_redirect != resolved_id:
+                    # Redirect appeared! Duplicate all messages to correct location
+                    new_key = f"chat_session:{current_redirect}"
+                    async with self.redis.pipeline(transaction=True) as pipe:
+                        for msg_json, score in prepared_messages:
+                            pipe.zadd(new_key, {msg_json: score})
+                        pipe.expire(new_key, self.ttl)
+                        await pipe.execute()
+                    logger.info(f"Check-after-write: duplicated {len(messages)} messages to {current_redirect} (orphan at {resolved_id} will expire)")
+        else:
+            # SINGLE MESSAGE: Original logic
+            # Add metadata to message
+            if timestamp:
+                message["_timestamp"] = timestamp
+            if request_id:
+                message["_request_id"] = request_id
+
+            # Convert timestamp to epoch float for score
+            score = self._timestamp_to_score(timestamp)
+            msg_json = json.dumps(message)
+
+            await self.redis.zadd(key, {msg_json: score})
+            await self.redis.expire(key, self.ttl)
+
+            # CHECK-AFTER-WRITE: Handle race condition where redirect was created during our write
+            if resolved_id == original_session_id:  # We used original ID (wasn't already redirected)
+                current_redirect = await self.resolve_session_id(original_session_id)
+                if current_redirect != resolved_id:
+                    # Redirect appeared! Duplicate message to correct location
+                    new_key = f"chat_session:{current_redirect}"
+                    await self.redis.zadd(new_key, {msg_json: score})
+                    await self.redis.expire(new_key, self.ttl)
+                    logger.info(f"Check-after-write: duplicated message to {current_redirect} (orphan at {resolved_id} will expire)")
+
+        # Trim if too long (keep messages with highest scores = most recent by timestamp)
+        count = await self.redis.zcard(key)
+        if count > 100:
+            # Remove oldest messages (lowest scores)
+            await self.redis.zremrangebyrank(key, 0, count - 101)
+
     async def append(self, session_id: str, message: Dict):
-        """Append a message to chat history"""
-        # Get existing messages
-        messages = await self.get(session_id)
-        messages.append(message)
-        
-        # Trim if too long (keep last 100 messages)
-        if len(messages) > 100:
-            messages = messages[-100:]
-        
-        await self.set(session_id, messages)
-    
+        """Append a message to chat history - backward compatible, uses current time as timestamp"""
+        await self.add_message(session_id, message)
+
     async def extend(self, session_id: str, new_messages: List[Dict]):
         """Extend chat history with multiple messages"""
-        messages = await self.get(session_id)
-        messages.extend(new_messages)
-        
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
+        key = f"chat_session:{session_id}"
+        for msg in new_messages:
+            timestamp = msg.get("_timestamp")
+            score = self._timestamp_to_score(timestamp)
+            await self.redis.zadd(key, {json.dumps(msg): score})
+
+        await self.redis.expire(key, self.ttl)
+
         # Trim if too long
-        if len(messages) > 100:
-            messages = messages[-100:]
-        
-        await self.set(session_id, messages)
-    
+        count = await self.redis.zcard(key)
+        if count > 100:
+            await self.redis.zremrangebyrank(key, 0, count - 101)
+
     async def delete(self, session_id: str):
         """Delete a session"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         await self.redis.delete(f"chat_session:{session_id}")
 
     async def clear(self, session_id: str):
@@ -81,7 +286,120 @@ class ChatSessionManager:
 
     async def exists(self, session_id: str) -> bool:
         """Check if session exists"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
         return await self.redis.exists(f"chat_session:{session_id}")
+
+    async def mark_cancelled(self, session_id: str, request_id: str):
+        """Mark all messages with given request_id as cancelled"""
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
+        key = f"chat_session:{session_id}"
+        members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
+        for member, score in members_with_scores:
+            msg = json.loads(member)
+            if msg.get("_request_id") == request_id:
+                # Remove old message and add updated one with same score
+                await self.redis.zrem(key, member)
+                msg["_cancelled"] = True
+                await self.redis.zadd(key, {json.dumps(msg): score})
+
+    async def update_pending_result_timestamp(self, session_id: str, tool_use_ids: List[str], new_timestamp: str):
+        """Update timestamp for pending tool_result message to sync with DB.
+
+        In a ZSET, the member (JSON string) is the key, so we must:
+        1. Remove the old member
+        2. Update _timestamp in the message
+        3. Add the new member with new score
+        """
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
+        key = f"chat_session:{session_id}"
+        members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
+
+        for member, old_score in members_with_scores:
+            msg = json.loads(member)
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                # Check if this message contains any of our pending tool_results
+                has_pending = any(
+                    block.get("tool_use_id") in tool_use_ids and block.get("content") == "Result pending..."
+                    for block in msg.get("content", [])
+                    if isinstance(block, dict)
+                )
+                if has_pending:
+                    # Remove old, update timestamp, add new
+                    await self.redis.zrem(key, member)
+                    msg["_timestamp"] = new_timestamp
+                    new_score = self._timestamp_to_score(new_timestamp)
+                    await self.redis.zadd(key, {json.dumps(msg): new_score})
+                    logger.info(f"Updated pending result timestamp in Redis: {new_timestamp}")
+                    return True
+        return False
+
+    async def update_tool_results(self, session_id: str, tool_updates: Dict[str, str]) -> int:
+        """Update pending tool_results with actual results.
+
+        Only removes and re-adds the specific messages that contain updated tool_results,
+        rather than replacing all messages in the zset.
+
+        Args:
+            session_id: The session ID
+            tool_updates: Dict mapping tool_use_id -> actual result content (JSON string)
+
+        Returns:
+            Number of messages updated
+        """
+        # Resolve any redirect first
+        session_id = await self.resolve_session_id(session_id)
+        key = f"chat_session:{session_id}"
+        members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
+
+        updated_count = 0
+        tool_ids_to_update = set(tool_updates.keys())
+
+        for member, score in members_with_scores:
+            msg = json.loads(member)
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                # Check if this message contains any pending tool_results we need to update
+                needs_update = False
+                for block in msg.get("content", []):
+                    if isinstance(block, dict) and \
+                       block.get("type") == "tool_result" and \
+                       block.get("tool_use_id") in tool_ids_to_update:
+                        needs_update = True
+                        break
+
+                if needs_update:
+                    # Remove old message
+                    await self.redis.zrem(key, member)
+
+                    # Update the tool_result blocks
+                    for i, block in enumerate(msg["content"]):
+                        if isinstance(block, dict) and \
+                           block.get("type") == "tool_result" and \
+                           block.get("tool_use_id") in tool_updates:
+                            tool_use_id = block["tool_use_id"]
+                            msg["content"][i] = {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": tool_updates[tool_use_id]
+                            }
+                            logger.info(f"Updated tool_result for tool_use_id={tool_use_id}")
+
+                    # Add updated message back with same score
+                    await self.redis.zadd(key, {json.dumps(msg): score})
+                    updated_count += 1
+
+                    # Remove updated IDs from the set we're looking for
+                    for block in msg.get("content", []):
+                        if isinstance(block, dict) and block.get("tool_use_id") in tool_ids_to_update:
+                            tool_ids_to_update.discard(block.get("tool_use_id"))
+
+                    # Exit early if we've found all the tool_results
+                    if not tool_ids_to_update:
+                        break
+
+        return updated_count
 
 
 class UserSessionManager:

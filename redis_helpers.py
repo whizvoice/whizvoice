@@ -1,7 +1,7 @@
 """
 Helper functions for Redis-backed session management with fallback to local storage
 """
-from typing import List, Dict, Set, Optional, Any
+from typing import List, Dict, Set, Optional, Any, Union
 import asyncio
 import logging
 
@@ -51,15 +51,61 @@ async def get_chat_messages(session_id: str) -> List[Dict]:
             return chat_sessions.get(session_id, [])
 
 
-async def add_chat_message(session_id: str, message: Dict):
-    """Add a chat message to a session in Redis or local storage"""
+async def get_chat_messages_for_claude(session_id: str) -> List[Dict]:
+    """Get chat messages for sending to Claude API, with internal metadata stripped.
+
+    Returns new message dicts without _timestamp, _request_id, _cancelled fields.
+    Does NOT mutate the original messages in Redis.
+    """
+    messages = await get_chat_messages(session_id)
+    # Create new dicts without internal metadata fields
+    return [
+        {k: v for k, v in msg.items() if k not in ('_timestamp', '_request_id', '_cancelled')}
+        for msg in messages
+    ]
+
+
+async def add_chat_message(session_id: str, message: Union[Dict, List[Dict]], timestamp: Union[str, List[str]] = None, request_id: str = None):
+    """Add chat message(s) to a session in Redis or local storage.
+
+    Args:
+        session_id: The session ID
+        message: Single message dict OR list of message dicts for atomic batch add
+        timestamp: Single timestamp OR list of timestamps (one per message if batch)
+        request_id: Request ID (applied to all messages)
+
+    When a list of messages is passed with Redis, they are added atomically
+    using a pipeline transaction. This prevents race conditions where another
+    worker might read partial state between writes.
+    """
     if redis_managers:
-        await redis_managers["chat_sessions"].add_message(session_id, message)
+        await redis_managers["chat_sessions"].add_message(session_id, message, timestamp, request_id)
     else:
-        async with chat_sessions_lock:
-            if session_id not in chat_sessions:
-                chat_sessions[session_id] = []
-            chat_sessions[session_id].append(message)
+        # Local fallback
+        if isinstance(message, list):
+            # Batch add - add each message with its corresponding timestamp
+            messages = message
+            timestamps = timestamp if isinstance(timestamp, list) else [timestamp] * len(messages)
+            async with chat_sessions_lock:
+                if session_id not in chat_sessions:
+                    chat_sessions[session_id] = []
+                for msg, ts in zip(messages, timestamps):
+                    msg_copy = msg.copy()
+                    if ts:
+                        msg_copy["_timestamp"] = ts
+                    if request_id:
+                        msg_copy["_request_id"] = request_id
+                    chat_sessions[session_id].append(msg_copy)
+        else:
+            # Single message - existing logic
+            if timestamp:
+                message["_timestamp"] = timestamp
+            if request_id:
+                message["_request_id"] = request_id
+            async with chat_sessions_lock:
+                if session_id not in chat_sessions:
+                    chat_sessions[session_id] = []
+                chat_sessions[session_id].append(message)
 
 
 async def set_chat_messages(session_id: str, messages: List[Dict]):
@@ -79,6 +125,92 @@ async def clear_chat_session(session_id: str):
         async with chat_sessions_lock:
             if session_id in chat_sessions:
                 del chat_sessions[session_id]
+
+
+async def rename_chat_session(old_session_id: str, new_session_id: str) -> bool:
+    """Rename a chat session from old_session_id to new_session_id.
+
+    This is used during optimistic ID → real ID migration to ensure
+    all workers use the same session key.
+
+    The operation:
+    1. Sets a redirect from old to new (ensures in-flight operations find the right key)
+    2. Renames the Redis key if it exists
+
+    Returns True if successful.
+    """
+    if redis_managers:
+        return await redis_managers["chat_sessions"].rename_session(old_session_id, new_session_id)
+    else:
+        # Local fallback
+        async with chat_sessions_lock:
+            if old_session_id in chat_sessions and new_session_id not in chat_sessions:
+                chat_sessions[new_session_id] = chat_sessions.pop(old_session_id)
+                return True
+            elif new_session_id in chat_sessions:
+                # New session already exists, just remove old one
+                if old_session_id in chat_sessions:
+                    del chat_sessions[old_session_id]
+                return True
+        return False
+
+
+async def mark_chat_messages_cancelled(session_id: str, request_id: str):
+    """Mark messages with given request_id as cancelled"""
+    if redis_managers:
+        await redis_managers["chat_sessions"].mark_cancelled(session_id, request_id)
+    else:
+        async with chat_sessions_lock:
+            if session_id in chat_sessions:
+                for msg in chat_sessions[session_id]:
+                    if msg.get("_request_id") == request_id:
+                        msg["_cancelled"] = True
+
+
+async def update_pending_result_timestamp(session_id: str, tool_use_ids: List[str], new_timestamp: str) -> bool:
+    """Update pending tool_result timestamp in Redis to sync with DB"""
+    if redis_managers:
+        return await redis_managers["chat_sessions"].update_pending_result_timestamp(
+            session_id, tool_use_ids, new_timestamp
+        )
+    return False
+
+
+async def update_tool_results(session_id: str, tool_updates: Dict[str, str]) -> int:
+    """Update pending tool_results with actual results.
+
+    Only updates the specific messages that changed, not all messages.
+
+    Args:
+        session_id: The session ID
+        tool_updates: Dict mapping tool_use_id -> actual result content (JSON string)
+
+    Returns:
+        Number of messages updated
+    """
+    if redis_managers:
+        return await redis_managers["chat_sessions"].update_tool_results(session_id, tool_updates)
+    else:
+        # Local fallback - do a full replacement (less efficient but works)
+        async with chat_sessions_lock:
+            if session_id not in chat_sessions:
+                return 0
+            messages = chat_sessions[session_id]
+            updated = 0
+            for msg in messages:
+                if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                    for i, block in enumerate(msg["content"]):
+                        if isinstance(block, dict) and \
+                           block.get("type") == "tool_result" and \
+                           block.get("tool_use_id") in tool_updates:
+                            tool_use_id = block["tool_use_id"]
+                            msg["content"][i] = {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": tool_updates[tool_use_id]
+                            }
+                            updated += 1
+            return updated
 
 
 # User Session Management

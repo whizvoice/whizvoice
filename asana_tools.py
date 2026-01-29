@@ -5,15 +5,39 @@ import json
 from preferences import get_preference, set_preference, get_decrypted_preference_key, get_user_timezone
 import asyncio
 import pytz
+import time
+
+# Module-level caches for performance
+_asana_client_cache = {}  # user_id -> (client, timestamp)
+_user_gid_cache = {}  # user_id -> asana_gid
+CACHE_TTL = 300  # 5 minutes
 
 def get_asana_client(user_id):
-    """Get an Asana client configured with the user's access token."""
+    """Get an Asana client configured with the user's access token. Cached per user."""
+    # Check cache first
+    if user_id in _asana_client_cache:
+        client, timestamp = _asana_client_cache[user_id]
+        if time.time() - timestamp < CACHE_TTL:
+            return client
+
+    # Create new client
     configuration = asana.Configuration()
     token = get_decrypted_preference_key(user_id, 'asana_access_token')
     if not token:
         raise ValueError("Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
     configuration.access_token = token
-    return asana.ApiClient(configuration)
+    client = asana.ApiClient(configuration)
+
+    _asana_client_cache[user_id] = (client, time.time())
+    return client
+
+def get_asana_user_gid(user_id, api_client):
+    """Get the Asana user GID for "me", cached per user."""
+    if user_id not in _user_gid_cache:
+        users_api = asana.UsersApi(api_client)
+        me = users_api.get_user("me", {})
+        _user_gid_cache[user_id] = me['gid']
+    return _user_gid_cache[user_id]
 
 def get_date_range(range_str=None):
     today = datetime.now().date()
@@ -32,17 +56,14 @@ def get_date_range(range_str=None):
     return today, today  # Default to today if range not recognized
 
 def get_asana_workspaces(user_id):
-    configuration = asana.Configuration()
-    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
-    if not asana_access_token:
-        return "Error: Asana access token not found in user preferences."
-    configuration.access_token = asana_access_token
-    api_client = asana.ApiClient(configuration)
-
     try:
+        api_client = get_asana_client(user_id)
         workspaces_api = asana.WorkspacesApi(api_client)
         workspaces = list(workspaces_api.get_workspaces(opts={}))
         return workspaces
+    except ValueError as e:
+        # Re-raise the token error to be handled by the WebSocket endpoint
+        raise
     except AsanaError as e:
         status_code = e.status if hasattr(e, 'status') else 500
         if status_code == 401:
@@ -51,21 +72,12 @@ def get_asana_workspaces(user_id):
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def get_asana_tasks(user_id: str, start_date=None, end_date=None):
-    configuration = asana.Configuration()
-    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
-    if not asana_access_token:
-        return "Error: Asana access token not found in user preferences."
-    configuration.access_token = asana_access_token
-    api_client = asana.ApiClient(configuration)
-    
     workspace_gid = get_preference(user_id, 'asana_workspace_preference')
     if not workspace_gid:
         return "Error identifying user's preferred workspace to get tasks from. Please set a preferred workspace using the set_workspace_preference tool."
     try:
         api_client = get_asana_client(user_id)
-        # Get current user
-        users_api = asana.UsersApi(api_client)
-        me = users_api.get_user("me", {})
+        user_gid = get_asana_user_gid(user_id, api_client)
 
         # Handle date defaults
         today = get_current_date()
@@ -73,13 +85,13 @@ def get_asana_tasks(user_id: str, start_date=None, end_date=None):
             start_date = today
         if not end_date:
             end_date = start_date
-            
+
         tasks_api = asana.TasksApi(api_client)
-        
+
         # Get tasks using the regular Tasks API
         tasks = list(tasks_api.get_tasks({
             'workspace': workspace_gid,
-            'assignee': me['gid'],
+            'assignee': user_gid,
             'completed_since': 'now',
             'opt_fields': 'name,due_on,completed,projects.name'
         }))
@@ -118,28 +130,19 @@ def get_current_date(user_id: str = None) -> str:
     return datetime.now(pytz.timezone('America/Los_Angeles')).strftime('%Y-%m-%d')
 
 def get_parent_tasks(user_id: str):
-    configuration = asana.Configuration()
-    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
-    if not asana_access_token:
-        return "Error: Asana access token not found in user preferences."
-    configuration.access_token = asana_access_token
-    api_client = asana.ApiClient(configuration)
-
     workspace_gid = get_preference(user_id, 'asana_workspace_preference')
     if not workspace_gid:
         return "Error identifying user's preferred workspace to get parent tasks from. Please set a preferred workspace using the set_workspace_preference tool."
     try:
         api_client = get_asana_client(user_id)
-        # Get current user
-        users_api = asana.UsersApi(api_client)
-        me = users_api.get_user("me", {})
-            
+        user_gid = get_asana_user_gid(user_id, api_client)
+
         tasks_api = asana.TasksApi(api_client)
-        
+
         # Get all tasks in the workspace
         tasks = list(tasks_api.get_tasks({
             'workspace': workspace_gid,
-            'assignee': me['gid'],
+            'assignee': user_gid,
             'completed_since': 'now',
             'opt_fields': 'name,due_on,completed,projects.name,num_subtasks'
         }))
@@ -161,34 +164,25 @@ def get_parent_tasks(user_id: str):
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None):
-    configuration = asana.Configuration()
-    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
-    if not asana_access_token:
-        return "Error: Asana access token not found in user preferences."
-    configuration.access_token = asana_access_token
-    api_client = asana.ApiClient(configuration)
-
     workspace_gid = get_preference(user_id, 'asana_workspace_preference')
     if not workspace_gid:
         return "Error identifying user's preferred workspace that the new Asana task should be created in. Please set a preferred workspace using the set_workspace_preference tool."
 
     try:
         api_client = get_asana_client(user_id)
-        # Get current user
-        users_api = asana.UsersApi(api_client)
-        me = users_api.get_user("me", {})
-            
+        user_gid = get_asana_user_gid(user_id, api_client)
+
         tasks_api = asana.TasksApi(api_client)
-        
+
         # Set due_date to today if not provided
         if due_date is None:
             due_date = get_current_date()
-        
+
         # Prepare task data
         task_data = {
             'name': name,
             'workspace': workspace_gid,
-            'assignee': me['gid'],
+            'assignee': user_gid,
             'due_on': due_date
         }
         
@@ -204,7 +198,7 @@ def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_
 
         # Convert to dict and add reminder message
         result = dict(new_task)
-        result['_reminder'] = "Task created successfully. PLEASE CHECK: Does this task supersede a similar task you already created? If so, you MUST DELETE the old tasks so the user doesn't see duplicates."
+        result['_reminder'] = "Task created successfully. CRITICAL: Before responding to the user, check the conversation history for old versions of tasks you created. If you find any, you MUST call delete_asana_task for each one NOW (in your next response) to avoid duplicates."
         return result
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
@@ -277,12 +271,6 @@ def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=No
 
 def delete_asana_task(user_id: str, task_gid):
     """Delete an Asana task by its GID."""
-    configuration = asana.Configuration()
-    asana_access_token = get_decrypted_preference_key(user_id, 'asana_access_token')
-    if not asana_access_token:
-        return "Error: Asana access token not found in user preferences."
-    configuration.access_token = asana_access_token
-    api_client = asana.ApiClient(configuration)
     try:
         api_client = get_asana_client(user_id)
         tasks_api = asana.TasksApi(api_client)
@@ -380,7 +368,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "get_new_asana_task_id",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. Otherwise, confirm the parent task with the user first. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. DO NOT use this tool to recreate a task that you already made once - use update_asana_task instead. No need to tell the user the ID of the task unless they ask. THINK: If you're recreating a different version of a task MAKE SURE you delete the old task with delete_asana_task so that the user doesn't see duplicates.",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. DO NOT use this tool when you can update a task with update_asana_task instead. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. Otherwise, confirm the parent task with the user first. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -407,7 +395,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "update_asana_task",
-        "description": "Update one or more fields of an existing Asana task. You can update the task name, due date, notes, completion status, and/or parent in a single call. Only provide the fields you want to change - all parameters are optional. If the user specifies a specific due date (e.g. two weeks from now), you MUST use the get_current_date tool to calculate the due date in YYYY-MM-DD format. To mark a task as complete, set completed to true. To remove a parent (make it a standalone task), set parent_gid to null.",
+        "description": "Update an existing Asana task. You can update the task name, due date, notes, completion status, and/or parent in a single call. Only provide the fields you want to change - all parameters are optional. If the user specifies a specific due date (e.g. two weeks from now), you MUST use the get_current_date tool to calculate the due date in YYYY-MM-DD format. To mark a task as complete, set completed to true. To remove a parent (make it a standalone task), set parent_gid to null.",
         "input_schema": {
             "type": "object",
             "properties": {
