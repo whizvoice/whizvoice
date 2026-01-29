@@ -124,16 +124,20 @@ class TestAsanaTools(unittest.TestCase):
         self.assertEqual(result, expected_error)
 
     @patch('asana_tools.get_decrypted_preference_key')
-    def test_get_tasks_no_token(self, mock_get_token):
+    @patch('asana_tools.get_preference')
+    def test_get_tasks_no_token(self, mock_get_preference, mock_get_token):
         """Test getting tasks when no access token is available"""
+        # Mock workspace preference to pass that check
+        mock_get_preference.return_value = 'workspace123'
         # Mock no token
         mock_get_token.return_value = None
-        
-        # Call function
-        result = get_asana_tasks(self.test_user_id)
-        
-        # Assert
-        self.assertEqual(result, "Error: Asana access token not found in user preferences.")
+
+        # Call function and expect ValueError
+        with self.assertRaises(ValueError) as context:
+            get_asana_tasks('test_user_no_token')
+
+        # Assert error message (from asana_tools.py:27)
+        self.assertEqual(str(context.exception), "Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
 
     def test_get_date_range(self):
         """Test date range parsing"""
