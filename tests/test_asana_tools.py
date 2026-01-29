@@ -360,11 +360,12 @@ class TestAsanaTools(unittest.TestCase):
         # Mock no token
         mock_get_token.return_value = None
 
-        # Call function
-        result = delete_asana_task('test_user_no_token', 'task123')
+        # Call function and expect ValueError
+        with self.assertRaises(ValueError) as context:
+            delete_asana_task('test_user_no_token', 'task123')
 
-        # Assert
-        self.assertEqual(result, "Error: Asana access token not found in user preferences.")
+        # Assert error message (from asana_tools.py:27)
+        self.assertEqual(str(context.exception), "Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
 
 if __name__ == '__main__':
     unittest.main() 
