@@ -361,7 +361,7 @@ class TestAsanaTools(unittest.TestCase):
         mock_get_token.return_value = None
 
         # Call function
-        result = delete_asana_task(self.test_user_id, 'task123')
+        result = delete_asana_task('test_user_no_token', 'task123')
 
         # Assert
         self.assertEqual(result, "Error: Asana access token not found in user preferences.")
