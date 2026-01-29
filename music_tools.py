@@ -248,6 +248,93 @@ async def agent_queue_youtube_music(query: str, user_id: str = None, websocket =
             "success": False
         }
 
+async def agent_pause_youtube_music(user_id: str = None, websocket = None,
+                                    tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Pause or resume YouTube Music playback by toggling the play/pause button.
+
+    Args:
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the pause/resume operation
+    """
+    try:
+        # Generate a unique request ID for tracking
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Pausing/resuming YouTube Music (user: {user_id}, request: {tool_request_id})")
+
+        # If no WebSocket provided, return error
+        if not websocket:
+            logger.error("No WebSocket connection available for YouTube Music pause")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        # Create the WebSocket message for the Android app
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "agent_pause_youtube_music",
+            "request_id": tool_request_id,
+            "params": {},
+            "conversation_id": conversation_id
+        }
+
+        # Send to Android app via WebSocket
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending YouTube Music pause message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent agent_pause_youtube_music command")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        # If we have a tool_result_handler, wait for the result
+        if tool_result_handler:
+            logger.info(f"Waiting for YouTube Music pause result from Android device (request_id: {tool_request_id})")
+
+            try:
+                # Wait for tool result with timeout (5 seconds should be enough for pause)
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=5.0
+                )
+
+                logger.info(f"YouTube Music pause result for {tool_request_id}: {result}")
+                return result
+
+            except Exception as e:
+                logger.error(f"Error waiting for YouTube Music pause result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            # If no handler, just return success after sending
+            return {
+                "status": "sent",
+                "message": "Command to pause/resume sent to device",
+                "request_id": tool_request_id
+            }
+
+    except Exception as e:
+        logger.error(f"Error in pause_youtube_music for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to pause/resume YouTube Music: {str(e)}",
+            "success": False
+        }
+
 # Define the music tools for Claude
 music_tools = [
     {
@@ -308,6 +395,16 @@ music_tools = [
                 }
             },
             "required": ["query"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_pause_youtube_music",
+        "description": "Pause or resume YouTube Music playback. Toggles between playing and paused states. Use this when the user wants to stop the music or resume playback.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     }
 ]
