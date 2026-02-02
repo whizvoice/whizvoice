@@ -4387,6 +4387,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             })
             return session_conversation_id
 
+        # Check for application-level cancellation (subset detection)
+        if redis_managers and "request_messages" in redis_managers:
+            request_data = await redis_managers["request_messages"].get_messages(request_id)
+            if request_data and request_data.get("status") == "cancelled":
+                logger.info(f"Request {request_id} was cancelled by subset detection, skipping response processing")
+                return session_conversation_id
+
         # Log the initial response to see if Claude is trying to use tools
         logger.info(f"Claude response stop_reason: {response.stop_reason}")
         if hasattr(response, 'content'):
@@ -4405,7 +4412,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "conversation_id": session_conversation_id
                 })
                 return session_conversation_id
-            
+
+            # Check for application-level cancellation (subset detection)
+            if redis_managers and "request_messages" in redis_managers:
+                request_data = await redis_managers["request_messages"].get_messages(request_id)
+                if request_data and request_data.get("status") == "cancelled":
+                    logger.info(f"Request {request_id} was cancelled by subset detection during tool loop, skipping")
+                    return session_conversation_id
+
             # Log all content blocks from AI response
             logger.info(f"AI response stop_reason: {response.stop_reason}")
             logger.info(f"AI response content blocks: {[{'type': block.type, 'name': getattr(block, 'name', None)} for block in response.content]}")
