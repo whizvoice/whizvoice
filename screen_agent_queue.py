@@ -162,11 +162,10 @@ class ScreenAgentQueueManager:
 
         try:
             # Execute the current tool
-            user_id = context.get("user_id")
+            # Note: user_id is already in context, passed via **context
             result = await self._execute_tool_func(
                 tool_name,
                 tool_args,
-                user_id,
                 **context
             )
             return result
@@ -209,11 +208,10 @@ class ScreenAgentQueueManager:
                 logger.error("Screen agent queue: execute_tool function not set!")
                 result = {"error": "Queue manager not initialized", "success": False}
             else:
-                user_id = next_item.context.get("user_id")
+                # Note: user_id is already in context, passed via **context
                 result = await self._execute_tool_func(
                     next_item.tool_name,
                     next_item.tool_args,
-                    user_id,
                     **next_item.context
                 )
 
