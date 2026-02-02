@@ -314,7 +314,7 @@ async def agent_set_tts_enabled(enabled: bool, user_id: str = None, websocket = 
             "success": False
         }
 
-async def cancel_pending_screen_tools(session_id: str = None, **kwargs) -> dict:
+async def cancel_pending_screen_tools(device_id: str = None, **kwargs) -> dict:
     """
     Cancel all pending (queued, not executing) screen agent tools.
 
@@ -322,7 +322,7 @@ async def cancel_pending_screen_tools(session_id: str = None, **kwargs) -> dict:
     the currently executing tool.
 
     Args:
-        session_id: The session ID to cancel pending tools for
+        device_id: The device ID to cancel pending tools for
         **kwargs: Additional context (user_id, websocket, etc.)
 
     Returns:
@@ -330,13 +330,13 @@ async def cancel_pending_screen_tools(session_id: str = None, **kwargs) -> dict:
     """
     from screen_agent_queue import screen_agent_queue
 
-    if not session_id:
+    if not device_id:
         return {
-            "error": "session_id is required",
+            "error": "device_id is required",
             "success": False
         }
 
-    return await screen_agent_queue.cancel_pending(session_id)
+    return await screen_agent_queue.cancel_pending(device_id)
 
 
 async def agent_close_app(user_id: str = None, websocket = None,

@@ -1136,25 +1136,28 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
     Execute a tool, routing screen agent tools through the queue.
 
     Screen agent tools (those that operate on the device screen) are queued
-    to ensure only one executes at a time per session. Other tools are
+    to ensure only one executes at a time per device. Other tools are
     executed directly.
 
     Args:
         tool_name: Name of the tool to execute
         tool_args: Arguments for the tool
         user_id: User ID if authenticated
-        **context: Additional context (websocket, tool_result_handler, conversation_id, session_id, etc.)
+        **context: Additional context (websocket, tool_result_handler, conversation_id, session_id, device_id, etc.)
     """
     # Check if this is a screen agent tool that needs queuing
     if screen_agent_queue.is_screen_agent_tool(tool_name):
-        session_id = context.get("session_id")
-        if not session_id:
-            logger.warning(f"Screen agent tool {tool_name} called without session_id, executing directly")
-            return await execute_tool(tool_name, tool_args, user_id, **context)
+        device_id = context.get("device_id")
+        if not device_id:
+            logger.warning(f"Screen agent tool {tool_name} called without device_id, returning error")
+            return {
+                "error": "device_id is required for screen agent tools. Please update your client.",
+                "success": False
+            }
 
-        # Route through queue
+        # Route through queue using device_id
         return await screen_agent_queue.enqueue(
-            session_id=session_id,
+            device_id=device_id,
             tool_name=tool_name,
             tool_args=tool_args,
             context={"user_id": user_id, **context}
@@ -1649,6 +1652,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(f"WebSocket connection requested for conversation_id={conversation_id}")
             except ValueError:
                 logger.warning(f"Invalid conversation_id parameter: {websocket.query_params['conversation_id']}")
+
+        # Get device_id from query parameters if provided (for screen agent queue)
+        device_id = None
+        if "device_id" in websocket.query_params:
+            device_id = websocket.query_params["device_id"]
+            logger.info(f"WebSocket connection with device_id={device_id}")
         
         # Authenticate if token is present
         user_id = None
@@ -2054,7 +2063,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 request_id=request_id,
                                 client_conversation_id=client_conversation_id,
                                 client_message_id=client_message_id,
-                                client_timestamp=client_timestamp
+                                client_timestamp=client_timestamp,
+                                device_id=device_id
                             )
                         )
                         
@@ -3608,7 +3618,7 @@ async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None):
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None, device_id=None):
     """Process a single message in a cancellable task"""
     # Helper function to safely send to WebSocket
     async def safe_websocket_send(payload):
@@ -4680,7 +4690,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         websocket=websocket,
                         tool_result_handler=tool_result_handler,
                         conversation_id=session_conversation_id,
-                        session_id=session_id
+                        session_id=session_id,
+                        device_id=device_id
                     )
                     return (tb, result)
 

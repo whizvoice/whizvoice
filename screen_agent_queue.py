@@ -1,9 +1,12 @@
 """
 Screen Agent Queue - Queue manager for screen agent tools.
 
-Ensures only one screen agent tool executes at a time per session.
+Ensures only one screen agent tool executes at a time per device.
 When a tool is called while one is already running, it queues and returns immediately.
 Results are delivered via WebSocket when execution completes.
+
+Uses device_id as the queue key so that queue state persists across conversation switches
+on the same device, and different devices have independent queues.
 """
 
 import asyncio
@@ -42,17 +45,20 @@ class ScreenAgentQueueManager:
     """
     Manages queuing for screen agent tools.
 
-    Ensures only one screen agent tool executes at a time per session.
+    Ensures only one screen agent tool executes at a time per device.
     When a tool is called while one is already running, it queues and returns
     immediately with status. Results are delivered via WebSocket.
+
+    Uses device_id as the key to enable queue persistence across conversation
+    switches on the same device.
     """
 
     def __init__(self):
-        # Pending queued items per session
+        # Pending queued items per device
         self._queues: Dict[str, List[QueuedToolExecution]] = {}
-        # Currently executing tool per session (queue_id)
+        # Currently executing tool per device (queue_id)
         self._executing: Dict[str, str] = {}
-        # Lock per session for thread safety
+        # Lock per device for thread safety
         self._locks: Dict[str, asyncio.Lock] = {}
         # Function to execute tools (set by app.py on startup)
         self._execute_tool_func: Optional[Callable] = None
@@ -62,9 +68,9 @@ class ScreenAgentQueueManager:
         self._execute_tool_func = func
         logger.info("Screen agent queue: execute_tool function registered")
 
-    def _get_lock(self, session_id: str) -> asyncio.Lock:
-        """Get or create a lock for a session. Thread-safe via setdefault."""
-        return self._locks.setdefault(session_id, asyncio.Lock())
+    def _get_lock(self, device_id: str) -> asyncio.Lock:
+        """Get or create a lock for a device. Thread-safe via setdefault."""
+        return self._locks.setdefault(device_id, asyncio.Lock())
 
     def is_screen_agent_tool(self, tool_name: str) -> bool:
         """Check if a tool needs queuing (is a screen agent tool)."""
@@ -72,7 +78,7 @@ class ScreenAgentQueueManager:
 
     async def enqueue(
         self,
-        session_id: str,
+        device_id: str,
         tool_name: str,
         tool_args: Dict[str, Any],
         context: Dict[str, Any]
@@ -80,11 +86,11 @@ class ScreenAgentQueueManager:
         """
         Queue a screen agent tool for execution.
 
-        If no tool is currently executing for this session, executes immediately.
+        If no tool is currently executing for this device, executes immediately.
         Otherwise, queues the tool and returns a queued status.
 
         Args:
-            session_id: The session ID
+            device_id: The device ID (persists across conversations on same device)
             tool_name: Name of the tool to execute
             tool_args: Arguments for the tool
             context: Execution context (websocket, tool_result_handler, etc.)
@@ -94,14 +100,14 @@ class ScreenAgentQueueManager:
             If queued: {"status": "queued", "position": N, "queue_id": "..."}
         """
         queue_id = f"sq_{uuid.uuid4().hex[:12]}"
-        lock = self._get_lock(session_id)
+        lock = self._get_lock(device_id)
 
         async with lock:
             # Check if something is already executing
-            if session_id in self._executing:
+            if device_id in self._executing:
                 # Queue the tool
-                if session_id not in self._queues:
-                    self._queues[session_id] = []
+                if device_id not in self._queues:
+                    self._queues[device_id] = []
 
                 queued_item = QueuedToolExecution(
                     queue_id=queue_id,
@@ -109,11 +115,11 @@ class ScreenAgentQueueManager:
                     tool_args=tool_args,
                     context=context
                 )
-                self._queues[session_id].append(queued_item)
-                position = len(self._queues[session_id])
+                self._queues[device_id].append(queued_item)
+                position = len(self._queues[device_id])
 
                 logger.info(
-                    f"Screen agent queue: Queued {tool_name} for session {session_id}, "
+                    f"Screen agent queue: Queued {tool_name} for device {device_id}, "
                     f"position={position}, queue_id={queue_id}"
                 )
 
@@ -127,19 +133,19 @@ class ScreenAgentQueueManager:
                 }
 
             # Nothing executing - mark as executing and run
-            self._executing[session_id] = queue_id
+            self._executing[device_id] = queue_id
             logger.info(
-                f"Screen agent queue: Executing {tool_name} immediately for session {session_id}, "
+                f"Screen agent queue: Executing {tool_name} immediately for device {device_id}, "
                 f"queue_id={queue_id}"
             )
 
         # Execute outside the lock
-        result = await self._execute_and_process_queue(session_id, tool_name, tool_args, context)
+        result = await self._execute_and_process_queue(device_id, tool_name, tool_args, context)
         return result
 
     async def _execute_and_process_queue(
         self,
-        session_id: str,
+        device_id: str,
         tool_name: str,
         tool_args: Dict[str, Any],
         context: Dict[str, Any]
@@ -166,34 +172,34 @@ class ScreenAgentQueueManager:
             return result
         finally:
             # Process the queue
-            await self._process_next_in_queue(session_id)
+            await self._process_next_in_queue(device_id)
 
-    async def _process_next_in_queue(self, session_id: str):
-        """Process the next item in the queue for a session."""
-        lock = self._get_lock(session_id)
+    async def _process_next_in_queue(self, device_id: str):
+        """Process the next item in the queue for a device."""
+        lock = self._get_lock(device_id)
 
         async with lock:
             # Clear executing flag
-            if session_id in self._executing:
-                del self._executing[session_id]
+            if device_id in self._executing:
+                del self._executing[device_id]
 
             # Check if there's anything queued
-            if session_id not in self._queues or not self._queues[session_id]:
-                logger.debug(f"Screen agent queue: No more items in queue for session {session_id}")
+            if device_id not in self._queues or not self._queues[device_id]:
+                logger.debug(f"Screen agent queue: No more items in queue for device {device_id}")
                 return
 
             # Pop the next item
-            next_item = self._queues[session_id].pop(0)
+            next_item = self._queues[device_id].pop(0)
 
             # Clean up empty queue
-            if not self._queues[session_id]:
-                del self._queues[session_id]
+            if not self._queues[device_id]:
+                del self._queues[device_id]
 
             # Mark as executing
-            self._executing[session_id] = next_item.queue_id
+            self._executing[device_id] = next_item.queue_id
 
             logger.info(
-                f"Screen agent queue: Processing queued {next_item.tool_name} for session {session_id}, "
+                f"Screen agent queue: Processing queued {next_item.tool_name} for device {device_id}, "
                 f"queue_id={next_item.queue_id}"
             )
 
@@ -221,7 +227,7 @@ class ScreenAgentQueueManager:
 
         finally:
             # Process next item in queue
-            await self._process_next_in_queue(session_id)
+            await self._process_next_in_queue(device_id)
 
     async def _send_queued_result(self, item: QueuedToolExecution, result: Dict[str, Any]):
         """Send the result of a queued tool execution via WebSocket."""
@@ -243,19 +249,19 @@ class ScreenAgentQueueManager:
         except Exception as e:
             logger.error(f"Screen agent queue: Failed to send queued result: {e}")
 
-    async def cancel_pending(self, session_id: str) -> Dict[str, Any]:
+    async def cancel_pending(self, device_id: str) -> Dict[str, Any]:
         """
-        Cancel all pending (queued, not executing) screen agent tools for a session.
+        Cancel all pending (queued, not executing) screen agent tools for a device.
 
         The currently executing tool is NOT cancelled.
 
         Returns:
             Dict with cancelled_count and list of cancelled tools
         """
-        lock = self._get_lock(session_id)
+        lock = self._get_lock(device_id)
 
         async with lock:
-            if session_id not in self._queues or not self._queues[session_id]:
+            if device_id not in self._queues or not self._queues[device_id]:
                 return {
                     "status": "success",
                     "cancelled_count": 0,
@@ -264,15 +270,15 @@ class ScreenAgentQueueManager:
                 }
 
             # Get all queued items
-            cancelled_items = self._queues[session_id]
+            cancelled_items = self._queues[device_id]
             cancelled_count = len(cancelled_items)
             cancelled_tools = [item.to_dict() for item in cancelled_items]
 
             # Clear the queue
-            del self._queues[session_id]
+            del self._queues[device_id]
 
             logger.info(
-                f"Screen agent queue: Cancelled {cancelled_count} pending tools for session {session_id}"
+                f"Screen agent queue: Cancelled {cancelled_count} pending tools for device {device_id}"
             )
 
             return {
@@ -282,37 +288,37 @@ class ScreenAgentQueueManager:
                 "message": f"Cancelled {cancelled_count} pending tool(s)"
             }
 
-    async def cleanup_session(self, session_id: str):
-        """Clean up queue state when a session ends."""
-        lock = self._get_lock(session_id)
+    async def cleanup_device(self, device_id: str):
+        """Clean up queue state for a device. Only called for explicit cleanup, not on session disconnect."""
+        lock = self._get_lock(device_id)
 
         async with lock:
             # Clear queue
-            if session_id in self._queues:
-                queue_size = len(self._queues[session_id])
-                del self._queues[session_id]
-                logger.info(f"Screen agent queue: Cleaned up {queue_size} queued items for session {session_id}")
+            if device_id in self._queues:
+                queue_size = len(self._queues[device_id])
+                del self._queues[device_id]
+                logger.info(f"Screen agent queue: Cleaned up {queue_size} queued items for device {device_id}")
 
             # Clear executing flag
-            if session_id in self._executing:
-                del self._executing[session_id]
-                logger.info(f"Screen agent queue: Cleared executing flag for session {session_id}")
+            if device_id in self._executing:
+                del self._executing[device_id]
+                logger.info(f"Screen agent queue: Cleared executing flag for device {device_id}")
 
             # Clean up lock
-            if session_id in self._locks:
-                del self._locks[session_id]
+            if device_id in self._locks:
+                del self._locks[device_id]
 
-    def get_queue_status(self, session_id: str) -> Dict[str, Any]:
-        """Get the current queue status for a session."""
-        is_executing = session_id in self._executing
-        queue_length = len(self._queues.get(session_id, []))
+    def get_queue_status(self, device_id: str) -> Dict[str, Any]:
+        """Get the current queue status for a device."""
+        is_executing = device_id in self._executing
+        queue_length = len(self._queues.get(device_id, []))
 
         return {
-            "session_id": session_id,
+            "device_id": device_id,
             "is_executing": is_executing,
             "queue_length": queue_length,
             "queued_tools": [
-                item.to_dict() for item in self._queues.get(session_id, [])
+                item.to_dict() for item in self._queues.get(device_id, [])
             ]
         }
 
