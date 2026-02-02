@@ -19,7 +19,8 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task
 from about_me_tool import about_me_tools, get_app_info, get_user_data
-from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app
+from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
+from screen_agent_queue import screen_agent_queue
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message
 from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
@@ -150,6 +151,9 @@ async def startup_event():
     # Start the background task for cleaning up abandoned tool executions
     asyncio.create_task(cleanup_abandoned_tool_executions())
     logger.info("Started abandoned tool execution cleanup task")
+    # Initialize screen agent queue with execute_tool function
+    screen_agent_queue.set_execute_tool_func(execute_tool)
+    logger.info("Initialized screen agent queue")
 
 # Clean up on app shutdown
 @app.on_event("shutdown")
@@ -1031,6 +1035,20 @@ TOOL_REGISTRY = {
             {"error": "unit must be 'us' or 'si'."} if args.get('unit') not in ['us', 'si'] else
             None
         )
+    },
+    "cancel_pending_screen_tools": {
+        "function_name": "cancel_pending_screen_tools",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "uses_kwargs": True,  # This tool takes **kwargs
+        "args_mapping": lambda args, user_id, **kwargs: {
+            "session_id": kwargs.get("session_id"),
+            "user_id": user_id,
+            "websocket": kwargs.get("websocket"),
+            "conversation_id": kwargs.get("conversation_id")
+        },
+        "validation": None
     }
 }
 
@@ -1093,17 +1111,58 @@ async def execute_tool(tool_name, tool_args, user_id: Optional[str] = None, **co
             # For async tools, await the result
             import asyncio
             if asyncio.iscoroutinefunction(func):
-                return await func(*func_args)
+                # Check if tool uses kwargs instead of positional args
+                if tool_config.get("uses_kwargs", False):
+                    return await func(**func_args)
+                else:
+                    return await func(*func_args)
             else:
                 logger.error(f"Tool {tool_name} marked as async but function is not async")
                 raise ValueError(f"Tool {tool_name} misconfigured: marked as async but function is not async")
         else:
             # For sync tools, call normally
-            return func(*func_args)
+            if tool_config.get("uses_kwargs", False):
+                return func(**func_args)
+            else:
+                return func(*func_args)
         
     except Exception as e:
         logger.error(f"Error executing tool {tool_name}: {str(e)}")
         raise e
+
+
+async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] = None, **context):
+    """
+    Execute a tool, routing screen agent tools through the queue.
+
+    Screen agent tools (those that operate on the device screen) are queued
+    to ensure only one executes at a time per session. Other tools are
+    executed directly.
+
+    Args:
+        tool_name: Name of the tool to execute
+        tool_args: Arguments for the tool
+        user_id: User ID if authenticated
+        **context: Additional context (websocket, tool_result_handler, conversation_id, session_id, etc.)
+    """
+    # Check if this is a screen agent tool that needs queuing
+    if screen_agent_queue.is_screen_agent_tool(tool_name):
+        session_id = context.get("session_id")
+        if not session_id:
+            logger.warning(f"Screen agent tool {tool_name} called without session_id, executing directly")
+            return await execute_tool(tool_name, tool_args, user_id, **context)
+
+        # Route through queue
+        return await screen_agent_queue.enqueue(
+            session_id=session_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            context={"user_id": user_id, **context}
+        )
+    else:
+        # Non-screen agent tools execute directly
+        return await execute_tool(tool_name, tool_args, user_id, **context)
+
 
 @app.get("/")
 async def root():
@@ -4610,16 +4669,18 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         logger.warning(f"🔧 TOOL_DEBUG execute_tool: Could not get websocket.client_state: {state_err}")
                 logger.info(f"🔧 TOOL_DEBUG execute_tool: client_conversation_id={client_conversation_id} (optimistic ID migration: {client_conversation_id is not None and client_conversation_id < 0})")
 
-                # Execute ALL tools in parallel using asyncio.gather
+                # Execute ALL tools using execute_tool_with_queue
+                # Screen agent tools will be queued (one at a time), others run in parallel
                 async def execute_single_tool(tb):
                     """Execute a single tool and return (tool_block, result)"""
-                    result = await execute_tool(
+                    result = await execute_tool_with_queue(
                         tb.name,
                         tb.input,
                         user_id,
                         websocket=websocket,
                         tool_result_handler=tool_result_handler,
-                        conversation_id=session_conversation_id
+                        conversation_id=session_conversation_id,
+                        session_id=session_id
                     )
                     return (tb, result)
 
