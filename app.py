@@ -26,6 +26,7 @@ from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtu
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
+from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference
 from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
@@ -133,7 +134,7 @@ PENDING RESULT: When you've requested something with a tool use and it hasn't co
 """
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools
+tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
 
 app = FastAPI(
     title="WhizVoice API",
@@ -368,7 +369,7 @@ ALLOWED_PREFERENCE_KEYS = {
     "voice_settings",
     "user_timezone",
     "asana_workspace_preference",
-    # Add other preference keys here as needed
+    "contacts",
 }
 
 # Configuration for session management
@@ -1049,6 +1050,39 @@ TOOL_REGISTRY = {
             "conversation_id": kwargs.get("conversation_id")
         },
         "validation": None
+    },
+    "add_contact_preference": {
+        "function_name": "add_contact_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (
+            user_id,
+            args.get('nickname'),  # Optional - defaults to real_name if not provided
+            args.get('real_name'),
+            args.get('preferred_app')
+        ),
+        "validation": lambda args: (
+            {"error": "real_name is required."} if not args.get('real_name') else
+            {"error": "preferred_app must be 'whatsapp' or 'sms'."} if args.get('preferred_app') not in ['whatsapp', 'sms'] else
+            None
+        )
+    },
+    "get_contact_preference": {
+        "function_name": "get_contact_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('name')),
+        "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
+    },
+    "list_contact_preferences": {
+        "function_name": "list_contact_preferences",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "remove_contact_preference": {
+        "function_name": "remove_contact_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('name')),
+        "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     }
 }
 
