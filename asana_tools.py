@@ -163,7 +163,7 @@ def get_parent_tasks(user_id: str):
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
-def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None):
+def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None, assignee_email=None):
     workspace_gid = get_preference(user_id, 'asana_workspace_preference')
     if not workspace_gid:
         return "Error identifying user's preferred workspace that the new Asana task should be created in. Please set a preferred workspace using the set_workspace_preference tool."
@@ -182,10 +182,10 @@ def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_
         task_data = {
             'name': name,
             'workspace': workspace_gid,
-            'assignee': user_gid,
+            'assignee': assignee_email if assignee_email else user_gid,
             'due_on': due_date
         }
-        
+
         # Add optional fields if provided
         if notes:
             task_data['notes'] = notes
@@ -368,7 +368,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "get_new_asana_task_id",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. DO NOT use this tool when you can update a task with update_asana_task instead. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. Otherwise, confirm the parent task with the user first. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask.",
+        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. DO NOT use this tool when you can update a task with update_asana_task instead. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. Otherwise, confirm the parent task with the user first. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person, first use get_contact_preference to look up their email, then pass it as assignee_email.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -387,6 +387,10 @@ asana_tools = [
                 "parent_task_gid": {
                     "type": "string",
                     "description": "GID of the parent task if this is a subtask. While it is not required, please try to provide a parent task GID if possible to prevent tasks from getting lost in the user's inbox."
+                },
+                "assignee_email": {
+                    "type": "string",
+                    "description": "Email address of the person to assign the task to. If not provided, the task is assigned to the current user. Use get_contact_preference to look up a contact's email first."
                 }
             },
             "required": ["name"]

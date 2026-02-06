@@ -19,7 +19,7 @@ def normalize_nickname(nickname: str) -> str:
     return normalized
 
 
-def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str, preferred_app: str) -> Dict[str, Any]:
+def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str, preferred_app: str, email: Optional[str] = None) -> Dict[str, Any]:
     """
     Add or update a contact with nickname, real name, and preferred messaging app.
 
@@ -29,6 +29,7 @@ def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str
                   If not provided, defaults to the real_name.
         real_name: The real name of the contact (e.g., 'Robin Pham')
         preferred_app: The preferred messaging app ('whatsapp' or 'sms')
+        email: Optional email address for the contact (used for Asana task assignment)
 
     Returns:
         Dictionary with success status and message
@@ -50,6 +51,13 @@ def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str
                 "error": f"preferred_app must be 'whatsapp' or 'sms', got '{preferred_app}'"
             }
 
+        # Validate email if provided
+        if email and '@' not in email:
+            return {
+                "success": False,
+                "error": f"Invalid email address: '{email}'"
+            }
+
         # Get existing contacts from preferences
         contacts_json = get_preference(user_id, 'contacts')
         if contacts_json:
@@ -63,10 +71,22 @@ def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str
 
         # Add/update the contact
         is_update = normalized_nickname in contacts
+
+        # Preserve existing emails list when updating
+        existing_emails = contacts[normalized_nickname].get("emails", []) if is_update else []
+
         contacts[normalized_nickname] = {
             "real_name": real_name,
             "preferred_app": preferred_app
         }
+
+        # Handle email: preserve existing list, add new email if provided
+        if email:
+            if email not in existing_emails:
+                existing_emails.append(email)
+            contacts[normalized_nickname]["emails"] = existing_emails
+        elif existing_emails:
+            contacts[normalized_nickname]["emails"] = existing_emails
 
         # Save back to preferences
         success = set_preference(user_id, 'contacts', json.dumps(contacts))
@@ -128,7 +148,8 @@ def get_contact_preference(user_id: str, name: str) -> Dict[str, Any]:
                 "found": True,
                 "nickname": normalized_name,
                 "real_name": contact.get("real_name"),
-                "preferred_app": contact.get("preferred_app")
+                "preferred_app": contact.get("preferred_app"),
+                "emails": contact.get("emails", [])
             }
 
         # If not found by nickname, try to match by real_name
@@ -139,7 +160,8 @@ def get_contact_preference(user_id: str, name: str) -> Dict[str, Any]:
                     "found": True,
                     "nickname": nickname,
                     "real_name": real_name,
-                    "preferred_app": contact.get("preferred_app")
+                    "preferred_app": contact.get("preferred_app"),
+                    "emails": contact.get("emails", [])
                 }
 
         return {"found": False}
@@ -181,7 +203,8 @@ def list_contact_preferences(user_id: str) -> Dict[str, Any]:
             {
                 "nickname": nickname,
                 "real_name": data.get("real_name"),
-                "preferred_app": data.get("preferred_app")
+                "preferred_app": data.get("preferred_app"),
+                "emails": data.get("emails", [])
             }
             for nickname, data in contacts.items()
         ]
@@ -298,6 +321,10 @@ contacts_tools = [
                     "type": "string",
                     "enum": ["whatsapp", "sms"],
                     "description": "The preferred messaging app for this contact"
+                },
+                "email": {
+                    "type": "string",
+                    "description": "The email address for the contact, used for assigning Asana tasks. Added to the contact's email list."
                 }
             },
             "required": ["real_name", "preferred_app"]
@@ -306,7 +333,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "get_contact_preference",
-        "description": "Look up a contact by name to get their real name and/or preferred messaging app. Use this BEFORE sending messages when the user refers to someone by a nickname (e.g., 'my husband', 'mom', 'boss') or by their real name (e.g., 'Robin Pham'). The name can match either the nickname or the real name.",
+        "description": "Look up a contact by name to get their real name, preferred messaging app, and email addresses. Use this BEFORE sending messages when the user refers to someone by a nickname (e.g., 'my husband', 'mom', 'boss') or by their real name (e.g., 'Robin Pham'). Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -321,7 +348,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "list_contact_preferences",
-        "description": "List all saved contacts with their nicknames, real names, and preferred messaging apps.",
+        "description": "List all saved contacts with their nicknames, real names, preferred messaging apps, and email addresses.",
         "input_schema": {
             "type": "object",
             "properties": {},

@@ -661,7 +661,8 @@ TOOL_REGISTRY = {
             args.get('name'),
             args.get('due_date'),
             args.get('notes'),
-            args.get('parent_task_gid')
+            args.get('parent_task_gid'),
+            args.get('assignee_email')
         ),
         "validation": lambda args: {"error": "Task name is required."} if not args.get('name') else None
     },
@@ -1058,7 +1059,8 @@ TOOL_REGISTRY = {
             user_id,
             args.get('nickname'),  # Optional - defaults to real_name if not provided
             args.get('real_name'),
-            args.get('preferred_app')
+            args.get('preferred_app'),
+            args.get('email')
         ),
         "validation": lambda args: (
             {"error": "real_name is required."} if not args.get('real_name') else
