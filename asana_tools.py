@@ -10,6 +10,7 @@ import time
 # Module-level caches for performance
 _asana_client_cache = {}  # user_id -> (client, timestamp)
 _user_gid_cache = {}  # user_id -> asana_gid
+_workspace_pref_cache = {}  # user_id -> (workspace_gid, timestamp)
 CACHE_TTL = 300  # 5 minutes
 
 def get_asana_client(user_id):
@@ -38,6 +39,21 @@ def get_asana_user_gid(user_id, api_client):
         me = users_api.get_user("me", {})
         _user_gid_cache[user_id] = me['gid']
     return _user_gid_cache[user_id]
+
+def get_workspace_preference(user_id):
+    """Get workspace preference with in-memory caching."""
+    if user_id in _workspace_pref_cache:
+        value, timestamp = _workspace_pref_cache[user_id]
+        if time.time() - timestamp < CACHE_TTL:
+            return value
+    value = get_preference(user_id, 'asana_workspace_preference')
+    if value:
+        _workspace_pref_cache[user_id] = (value, time.time())
+    return value
+
+def clear_workspace_preference_cache(user_id):
+    """Clear cached workspace preference for a user."""
+    _workspace_pref_cache.pop(user_id, None)
 
 def get_date_range(range_str=None):
     today = datetime.now().date()
@@ -72,7 +88,7 @@ def get_asana_workspaces(user_id):
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def get_asana_tasks(user_id: str, start_date=None, end_date=None):
-    workspace_gid = get_preference(user_id, 'asana_workspace_preference')
+    workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
         return "Error identifying user's preferred workspace to get tasks from. Please set a preferred workspace using the set_workspace_preference tool."
     try:
@@ -130,7 +146,7 @@ def get_current_date(user_id: str = None) -> str:
     return datetime.now(pytz.timezone('America/Los_Angeles')).strftime('%Y-%m-%d')
 
 def get_parent_tasks(user_id: str):
-    workspace_gid = get_preference(user_id, 'asana_workspace_preference')
+    workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
         return "Error identifying user's preferred workspace to get parent tasks from. Please set a preferred workspace using the set_workspace_preference tool."
     try:
@@ -164,7 +180,7 @@ def get_parent_tasks(user_id: str):
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None, assignee_email=None):
-    workspace_gid = get_preference(user_id, 'asana_workspace_preference')
+    workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
         return "Error identifying user's preferred workspace that the new Asana task should be created in. Please set a preferred workspace using the set_workspace_preference tool."
 

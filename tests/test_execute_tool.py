@@ -104,7 +104,8 @@ class TestExecuteTool(unittest.TestCase):
             'Test Task',
             '2024-03-20',
             'Test notes',
-            'parent123'
+            'parent123',
+            None
         )
 
     def test_execute_tool_get_new_asana_task_id_missing_name(self):

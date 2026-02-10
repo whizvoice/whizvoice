@@ -17,7 +17,7 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
 from screen_agent_queue import screen_agent_queue
@@ -627,6 +627,12 @@ async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: Web
                 pass
 
 
+def set_workspace_preference_with_cache_clear(user_id, key, value):
+    """Set workspace preference and invalidate the in-memory cache."""
+    result = set_preference(user_id, key, value)
+    clear_workspace_preference_cache(user_id)
+    return result
+
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
     "get_asana_workspaces": {
@@ -667,7 +673,7 @@ TOOL_REGISTRY = {
         "validation": lambda args: {"error": "Task name is required."} if not args.get('name') else None
     },
     "set_workspace_preference": {
-        "function_name": "set_preference",
+        "function_name": "set_workspace_preference_with_cache_clear",
         "requires_auth": True,
         "args_mapping": lambda args, user_id: (user_id, 'asana_workspace_preference', args.get('workspace_gid')),
         "validation": lambda args: ValueError("Workspace GID is required for set_workspace_preference") if not args.get('workspace_gid') else None

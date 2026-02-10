@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from asana_tools import (
     get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date,
     get_parent_tasks, get_new_asana_task_id, delete_asana_task,
-    _asana_client_cache, _user_gid_cache
+    _asana_client_cache, _user_gid_cache, _workspace_pref_cache
 )
 
 class TestAsanaTools(unittest.TestCase):
@@ -19,6 +19,7 @@ class TestAsanaTools(unittest.TestCase):
         # Clear caches before each test to avoid cross-test pollution
         _asana_client_cache.clear()
         _user_gid_cache.clear()
+        _workspace_pref_cache.clear()
         # Mock datetime to control time-based tests
         self.fixed_date = datetime(2024, 3, 15, 10, 0, 0)
         self.today = '2024-03-15'
