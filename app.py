@@ -17,7 +17,7 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, clear_parent_task_preference_cache, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
 from screen_agent_queue import screen_agent_queue
@@ -110,6 +110,7 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
 3. For SMS texting, use the SMS-specific tools (sms_select_chat, sms_draft_message, sms_send_message)
 4. For Asana/task management, use the Asana tools
    - remember to use update_asana_task instead of get_new_asana_task_id if you are changing a task, to avoid creating duplicates.
+   - Before creating a new task, check the parent task preference using get_parent_task_preference. If it returns 'true', you MUST always assign a parent task — ask the user if you're unsure which parent to use.
 5. For app information, use the get_app_info tool
 6. For music playback:
    - When the user asks to play music WITHOUT specifying an app, check their music app preference using get_music_app_preference
@@ -135,6 +136,14 @@ PENDING RESULT: When you've requested something with a tool use and it hasn't co
 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
+
+# Pre-build variant with parent-required description for get_new_asana_task_id
+tools_parent_required = []
+for _tool in tools:
+    if _tool.get('name') == 'get_new_asana_task_id':
+        tools_parent_required.append({**_tool, 'description': _CREATE_TASK_DESC_PARENT_REQUIRED})
+    else:
+        tools_parent_required.append(_tool)
 
 app = FastAPI(
     title="WhizVoice API",
@@ -229,7 +238,7 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
         _anthropic_clients_cache[api_key] = new_client
         return new_client
 
-async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True):
+async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True, user_id: str = None):
     """
     Standard method to call Claude API with consistent parameters.
 
@@ -338,8 +347,13 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         content_preview = content[:100] + "..." if len(content) > 100 else content
         logger.info(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
 
-    # Always include tools when requested
-    tools_to_send = tools if with_tools else None
+    # Pick the right pre-built tools list based on parent task preference
+    tools_to_send = None
+    if with_tools:
+        if user_id and get_parent_task_preference(user_id) == "true":
+            tools_to_send = tools_parent_required
+        else:
+            tools_to_send = tools
 
     api_params = {
         "model": "claude-sonnet-4-20250514",
@@ -369,6 +383,7 @@ ALLOWED_PREFERENCE_KEYS = {
     "voice_settings",
     "user_timezone",
     "asana_workspace_preference",
+    "asana_parent_task_preference",
     "contacts",
 }
 
@@ -633,6 +648,12 @@ def set_workspace_preference_with_cache_clear(user_id, key, value):
     clear_workspace_preference_cache(user_id)
     return result
 
+def set_parent_task_preference_with_cache_clear(user_id, require_parent):
+    """Set parent task preference and invalidate the in-memory cache."""
+    result = set_parent_task_preference(user_id, require_parent)
+    clear_parent_task_preference_cache(user_id)
+    return result
+
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
     "get_asana_workspaces": {
@@ -668,7 +689,8 @@ TOOL_REGISTRY = {
             args.get('due_date'),
             args.get('notes'),
             args.get('parent_task_gid'),
-            args.get('assignee_email')
+            args.get('assignee_email'),
+            args.get('is_parent_task', False)
         ),
         "validation": lambda args: {"error": "Task name is required."} if not args.get('name') else None
     },
@@ -679,10 +701,22 @@ TOOL_REGISTRY = {
         "validation": lambda args: ValueError("Workspace GID is required for set_workspace_preference") if not args.get('workspace_gid') else None
     },
     "get_workspace_preference": {
-        "function_name": "get_preference",
+        "function_name": "get_workspace_preference",
         "requires_auth": True,
-        "args_mapping": lambda args, user_id: (user_id, 'asana_workspace_preference'),
-        "validation": None  # Will handle user_id check in main flow since it's already covered by requires_auth
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "get_parent_task_preference": {
+        "function_name": "get_parent_task_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "set_parent_task_preference": {
+        "function_name": "set_parent_task_preference_with_cache_clear",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('require_parent')),
+        "validation": lambda args: {"error": "require_parent is required."} if args.get('require_parent') is None else None
     },
     "update_asana_task": {
         "function_name": "update_asana_task",
@@ -3456,10 +3490,11 @@ async def check_and_retry_failed_messages(
                                 
                                 # For retry, we don't need streaming (simpler error handling)
                                 retry_coroutine = await call_claude_api(
-                                    current_anthropic_client, 
-                                    session_id, 
+                                    current_anthropic_client,
+                                    session_id,
                                     stream=False,  # No streaming for retries
-                                    conversation_id=actual_conversation_id
+                                    conversation_id=actual_conversation_id,
+                                    user_id=user_id
                                 )
                                 
                                 # Create task to avoid coroutine reuse
@@ -4155,7 +4190,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # - AsyncStream (when stream=True)
             # - Message response (when stream=False)
             # Use processing_conversation_id for database operations
-            api_coroutine = await call_claude_api(current_anthropic_client, session_id, conversation_id=processing_conversation_id)
+            api_coroutine = await call_claude_api(current_anthropic_client, session_id, conversation_id=processing_conversation_id, user_id=user_id)
             
             # The coroutine needs to be awaited to get the actual response
             # Create a task so it can be cancelled if needed
@@ -4817,10 +4852,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             try:
                 # Tool responses should not stream (we explicitly pass stream=False)
                 tool_coroutine = await call_claude_api(
-                    current_anthropic_client, 
-                    session_id, 
+                    current_anthropic_client,
+                    session_id,
                     stream=False,  # Explicitly disable streaming for tool responses
-                    conversation_id=session_conversation_id
+                    conversation_id=session_conversation_id,
+                    user_id=user_id
                 )
                 
                 # Create a task for cancellability (fixes "cannot reuse coroutine" error)

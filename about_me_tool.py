@@ -56,6 +56,10 @@ def get_user_data(user_id: str) -> str:
         if user_timezone:
             preferences['user_timezone'] = user_timezone
 
+        parent_task_pref = get_preference(user_id, 'asana_parent_task_preference')
+        if parent_task_pref:
+            preferences['asana_parent_task_preference'] = parent_task_pref
+
         # Format the response
         if not preferences:
             return "We currently have no stored preferences for you."
@@ -70,6 +74,9 @@ def get_user_data(user_id: str) -> str:
 
         if 'user_timezone' in preferences:
             response_parts.append(f"- Timezone: {preferences['user_timezone']}")
+
+        if 'asana_parent_task_preference' in preferences:
+            response_parts.append(f"- Asana parent task preference: {preferences['asana_parent_task_preference']}")
 
         logger.info(f"Successfully retrieved user data for user {user_id}")
         return "\n".join(response_parts)
@@ -93,7 +100,7 @@ about_me_tools = [
     {
         "type": "custom",
         "name": "get_user_data",
-        "description": "Get information about what data we have stored about the user. This includes their preferences like timezone, music app preference, and Asana workspace preference. Use this tool when the user asks what information you know about them, what data you have stored, or wants to see their preferences. NOTE: This only returns non-encrypted preferences and does not include sensitive data like API keys.",
+        "description": "Get information about what data we have stored about the user. This includes their preferences like timezone, music app preference, Asana workspace preference, and Asana parent task preference. Use this tool when the user asks what information you know about them, what data you have stored, or wants to see their preferences. NOTE: This only returns non-encrypted preferences and does not include sensitive data like API keys.",
         "input_schema": {
             "type": "object",
             "properties": {},

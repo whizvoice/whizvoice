@@ -11,7 +11,12 @@ import time
 _asana_client_cache = {}  # user_id -> (client, timestamp)
 _user_gid_cache = {}  # user_id -> asana_gid
 _workspace_pref_cache = {}  # user_id -> (workspace_gid, timestamp)
+_parent_task_pref_cache = {}  # user_id -> value (no TTL; invalidated on set, cleared on restart)
 CACHE_TTL = 300  # 5 minutes
+
+_CREATE_TASK_DESC_PARENT_REQUIRED = "Create a new task in Asana. This task MUST be a subtask of a parent task — never create a standalone task unless the user explicitly asks you to create a new parent task (use is_parent_task=true for that). Before using this tool, determine the appropriate parent task based on the task name and existing parent tasks. If there's one likely candidate, use it. Otherwise, ask the user which parent task to use. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person, first use get_contact_preference to look up their email, then pass it as assignee_email."
+
+_CREATE_TASK_DESC_DEFAULT = "Create a new task in Asana. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person, first use get_contact_preference to look up their email, then pass it as assignee_email."
 
 def get_asana_client(user_id):
     """Get an Asana client configured with the user's access token. Cached per user."""
@@ -54,6 +59,27 @@ def get_workspace_preference(user_id):
 def clear_workspace_preference_cache(user_id):
     """Clear cached workspace preference for a user."""
     _workspace_pref_cache.pop(user_id, None)
+
+def get_parent_task_preference(user_id):
+    """Get parent task preference with in-memory caching. No TTL; invalidated on set, cleared on restart."""
+    if user_id in _parent_task_pref_cache:
+        return _parent_task_pref_cache[user_id]
+    value = get_preference(user_id, 'asana_parent_task_preference')
+    if value is not None:
+        _parent_task_pref_cache[user_id] = value
+    return value
+
+def set_parent_task_preference(user_id, require_parent):
+    """Set the user's parent task preference. require_parent is a boolean."""
+    value = "true" if require_parent else "false"
+    result = set_preference(user_id, 'asana_parent_task_preference', value)
+    if result:
+        _parent_task_pref_cache[user_id] = value
+    return result
+
+def clear_parent_task_preference_cache(user_id):
+    """Clear cached parent task preference for a user."""
+    _parent_task_pref_cache.pop(user_id, None)
 
 def get_date_range(range_str=None):
     today = datetime.now().date()
@@ -179,10 +205,15 @@ def get_parent_tasks(user_id: str):
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
-def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None, assignee_email=None):
+def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None, assignee_email=None, is_parent_task=False):
     workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
         return "Error identifying user's preferred workspace that the new Asana task should be created in. Please set a preferred workspace using the set_workspace_preference tool."
+
+    # Enforce parent task preference
+    parent_pref = get_parent_task_preference(user_id)
+    if parent_pref == "true" and parent_task_gid is None and not is_parent_task:
+        return "Error: Your parent task preference requires all new tasks to be subtasks. Please provide a parent_task_gid, or set is_parent_task=True if this is intended as a new parent task."
 
     try:
         api_client = get_asana_client(user_id)
@@ -384,7 +415,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "get_new_asana_task_id",
-        "description": "Create a new task in Asana, with a strong preference to be a subtask of a parent task. DO NOT use this tool when you can update a task with update_asana_task instead. Before using this tool, guess what the parent task should be based on the name of the task and existing parent tasks. If you think there's just one likely candidate for the parent task, go ahead and create the task. Otherwise, confirm the parent task with the user first. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person, first use get_contact_preference to look up their email, then pass it as assignee_email.",
+        "description": _CREATE_TASK_DESC_DEFAULT,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -407,6 +438,10 @@ asana_tools = [
                 "assignee_email": {
                     "type": "string",
                     "description": "Email address of the person to assign the task to. If not provided, the task is assigned to the current user. Use get_contact_preference to look up a contact's email first."
+                },
+                "is_parent_task": {
+                    "type": "boolean",
+                    "description": "Set to true only when the user explicitly asks to create a new parent/top-level task. Skips the parent task requirement when the user's preference requires parent tasks."
                 }
             },
             "required": ["name"]
@@ -460,6 +495,31 @@ asana_tools = [
                 }
             },
             "required": ["task_gid"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "get_parent_task_preference",
+        "description": "Get the user's parent task preference. Returns 'true' if tasks must always have a parent, 'false' if not required, or null if not set.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "set_parent_task_preference",
+        "description": "Set the user's parent task preference. When enabled (true), all new Asana tasks must have a parent task.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "require_parent": {
+                    "type": "boolean",
+                    "description": "If true, all new tasks must have a parent task. If false, tasks can be standalone."
+                }
+            },
+            "required": ["require_parent"]
         }
     }
 ] 
