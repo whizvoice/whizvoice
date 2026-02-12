@@ -17,7 +17,7 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, clear_parent_task_preference_cache, _CREATE_TASK_DESC_PARENT_REQUIRED
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
 from screen_agent_queue import screen_agent_queue
@@ -350,7 +350,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     # Pick the right pre-built tools list based on parent task preference
     tools_to_send = None
     if with_tools:
-        if user_id and get_parent_task_preference(user_id) == "true":
+        if user_id and await get_parent_task_preference(user_id) == "true":
             tools_to_send = tools_parent_required
         else:
             tools_to_send = tools
@@ -481,6 +481,9 @@ async def init_redis():
         await redis_client.ping()
         logger.info("Successfully connected to Redis for pub/sub")
         
+        # Share Redis client with asana_tools for cross-worker caching
+        init_redis_client(redis_client)
+
         # Initialize Redis managers for distributed session state
         redis_managers = create_managers(redis_client)
         logger.info("Initialized Redis managers for distributed session management")
@@ -648,10 +651,9 @@ def set_workspace_preference_with_cache_clear(user_id, key, value):
     clear_workspace_preference_cache(user_id)
     return result
 
-def set_parent_task_preference_with_cache_clear(user_id, require_parent):
-    """Set parent task preference and invalidate the in-memory cache."""
-    result = set_parent_task_preference(user_id, require_parent)
-    clear_parent_task_preference_cache(user_id)
+async def set_parent_task_preference_with_cache_clear(user_id, require_parent):
+    """Set parent task preference (Redis cache is updated directly on set)."""
+    result = await set_parent_task_preference(user_id, require_parent)
     return result
 
 # Tool registry that maps tool names to their configuration
@@ -683,6 +685,7 @@ TOOL_REGISTRY = {
     "get_new_asana_task_id": {
         "function_name": "get_new_asana_task_id",
         "requires_auth": True,
+        "is_async": True,
         "args_mapping": lambda args, user_id: (
             user_id,
             args.get('name'),
@@ -709,12 +712,14 @@ TOOL_REGISTRY = {
     "get_parent_task_preference": {
         "function_name": "get_parent_task_preference",
         "requires_auth": True,
+        "is_async": True,
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
     },
     "set_parent_task_preference": {
         "function_name": "set_parent_task_preference_with_cache_clear",
         "requires_auth": True,
+        "is_async": True,
         "args_mapping": lambda args, user_id: (user_id, args.get('require_parent')),
         "validation": lambda args: {"error": "require_parent is required."} if args.get('require_parent') is None else None
     },
