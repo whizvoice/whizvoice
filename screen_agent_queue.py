@@ -123,14 +123,7 @@ class ScreenAgentQueueManager:
                     f"position={position}, queue_id={queue_id}"
                 )
 
-                return {
-                    "status": "queued",
-                    "position": position,
-                    "queue_id": queue_id,
-                    "tool_name": tool_name,
-                    "message": f"Tool {tool_name} queued at position {position}. "
-                               f"Will execute after current operation completes."
-                }
+                return "Result pending..."
 
             # Nothing executing - mark as executing and run
             self._executing[device_id] = queue_id
