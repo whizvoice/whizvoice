@@ -164,7 +164,7 @@ def get_contact_preference(user_id: str, name: str) -> Dict[str, Any]:
                     "emails": contact.get("emails", [])
                 }
 
-        return {"found": False}
+        return {"found": False, "note": "Contact wasn't found. If you have enough information to proceed, do so, otherwise, ask the user to add the contact."}
 
     except Exception as e:
         logger.error(f"Error in get_contact_preference for user {user_id}: {str(e)}", exc_info=True)
