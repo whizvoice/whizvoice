@@ -649,13 +649,13 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_sms_select_chat",
-        "description": "Select a specific SMS conversation by contact name or phone number in Google Messages. This tool automatically opens Google Messages if not already open. Use this when the user wants to open an SMS/text message conversation with a specific contact or phone number.",
+        "description": "Select a specific SMS conversation by name or phone number in Google Messages. This tool automatically opens Google Messages if not already open. Use this when the user wants to open an SMS/text message conversation with a specific name or phone number.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "contact_name": {
                     "type": "string",
-                    "description": "The name or phone number of the contact to select in Google Messages app"
+                    "description": "The name or phone number to select in Google Messages app. Does NOT have to be a saved contact in contact preferences."
                 }
             },
             "required": ["contact_name"]
