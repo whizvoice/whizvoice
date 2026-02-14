@@ -333,7 +333,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "get_contact_preference",
-        "description": "Look up a contact by name to get their real name, preferred messaging app, and email addresses. Use this BEFORE sending messages when the user refers to someone by a nickname (e.g., 'my husband', 'mom', 'boss') or by their real name (e.g., 'Robin Pham'). Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name.",
+        "description": "Look up a contact by name to get their real name, preferred messaging app, and email addresses. Use this BEFORE sending messages. If the contact isn't found and you have the info you need (e.g. name and messaging app), send the message anyway. If the contact isn't found and you don't have enough information, you can ask the user if they want to make the contact. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name.",
         "input_schema": {
             "type": "object",
             "properties": {
