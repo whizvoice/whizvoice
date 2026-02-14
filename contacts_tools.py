@@ -164,7 +164,7 @@ def get_contact_preference(user_id: str, name: str) -> Dict[str, Any]:
                     "emails": contact.get("emails", [])
                 }
 
-        return {"found": False, "note": "Contact wasn't found. If you have enough information to proceed, do so, otherwise, ask the user to add the contact."}
+        return {"found": False, "reminder": "DO NOT ask the user to create a contact unless you absolutely cannot proceed without it. For example if you have the name and messaging app you do not need to create a contact to proceed to send a message."}
 
     except Exception as e:
         logger.error(f"Error in get_contact_preference for user {user_id}: {str(e)}", exc_info=True)
