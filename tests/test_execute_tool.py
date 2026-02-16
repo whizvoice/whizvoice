@@ -105,7 +105,8 @@ class TestExecuteTool(unittest.TestCase):
             '2024-03-20',
             'Test notes',
             'parent123',
-            None
+            None,
+            False
         )
 
     def test_execute_tool_get_new_asana_task_id_missing_name(self):
@@ -136,15 +137,15 @@ class TestExecuteTool(unittest.TestCase):
         
         self.assertIn("Workspace GID is required", str(context.exception))
 
-    @patch('app.get_preference')
+    @patch('app.get_workspace_preference')
     def test_execute_tool_get_workspace_preference(self, mock_get_pref):
         """Test execute_tool with get_workspace_preference"""
         mock_get_pref.return_value = 'workspace123'
-        
+
         result = asyncio.run(execute_tool("get_workspace_preference", {}, self.test_user_id))
-        
+
         self.assertEqual(result, 'workspace123')
-        mock_get_pref.assert_called_once_with(self.test_user_id, 'asana_workspace_preference')
+        mock_get_pref.assert_called_once_with(self.test_user_id)
 
     def test_execute_tool_get_workspace_preference_no_user(self):
         """Test execute_tool with get_workspace_preference without user_id"""
