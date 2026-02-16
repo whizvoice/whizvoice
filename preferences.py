@@ -21,7 +21,8 @@ logging.getLogger("hpack").setLevel(logging.INFO)
 logging.getLogger("anthropic").setLevel(logging.INFO)
 
 DEFAULT_PREFERENCES = {
-    'asana_workspace_preference': None
+    'asana_workspace_preference': None,
+    'asana_parent_task_preference': None
 }
 
 CLAUDE_API_KEY_PREF_NAME = "claude_api_key" 

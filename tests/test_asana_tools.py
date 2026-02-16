@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
@@ -10,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from asana_tools import (
     get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date,
     get_parent_tasks, get_new_asana_task_id, delete_asana_task,
-    _asana_client_cache, _user_gid_cache
+    _asana_client_cache, _user_gid_cache, _workspace_pref_cache
 )
 
 class TestAsanaTools(unittest.TestCase):
@@ -19,6 +20,7 @@ class TestAsanaTools(unittest.TestCase):
         # Clear caches before each test to avoid cross-test pollution
         _asana_client_cache.clear()
         _user_gid_cache.clear()
+        _workspace_pref_cache.clear()
         # Mock datetime to control time-based tests
         self.fixed_date = datetime(2024, 3, 15, 10, 0, 0)
         self.today = '2024-03-15'
@@ -250,33 +252,35 @@ class TestAsanaTools(unittest.TestCase):
             'opt_fields': 'name,due_on,completed,projects.name,num_subtasks'
         })
 
+    @patch('asana_tools.get_parent_task_preference')
     @patch('asana_tools.get_current_date')
     @patch('asana_tools.get_preference')
     @patch('asana_tools.get_decrypted_preference_key')
     @patch('asana_tools.get_asana_client')
     @patch('asana.UsersApi')
     @patch('asana.TasksApi')
-    def test_get_new_asana_task_id(self, mock_tasks_api, mock_users_api, mock_get_client, mock_get_token, mock_get_pref, mock_get_date):
+    def test_get_new_asana_task_id(self, mock_tasks_api, mock_users_api, mock_get_client, mock_get_token, mock_get_pref, mock_get_date, mock_get_parent_pref):
         """Test creating a task in Asana"""
         # Setup mocks
         mock_get_token.return_value = "fake_token"
         mock_get_pref.return_value = "workspace1"
         mock_get_date.return_value = self.today
-        
+        mock_get_parent_pref.return_value = "false"
+
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
-        
+
         mock_user_api = MagicMock()
         mock_users_api.return_value = mock_user_api
         mock_user_api.get_user.return_value = {'gid': 'user1'}
-        
+
         mock_task_api = MagicMock()
         mock_tasks_api.return_value = mock_task_api
         mock_task_api.create_task.return_value = {'gid': 'new_task1', 'name': 'New Task'}
-        
+
         # Test creating task
-        result = get_new_asana_task_id(self.test_user_id, 'New Task', due_date='2024-03-20', notes='Task notes')
-        
+        result = asyncio.run(get_new_asana_task_id(self.test_user_id, 'New Task', due_date='2024-03-20', notes='Task notes'))
+
         # Assert
         self.assertEqual(result['gid'], 'new_task1')
         self.assertEqual(result['name'], 'New Task')
@@ -293,33 +297,35 @@ class TestAsanaTools(unittest.TestCase):
             opts={'opt_fields': 'gid,name,due_on,completed,projects.name'}
         )
 
+    @patch('asana_tools.get_parent_task_preference')
     @patch('asana_tools.get_current_date')
     @patch('asana_tools.get_preference')
     @patch('asana_tools.get_decrypted_preference_key')
     @patch('asana_tools.get_asana_client')
     @patch('asana.UsersApi')
     @patch('asana.TasksApi')
-    def test_create_asana_subtask(self, mock_tasks_api, mock_users_api, mock_get_client, mock_get_token, mock_get_pref, mock_get_date):
+    def test_create_asana_subtask(self, mock_tasks_api, mock_users_api, mock_get_client, mock_get_token, mock_get_pref, mock_get_date, mock_get_parent_pref):
         """Test creating a subtask in Asana"""
         # Setup mocks
         mock_get_token.return_value = "fake_token"
         mock_get_pref.return_value = "workspace1"
         mock_get_date.return_value = self.today
-        
+        mock_get_parent_pref.return_value = "false"
+
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
-        
+
         mock_user_api = MagicMock()
         mock_users_api.return_value = mock_user_api
         mock_user_api.get_user.return_value = {'gid': 'user1'}
-        
+
         mock_task_api = MagicMock()
         mock_tasks_api.return_value = mock_task_api
         mock_task_api.create_subtask_for_task.return_value = {'gid': 'new_subtask1', 'name': 'New Subtask'}
-        
+
         # Test creating subtask
-        result = get_new_asana_task_id(self.test_user_id, 'New Subtask', due_date='2024-03-20', notes='Subtask notes', parent_task_gid='parent_task1')
-        
+        result = asyncio.run(get_new_asana_task_id(self.test_user_id, 'New Subtask', due_date='2024-03-20', notes='Subtask notes', parent_task_gid='parent_task1'))
+
         # Assert
         self.assertEqual(result['gid'], 'new_subtask1')
         self.assertEqual(result['name'], 'New Subtask')

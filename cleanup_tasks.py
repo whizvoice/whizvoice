@@ -21,6 +21,7 @@ from redis_helpers import (
     redis_managers
 )
 from tool_result_handler import tool_result_handler
+from screen_agent_queue import screen_agent_queue
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,11 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
     # They need the session history to generate responses
     # The session will be cleaned up when the task completes or after a timeout
     logger.info(f"Cleaning up session {session_id}, but keeping chat history for active tasks")
+
+    # NOTE: We do NOT clean up the screen agent queue on session disconnect.
+    # The queue is now keyed by device_id (not session_id), so queue state
+    # persists across conversation switches on the same device. The queue
+    # is small and will be reused when the user reconnects.
 
     # Clean up session timestamp
     await remove_session_timestamp(session_id)

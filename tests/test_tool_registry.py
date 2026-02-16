@@ -88,7 +88,7 @@ class TestToolRegistry(unittest.TestCase):
         }
         mapped_args = tool_config["args_mapping"](test_args, self.test_user_id)
         
-        expected = (self.test_user_id, "Test Task", "2024-03-15", "Test notes", "parent123")
+        expected = (self.test_user_id, "Test Task", "2024-03-15", "Test notes", "parent123", None, False)
         self.assertEqual(mapped_args, expected)
 
     def test_validation_functionality(self):

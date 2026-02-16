@@ -17,14 +17,16 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
-from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app
+from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
+from screen_agent_queue import screen_agent_queue
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message
 from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
+from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference
 from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
@@ -108,6 +110,7 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
 3. For SMS texting, use the SMS-specific tools (sms_select_chat, sms_draft_message, sms_send_message)
 4. For Asana/task management, use the Asana tools
    - remember to use update_asana_task instead of get_new_asana_task_id if you are changing a task, to avoid creating duplicates.
+   - Before creating a new task, check the parent task preference using get_parent_task_preference. If it returns 'true', you MUST always assign a parent task — ask the user if you're unsure which parent to use.
 5. For app information, use the get_app_info tool
 6. For music playback:
    - When the user asks to play music WITHOUT specifying an app, check their music app preference using get_music_app_preference
@@ -132,7 +135,15 @@ PENDING RESULT: When you've requested something with a tool use and it hasn't co
 """
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools
+tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
+
+# Pre-build variant with parent-required description for get_new_asana_task_id
+tools_parent_required = []
+for _tool in tools:
+    if _tool.get('name') == 'get_new_asana_task_id':
+        tools_parent_required.append({**_tool, 'description': _CREATE_TASK_DESC_PARENT_REQUIRED})
+    else:
+        tools_parent_required.append(_tool)
 
 app = FastAPI(
     title="WhizVoice API",
@@ -150,6 +161,9 @@ async def startup_event():
     # Start the background task for cleaning up abandoned tool executions
     asyncio.create_task(cleanup_abandoned_tool_executions())
     logger.info("Started abandoned tool execution cleanup task")
+    # Initialize screen agent queue with execute_tool function
+    screen_agent_queue.set_execute_tool_func(execute_tool)
+    logger.info("Initialized screen agent queue")
 
 # Clean up on app shutdown
 @app.on_event("shutdown")
@@ -224,7 +238,7 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
         _anthropic_clients_cache[api_key] = new_client
         return new_client
 
-async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True):
+async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True, user_id: str = None):
     """
     Standard method to call Claude API with consistent parameters.
 
@@ -333,8 +347,13 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         content_preview = content[:100] + "..." if len(content) > 100 else content
         logger.info(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
 
-    # Always include tools when requested
-    tools_to_send = tools if with_tools else None
+    # Pick the right pre-built tools list based on parent task preference
+    tools_to_send = None
+    if with_tools:
+        if user_id and await get_parent_task_preference(user_id) == "true":
+            tools_to_send = tools_parent_required
+        else:
+            tools_to_send = tools
 
     api_params = {
         "model": "claude-sonnet-4-20250514",
@@ -364,7 +383,8 @@ ALLOWED_PREFERENCE_KEYS = {
     "voice_settings",
     "user_timezone",
     "asana_workspace_preference",
-    # Add other preference keys here as needed
+    "asana_parent_task_preference",
+    "contacts",
 }
 
 # Configuration for session management
@@ -461,6 +481,9 @@ async def init_redis():
         await redis_client.ping()
         logger.info("Successfully connected to Redis for pub/sub")
         
+        # Share Redis client with asana_tools for cross-worker caching
+        init_redis_client(redis_client)
+
         # Initialize Redis managers for distributed session state
         redis_managers = create_managers(redis_client)
         logger.info("Initialized Redis managers for distributed session management")
@@ -622,6 +645,17 @@ async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: Web
                 pass
 
 
+def set_workspace_preference_with_cache_clear(user_id, key, value):
+    """Set workspace preference and invalidate the in-memory cache."""
+    result = set_preference(user_id, key, value)
+    clear_workspace_preference_cache(user_id)
+    return result
+
+async def set_parent_task_preference_with_cache_clear(user_id, require_parent):
+    """Set parent task preference (Redis cache is updated directly on set)."""
+    result = await set_parent_task_preference(user_id, require_parent)
+    return result
+
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
     "get_asana_workspaces": {
@@ -651,26 +685,43 @@ TOOL_REGISTRY = {
     "get_new_asana_task_id": {
         "function_name": "get_new_asana_task_id",
         "requires_auth": True,
+        "is_async": True,
         "args_mapping": lambda args, user_id: (
             user_id,
             args.get('name'),
             args.get('due_date'),
             args.get('notes'),
-            args.get('parent_task_gid')
+            args.get('parent_task_gid'),
+            args.get('assignee_email'),
+            args.get('is_parent_task', False)
         ),
         "validation": lambda args: {"error": "Task name is required."} if not args.get('name') else None
     },
     "set_workspace_preference": {
-        "function_name": "set_preference",
+        "function_name": "set_workspace_preference_with_cache_clear",
         "requires_auth": True,
         "args_mapping": lambda args, user_id: (user_id, 'asana_workspace_preference', args.get('workspace_gid')),
         "validation": lambda args: ValueError("Workspace GID is required for set_workspace_preference") if not args.get('workspace_gid') else None
     },
     "get_workspace_preference": {
-        "function_name": "get_preference",
+        "function_name": "get_workspace_preference",
         "requires_auth": True,
-        "args_mapping": lambda args, user_id: (user_id, 'asana_workspace_preference'),
-        "validation": None  # Will handle user_id check in main flow since it's already covered by requires_auth
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "get_parent_task_preference": {
+        "function_name": "get_parent_task_preference",
+        "requires_auth": True,
+        "is_async": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "set_parent_task_preference": {
+        "function_name": "set_parent_task_preference_with_cache_clear",
+        "requires_auth": True,
+        "is_async": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('require_parent')),
+        "validation": lambda args: {"error": "require_parent is required."} if args.get('require_parent') is None else None
     },
     "update_asana_task": {
         "function_name": "update_asana_task",
@@ -1031,6 +1082,54 @@ TOOL_REGISTRY = {
             {"error": "unit must be 'us' or 'si'."} if args.get('unit') not in ['us', 'si'] else
             None
         )
+    },
+    "cancel_pending_screen_tools": {
+        "function_name": "cancel_pending_screen_tools",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "uses_kwargs": True,  # This tool takes **kwargs
+        "args_mapping": lambda args, user_id, **kwargs: {
+            "session_id": kwargs.get("session_id"),
+            "user_id": user_id,
+            "websocket": kwargs.get("websocket"),
+            "conversation_id": kwargs.get("conversation_id")
+        },
+        "validation": None
+    },
+    "add_contact_preference": {
+        "function_name": "add_contact_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (
+            user_id,
+            args.get('nickname'),  # Optional - defaults to real_name if not provided
+            args.get('real_name'),
+            args.get('preferred_app'),
+            args.get('email')
+        ),
+        "validation": lambda args: (
+            {"error": "real_name is required."} if not args.get('real_name') else
+            {"error": "preferred_app must be 'whatsapp' or 'sms'."} if args.get('preferred_app') not in ['whatsapp', 'sms'] else
+            None
+        )
+    },
+    "get_contact_preference": {
+        "function_name": "get_contact_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('name')),
+        "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
+    },
+    "list_contact_preferences": {
+        "function_name": "list_contact_preferences",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "remove_contact_preference": {
+        "function_name": "remove_contact_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('name')),
+        "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     }
 }
 
@@ -1093,17 +1192,61 @@ async def execute_tool(tool_name, tool_args, user_id: Optional[str] = None, **co
             # For async tools, await the result
             import asyncio
             if asyncio.iscoroutinefunction(func):
-                return await func(*func_args)
+                # Check if tool uses kwargs instead of positional args
+                if tool_config.get("uses_kwargs", False):
+                    return await func(**func_args)
+                else:
+                    return await func(*func_args)
             else:
                 logger.error(f"Tool {tool_name} marked as async but function is not async")
                 raise ValueError(f"Tool {tool_name} misconfigured: marked as async but function is not async")
         else:
             # For sync tools, call normally
-            return func(*func_args)
+            if tool_config.get("uses_kwargs", False):
+                return func(**func_args)
+            else:
+                return func(*func_args)
         
     except Exception as e:
         logger.error(f"Error executing tool {tool_name}: {str(e)}")
         raise e
+
+
+async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] = None, **context):
+    """
+    Execute a tool, routing screen agent tools through the queue.
+
+    Screen agent tools (those that operate on the device screen) are queued
+    to ensure only one executes at a time per device. Other tools are
+    executed directly.
+
+    Args:
+        tool_name: Name of the tool to execute
+        tool_args: Arguments for the tool
+        user_id: User ID if authenticated
+        **context: Additional context (websocket, tool_result_handler, conversation_id, session_id, device_id, etc.)
+    """
+    # Check if this is a screen agent tool that needs queuing
+    if screen_agent_queue.is_screen_agent_tool(tool_name):
+        device_id = context.get("device_id")
+        if not device_id:
+            logger.warning(f"Screen agent tool {tool_name} called without device_id, returning error")
+            return {
+                "error": "device_id is required for screen agent tools. Please update your client.",
+                "success": False
+            }
+
+        # Route through queue using device_id
+        return await screen_agent_queue.enqueue(
+            device_id=device_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            context={"user_id": user_id, **context}
+        )
+    else:
+        # Non-screen agent tools execute directly
+        return await execute_tool(tool_name, tool_args, user_id, **context)
+
 
 @app.get("/")
 async def root():
@@ -1590,6 +1733,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(f"WebSocket connection requested for conversation_id={conversation_id}")
             except ValueError:
                 logger.warning(f"Invalid conversation_id parameter: {websocket.query_params['conversation_id']}")
+
+        # Get device_id from query parameters if provided (for screen agent queue)
+        device_id = None
+        if "device_id" in websocket.query_params:
+            device_id = websocket.query_params["device_id"]
+            logger.info(f"WebSocket connection with device_id={device_id}")
         
         # Authenticate if token is present
         user_id = None
@@ -1995,7 +2144,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 request_id=request_id,
                                 client_conversation_id=client_conversation_id,
                                 client_message_id=client_message_id,
-                                client_timestamp=client_timestamp
+                                client_timestamp=client_timestamp,
+                                device_id=device_id
                             )
                         )
                         
@@ -3345,10 +3495,11 @@ async def check_and_retry_failed_messages(
                                 
                                 # For retry, we don't need streaming (simpler error handling)
                                 retry_coroutine = await call_claude_api(
-                                    current_anthropic_client, 
-                                    session_id, 
+                                    current_anthropic_client,
+                                    session_id,
                                     stream=False,  # No streaming for retries
-                                    conversation_id=actual_conversation_id
+                                    conversation_id=actual_conversation_id,
+                                    user_id=user_id
                                 )
                                 
                                 # Create task to avoid coroutine reuse
@@ -3549,7 +3700,7 @@ async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None):
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None, device_id=None):
     """Process a single message in a cancellable task"""
     # Helper function to safely send to WebSocket
     async def safe_websocket_send(payload):
@@ -4044,7 +4195,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # - AsyncStream (when stream=True)
             # - Message response (when stream=False)
             # Use processing_conversation_id for database operations
-            api_coroutine = await call_claude_api(current_anthropic_client, session_id, conversation_id=processing_conversation_id)
+            api_coroutine = await call_claude_api(current_anthropic_client, session_id, conversation_id=processing_conversation_id, user_id=user_id)
             
             # The coroutine needs to be awaited to get the actual response
             # Create a task so it can be cancelled if needed
@@ -4318,6 +4469,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             })
             return session_conversation_id
 
+        # Check for application-level cancellation (subset detection)
+        if redis_managers and "request_messages" in redis_managers:
+            request_data = await redis_managers["request_messages"].get_messages(request_id)
+            if request_data and request_data.get("status") == "cancelled":
+                logger.info(f"Request {request_id} was cancelled by subset detection, skipping response processing")
+                return session_conversation_id
+
         # Log the initial response to see if Claude is trying to use tools
         logger.info(f"Claude response stop_reason: {response.stop_reason}")
         if hasattr(response, 'content'):
@@ -4336,7 +4494,14 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "conversation_id": session_conversation_id
                 })
                 return session_conversation_id
-            
+
+            # Check for application-level cancellation (subset detection)
+            if redis_managers and "request_messages" in redis_managers:
+                request_data = await redis_managers["request_messages"].get_messages(request_id)
+                if request_data and request_data.get("status") == "cancelled":
+                    logger.info(f"Request {request_id} was cancelled by subset detection during tool loop, skipping")
+                    return session_conversation_id
+
             # Log all content blocks from AI response
             logger.info(f"AI response stop_reason: {response.stop_reason}")
             logger.info(f"AI response content blocks: {[{'type': block.type, 'name': getattr(block, 'name', None)} for block in response.content]}")
@@ -4610,16 +4775,19 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         logger.warning(f"🔧 TOOL_DEBUG execute_tool: Could not get websocket.client_state: {state_err}")
                 logger.info(f"🔧 TOOL_DEBUG execute_tool: client_conversation_id={client_conversation_id} (optimistic ID migration: {client_conversation_id is not None and client_conversation_id < 0})")
 
-                # Execute ALL tools in parallel using asyncio.gather
+                # Execute ALL tools using execute_tool_with_queue
+                # Screen agent tools will be queued (one at a time), others run in parallel
                 async def execute_single_tool(tb):
                     """Execute a single tool and return (tool_block, result)"""
-                    result = await execute_tool(
+                    result = await execute_tool_with_queue(
                         tb.name,
                         tb.input,
                         user_id,
                         websocket=websocket,
                         tool_result_handler=tool_result_handler,
-                        conversation_id=session_conversation_id
+                        conversation_id=session_conversation_id,
+                        session_id=session_id,
+                        device_id=device_id
                     )
                     return (tb, result)
 
@@ -4689,10 +4857,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             try:
                 # Tool responses should not stream (we explicitly pass stream=False)
                 tool_coroutine = await call_claude_api(
-                    current_anthropic_client, 
-                    session_id, 
+                    current_anthropic_client,
+                    session_id,
                     stream=False,  # Explicitly disable streaming for tool responses
-                    conversation_id=session_conversation_id
+                    conversation_id=session_conversation_id,
+                    user_id=user_id
                 )
                 
                 # Create a task for cancellability (fixes "cannot reuse coroutine" error)

@@ -314,6 +314,31 @@ async def agent_set_tts_enabled(enabled: bool, user_id: str = None, websocket = 
             "success": False
         }
 
+async def cancel_pending_screen_tools(device_id: str = None, **kwargs) -> dict:
+    """
+    Cancel all pending (queued, not executing) screen agent tools.
+
+    This cancels tools that are waiting in the queue but does NOT stop
+    the currently executing tool.
+
+    Args:
+        device_id: The device ID to cancel pending tools for
+        **kwargs: Additional context (user_id, websocket, etc.)
+
+    Returns:
+        A dictionary containing the result of the cancel operation
+    """
+    from screen_agent_queue import screen_agent_queue
+
+    if not device_id:
+        return {
+            "error": "device_id is required",
+            "success": False
+        }
+
+    return await screen_agent_queue.cancel_pending(device_id)
+
+
 async def agent_close_app(user_id: str = None, websocket = None,
                           tool_result_handler = None, conversation_id: str = None) -> dict:
     """
@@ -427,6 +452,16 @@ screen_agent_tools = [
         "type": "custom",
         "name": "agent_close_app",
         "description": "Close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, or quit the app.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "cancel_pending_screen_tools",
+        "description": "Cancel all pending screen agent tools that are waiting in the queue. This does NOT stop the currently executing tool, only tools that haven't started yet. Use this when the user wants to cancel or stop queued actions.",
         "input_schema": {
             "type": "object",
             "properties": {},
