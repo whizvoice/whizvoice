@@ -174,6 +174,8 @@ def mock_anthropic_client():
     )
 
     client_mock.messages.create = AsyncMock(side_effect=[tool_response, text_after_response])
+    client_mock._tool_response = tool_response
+    client_mock._text_after_response = text_after_response
 
     return client_mock
 
@@ -227,7 +229,7 @@ async def test_message_ordering_with_tool_use(mock_redis, mock_supabase, mock_an
     mock_supabase.table("messages").insert(user_message_data).execute()
 
     # Step 2: Mock Claude API response with tool use
-    api_response = mock_anthropic_client.messages.create.side_effect[0]
+    api_response = mock_anthropic_client._tool_response
 
     # Extract content blocks
     text_before_block = api_response.content[0]
@@ -317,7 +319,7 @@ async def test_message_ordering_with_tool_use(mock_redis, mock_supabase, mock_an
                     break
 
     # Step 6: Get text_after from second API call
-    text_after_response = mock_anthropic_client.messages.create.side_effect[1]
+    text_after_response = mock_anthropic_client._text_after_response
     text_after = text_after_response.content[0].text
     text_after_dict = {"type": "text", "text": text_after}
 
