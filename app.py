@@ -576,7 +576,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             tools_to_send = tools
 
     api_params = {
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 1000,
         "messages": messages,
         "system": CLAUDE_SYSTEM_PROMPT,

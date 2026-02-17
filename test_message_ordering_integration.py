@@ -36,7 +36,7 @@ class MockBetaMessage:
         self.id = "msg_test"
         self.type = "message"
         self.role = "assistant"
-        self.model = "claude-sonnet-4-20250514"
+        self.model = "claude-sonnet-4-5-20250929"
         self.stop_reason = "tool_use"
 
         # Content blocks: text_before, then tool_use
@@ -55,7 +55,7 @@ class MockToolResponse:
         self.id = "msg_test2"
         self.type = "message"
         self.role = "assistant"
-        self.model = "claude-sonnet-4-20250514"
+        self.model = "claude-sonnet-4-5-20250929"
         self.stop_reason = "end_turn"
         self.content = [MockTextBlock(text_after)]
         self.usage = {"input_tokens": 150, "output_tokens": 30}
