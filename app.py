@@ -238,6 +238,188 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
         _anthropic_clients_cache[api_key] = new_client
         return new_client
 
+async def load_validated_messages_from_db(conversation_id: int, session_id: str) -> Optional[List[Dict]]:
+    """Load conversation from DB with tool_use/tool_result validation.
+
+    Two-pass validation:
+    1. Collect all tool_result IDs and valid (non-cancelled) tool_use IDs
+    2. Build messages, skipping orphaned tool_use (no result) and orphaned tool_result (cancelled tool_use)
+
+    Self-heals Redis by rewriting the session with validated messages.
+    Returns the validated messages, or None on failure.
+    """
+    try:
+        query = supabase.table("messages")\
+            .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
+            .eq("conversation_id", conversation_id)\
+            .order("timestamp", desc=False)
+
+        response = query.execute()
+        db_messages = response.data if response.data else []
+
+        # First pass: identify valid (non-cancelled) tool_use IDs and tool_result IDs
+        tool_use_ids_with_results = set()
+        valid_tool_use_ids = set()
+
+        # Collect all tool_result IDs
+        for msg in db_messages:
+            if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                for block in msg['tool_content']:
+                    if isinstance(block, dict) and block.get('tool_use_id'):
+                        tool_use_ids_with_results.add(block['tool_use_id'])
+
+        # Collect valid (non-cancelled) tool_use IDs
+        for msg in db_messages:
+            if not msg.get('cancelled') and msg.get('content_type') == 'tool_use' and msg.get('tool_content'):
+                for block in msg['tool_content']:
+                    if isinstance(block, dict) and block.get('id'):
+                        valid_tool_use_ids.add(block['id'])
+
+        # Second pass: build messages, skipping incomplete/orphaned tool blocks
+        redis_messages = []
+        for msg in db_messages:
+            # Skip cancelled messages
+            if msg.get('cancelled'):
+                continue
+
+            content_type = msg.get('content_type', 'text')
+            tool_content = msg.get('tool_content')
+
+            # Handle tool_use messages - skip if no corresponding tool_result
+            if content_type == 'tool_use' and tool_content:
+                tool_use_id = None
+                for block in tool_content:
+                    if isinstance(block, dict) and block.get('id'):
+                        tool_use_id = block['id']
+                        break
+
+                if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                    logger.warning(f"[load_validated] Skipping incomplete tool_use (no result): {tool_use_id}")
+                    continue
+
+                redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
+            elif content_type == 'tool_result' and tool_content:
+                # Skip orphaned tool_results whose tool_use was cancelled
+                tool_use_id = None
+                for block in tool_content:
+                    if isinstance(block, dict) and block.get('tool_use_id'):
+                        tool_use_id = block['tool_use_id']
+                        break
+
+                if tool_use_id and tool_use_id not in valid_tool_use_ids:
+                    logger.warning(f"[load_validated] Skipping orphaned tool_result (tool_use was cancelled): {tool_use_id}")
+                    continue
+
+                redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
+            # Handle regular text messages
+            elif msg['message_sender'] == 'USER':
+                redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
+            elif msg['message_sender'] == 'ASSISTANT':
+                redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
+
+        # Self-heal Redis by rewriting the session with validated messages
+        if redis_messages:
+            await set_chat_messages(session_id, redis_messages)
+            logger.info(f"[load_validated] Populated Redis session with {len(redis_messages)} validated messages from database")
+
+        return redis_messages
+
+    except Exception as e:
+        logger.error(f"[load_validated] Error loading conversation history from database: {str(e)}")
+        return None
+
+
+def _has_orphaned_tool_uses(messages: List[Dict]) -> bool:
+    """Quick scan for tool_use blocks without matching tool_result in the next user message.
+
+    This checks the merged message list for the Claude API requirement that every
+    tool_use in an assistant message must have a corresponding tool_result in the
+    immediately following user message.
+    """
+    for i, msg in enumerate(messages):
+        if msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content', [])
+        if not isinstance(content, list):
+            continue
+        # Collect tool_use IDs from this assistant message
+        tool_use_ids = set()
+        for block in content:
+            if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
+                tool_use_ids.add(block['id'])
+        if not tool_use_ids:
+            continue
+        # Check the next message for matching tool_results
+        if i + 1 >= len(messages):
+            return True
+        next_msg = messages[i + 1]
+        if next_msg.get('role') != 'user':
+            return True
+        next_content = next_msg.get('content', [])
+        if not isinstance(next_content, list):
+            return True
+        result_ids = set()
+        for block in next_content:
+            if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id'):
+                result_ids.add(block['tool_use_id'])
+        if not tool_use_ids.issubset(result_ids):
+            return True
+    return False
+
+
+def _fix_orphaned_tool_uses(messages: List[Dict]) -> None:
+    """Fallback: insert synthetic tool_result blocks for orphaned tool_use blocks.
+
+    Mutates messages in place. For each assistant message containing tool_use blocks
+    without a corresponding tool_result in the next user message, inserts synthetic
+    tool_result blocks.
+    """
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get('role') != 'assistant':
+            i += 1
+            continue
+        content = msg.get('content', [])
+        if not isinstance(content, list):
+            i += 1
+            continue
+        # Collect tool_use IDs from this assistant message
+        tool_use_ids = set()
+        for block in content:
+            if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
+                tool_use_ids.add(block['id'])
+        if not tool_use_ids:
+            i += 1
+            continue
+        # Check what tool_results exist in the next message
+        existing_result_ids = set()
+        if i + 1 < len(messages) and messages[i + 1].get('role') == 'user':
+            next_content = messages[i + 1].get('content', [])
+            if isinstance(next_content, list):
+                for block in next_content:
+                    if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id'):
+                        existing_result_ids.add(block['tool_use_id'])
+        missing_ids = tool_use_ids - existing_result_ids
+        if missing_ids:
+            logger.warning(f"[_fix_orphaned_tool_uses] Inserting synthetic tool_results for: {missing_ids}")
+            synthetic_blocks = [
+                {"type": "tool_result", "tool_use_id": tid, "content": "Result pending - request was interrupted."}
+                for tid in missing_ids
+            ]
+            if i + 1 < len(messages) and messages[i + 1].get('role') == 'user':
+                # Prepend synthetic tool_results to existing user message
+                next_content = messages[i + 1].get('content', [])
+                if isinstance(next_content, list):
+                    messages[i + 1]['content'] = synthetic_blocks + next_content
+                else:
+                    messages[i + 1]['content'] = synthetic_blocks + [{"type": "text", "text": next_content}]
+            else:
+                # Insert a new user message with synthetic tool_results
+                messages.insert(i + 1, {"role": "user", "content": synthetic_blocks})
+        i += 1
+
+
 async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True, user_id: str = None):
     """
     Standard method to call Claude API with consistent parameters.
@@ -337,6 +519,44 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             prev_msg['content'] = merged_content
 
     messages = merged_messages
+
+    # Validate: check for orphaned tool_use blocks (no matching tool_result)
+    # This can happen when user messages arrive while tools are executing
+    if _has_orphaned_tool_uses(messages) and conversation_id:
+        logger.warning(f"[CLAUDE_CONTEXT] Orphaned tool_use detected in session {session_id}, reloading from DB to self-heal")
+        reloaded = await load_validated_messages_from_db(conversation_id, session_id)
+        if reloaded:
+            # Re-fetch stripped messages and re-run merge logic
+            messages = await get_chat_messages_for_claude(session_id)
+            merged_messages = []
+            for msg in messages:
+                if not merged_messages or merged_messages[-1]['role'] != msg['role']:
+                    merged_messages.append(msg)
+                else:
+                    prev_msg = merged_messages[-1]
+                    prev_content = prev_msg['content']
+                    curr_content = msg['content']
+                    prev_blocks = prev_content if isinstance(prev_content, list) else [{"type": "text", "text": prev_content}]
+                    curr_blocks = curr_content if isinstance(curr_content, list) else [{"type": "text", "text": curr_content}]
+                    if msg['role'] == 'user':
+                        tool_results = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_result']
+                        text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
+                        merged_content = tool_results + text_blocks
+                    else:
+                        text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
+                        tool_uses = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_use']
+                        merged_content = text_blocks + tool_uses
+                    prev_msg['content'] = merged_content
+            messages = merged_messages
+            logger.info(f"[CLAUDE_CONTEXT] Self-healed: reloaded and re-merged {len(messages)} messages")
+        else:
+            # Fallback: insert synthetic tool_results so the API call doesn't fail
+            logger.warning(f"[CLAUDE_CONTEXT] DB reload failed, inserting synthetic tool_results as fallback")
+            _fix_orphaned_tool_uses(messages)
+    elif _has_orphaned_tool_uses(messages):
+        # No conversation_id available, use fallback
+        logger.warning(f"[CLAUDE_CONTEXT] Orphaned tool_use detected but no conversation_id, inserting synthetic tool_results")
+        _fix_orphaned_tool_uses(messages)
 
     # Log the conversation context being sent to Claude
     logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}, stream={stream}")
@@ -3770,90 +3990,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.warning(f"Redis session for conversation {session_conversation_id} has incomplete tool execution, reloading from database")
             elif len(messages) == 0:
                 logger.info(f"Redis session empty for conversation {session_conversation_id}, loading history from database")
-            try:
-                # Get all messages from database for this conversation
-                query = supabase.table("messages")\
-                    .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
-                    .eq("conversation_id", session_conversation_id)\
-                    .order("timestamp", desc=False)
-
-                response = query.execute()
-                db_messages = response.data if response.data else []
-
-                # Build Redis session from database messages
-                redis_messages = []
-                # First pass: identify valid (non-cancelled) tool_use IDs
-                tool_use_ids_with_results = set()
-                valid_tool_use_ids = set()
-
-                # Collect all tool_result IDs
-                for msg in db_messages:
-                    if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
-                        for block in msg['tool_content']:
-                            if isinstance(block, dict) and block.get('tool_use_id'):
-                                tool_use_ids_with_results.add(block['tool_use_id'])
-
-                # Collect valid (non-cancelled) tool_use IDs
-                for msg in db_messages:
-                    if not msg.get('cancelled') and msg.get('content_type') == 'tool_use' and msg.get('tool_content'):
-                        for block in msg['tool_content']:
-                            if isinstance(block, dict) and block.get('id'):
-                                valid_tool_use_ids.add(block['id'])
-
-                # Second pass: build messages, skipping incomplete/orphaned tool blocks
-                for msg in db_messages:
-                    # Skip cancelled messages
-                    if msg.get('cancelled'):
-                        continue
-
-                    content_type = msg.get('content_type', 'text')
-                    tool_content = msg.get('tool_content')
-
-                    # Handle tool_use messages - skip if no corresponding tool_result
-                    if content_type == 'tool_use' and tool_content:
-                        tool_use_id = None
-                        for block in tool_content:
-                            if isinstance(block, dict) and block.get('id'):
-                                tool_use_id = block['id']
-                                break
-
-                        if tool_use_id and tool_use_id not in tool_use_ids_with_results:
-                            logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
-                            continue
-
-                        logger.info(f"📥 DB load (process_message_task): tool_use, db_timestamp={msg.get('timestamp')}")
-                        redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
-                    elif content_type == 'tool_result' and tool_content:
-                        # Skip orphaned tool_results whose tool_use was cancelled
-                        tool_use_id = None
-                        for block in tool_content:
-                            if isinstance(block, dict) and block.get('tool_use_id'):
-                                tool_use_id = block['tool_use_id']
-                                break
-
-                        if tool_use_id and tool_use_id not in valid_tool_use_ids:
-                            logger.warning(f"Skipping orphaned tool_result (tool_use was cancelled): {tool_use_id}")
-                            continue
-
-                        logger.info(f"📥 DB load (process_message_task): tool_result, db_timestamp={msg.get('timestamp')}")
-                        redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
-                    # Handle regular text messages
-                    elif msg['message_sender'] == 'USER':
-                        logger.info(f"📥 DB load (process_message_task): USER text, db_timestamp={msg.get('timestamp')}")
-                        redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
-                    elif msg['message_sender'] == 'ASSISTANT':
-                        logger.info(f"📥 DB load (process_message_task): ASSISTANT text, db_timestamp={msg.get('timestamp')}")
-                        redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
-
-                # Populate Redis session with conversation history
-                if redis_messages:
-                    await set_chat_messages(session_id, redis_messages)
-                    messages = redis_messages
-                    logger.info(f"Populated Redis session with {len(redis_messages)} messages from database")
-                
-            except Exception as e:
-                logger.error(f"Error loading conversation history from database: {str(e)}")
-                # Continue with empty context if database load fails
+            validated = await load_validated_messages_from_db(session_conversation_id, session_id)
+            if validated is not None:
+                messages = validated
         
         logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(messages)}")
         
