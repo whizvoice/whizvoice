@@ -684,6 +684,18 @@ session_timestamps_lock = asyncio.Lock()
 anthropic_clients_cache_lock = asyncio.Lock()
 request_states_lock = asyncio.Lock()
 
+# Per-conversation locks for subset detection to prevent race conditions
+# when multiple messages arrive concurrently for the same conversation
+subset_detection_locks: Dict[int, asyncio.Lock] = {}
+subset_detection_locks_lock = asyncio.Lock()
+
+
+async def get_subset_detection_lock(conversation_id: int) -> asyncio.Lock:
+    """Get or create a per-conversation lock for subset detection"""
+    async with subset_detection_locks_lock:
+        if conversation_id not in subset_detection_locks:
+            subset_detection_locks[conversation_id] = asyncio.Lock()
+        return subset_detection_locks[conversation_id]
 
 
 
@@ -4273,19 +4285,25 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # Track which message IDs this request is responding to
         # Use processing_conversation_id for database queries
-        user_message_ids = get_user_message_ids_since_last_bot(processing_conversation_id)
-        if redis_managers and "request_messages" in redis_managers:
-            await redis_managers["request_messages"].set_messages(
-                request_id, user_message_ids, processing_conversation_id
-            )
-            logger.info(f"Tracking request {request_id} responding to message IDs: {user_message_ids}")
+        # CRITICAL: Lock per-conversation to prevent race condition when multiple messages
+        # arrive concurrently (e.g. from retry queue). Without this lock, Task B's
+        # detect_and_cancel_subset_requests() may run before Task A's set_messages()
+        # completes, causing subset detection to miss requests not yet registered in Redis.
+        subset_lock = await get_subset_detection_lock(processing_conversation_id)
+        async with subset_lock:
+            user_message_ids = get_user_message_ids_since_last_bot(processing_conversation_id)
+            if redis_managers and "request_messages" in redis_managers:
+                await redis_managers["request_messages"].set_messages(
+                    request_id, user_message_ids, processing_conversation_id
+                )
+                logger.info(f"Tracking request {request_id} responding to message IDs: {user_message_ids}")
 
-        # Detect and cancel subset requests
-        cancelled_requests = await detect_and_cancel_subset_requests(
-            processing_conversation_id, user_message_ids, websocket, session_id
-        )
-        if cancelled_requests:
-            logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {processing_conversation_id}")
+            # Detect and cancel subset requests
+            cancelled_requests = await detect_and_cancel_subset_requests(
+                processing_conversation_id, user_message_ids, websocket, session_id
+            )
+            if cancelled_requests:
+                logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {processing_conversation_id}")
 
         # Check if this task has been marked for cancellation AFTER critical housekeeping
         # All important work (DB save, Redis add) is done, safe to exit if cancelled
