@@ -20,6 +20,7 @@ from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
+from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_get_next_alarm, agent_toggle_flashlight, agent_add_calendar_event, agent_dial_phone_number, agent_set_volume
 from screen_agent_queue import screen_agent_queue
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message
 from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, get_music_app_preference, set_music_app_preference
@@ -135,7 +136,7 @@ PENDING RESULT: When you've requested something with a tool use and it hasn't co
 """
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
+tools = asana_tools + about_me_tools + screen_agent_tools + device_control_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
 
 # Pre-build variant with parent-required description for get_new_asana_task_id
 tools_parent_required = []
@@ -1130,6 +1131,126 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": None
+    },
+    # ========== Device Control Tools (direct intents/APIs) ==========
+    "agent_set_alarm": {
+        "function_name": "agent_set_alarm",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('hour'),
+            args.get('minute'),
+            args.get('label'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "hour is required."} if args.get('hour') is None else ({"error": "minute is required."} if args.get('minute') is None else None)
+    },
+    "agent_set_timer": {
+        "function_name": "agent_set_timer",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('seconds'),
+            args.get('label'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "seconds is required."} if args.get('seconds') is None else None
+    },
+    "agent_dismiss_alarm": {
+        "function_name": "agent_dismiss_alarm",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "agent_get_next_alarm": {
+        "function_name": "agent_get_next_alarm",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "agent_toggle_flashlight": {
+        "function_name": "agent_toggle_flashlight",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('turn_on'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "turn_on is required."} if args.get('turn_on') is None else None
+    },
+    "agent_add_calendar_event": {
+        "function_name": "agent_add_calendar_event",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('title'),
+            args.get('begin_time'),
+            args.get('end_time'),
+            args.get('description'),
+            args.get('location'),
+            args.get('all_day', False),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "title is required."} if not args.get('title') else ({"error": "begin_time is required."} if not args.get('begin_time') else None)
+    },
+    "agent_dial_phone_number": {
+        "function_name": "agent_dial_phone_number",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('phone_number'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "phone_number is required."} if not args.get('phone_number') else None
+    },
+    "agent_set_volume": {
+        "function_name": "agent_set_volume",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('volume_level'),
+            args.get('stream', 'music'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "volume_level is required."} if args.get('volume_level') is None else None
     },
     "agent_play_youtube_music": {
         "function_name": "agent_play_youtube_music",
