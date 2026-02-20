@@ -132,7 +132,7 @@ FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *
 
 DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. PLEASE CHECK THE HISTORY. Often multiple Asana tasks will be created as different versions of the same user intent, and YOU NEED TO PROACTIVELY DELETE THE OLD ONES.
 
-PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending...". This will be updated later with the real tool result.
+PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
 """
 
 # can concatenate additional tools here if needed
@@ -2425,7 +2425,24 @@ async def websocket_endpoint(websocket: WebSocket):
                             logger.warning("Received tool_result without request_id")
                         
                         continue  # Don't process as a regular message
-                    
+
+                    # Handle tool status messages (e.g., waiting for unlock)
+                    if message_type == "tool_status":
+                        tool_request_id = message_data.get("request_id")
+                        status = message_data.get("status", "")
+                        status_message = message_data.get("message", "")
+                        logger.info(f"Received tool_status: request_id={tool_request_id}, status={status}")
+                        if tool_request_id and status == "waiting_for_unlock":
+                            metadata = tool_result_handler.extend_deadline(tool_request_id, 65.0)
+                            # Update the Redis placeholder so Claude sees why the tool is waiting
+                            if metadata and metadata.get('tool_use_id') and metadata.get('session_id'):
+                                await update_tool_results(
+                                    metadata['session_id'],
+                                    {metadata['tool_use_id']: json.dumps("Waiting for user to unlock phone...")}
+                                )
+                                logger.info(f"Updated Redis placeholder for {metadata['tool_use_id']} to unlock-pending status")
+                        continue
+
                     # Handle cancellation requests
                     if message_type == "cancel":
                         cancel_request_id = message_data.get("cancel_request_id")
@@ -5070,6 +5087,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Screen agent tools will be queued (one at a time), others run in parallel
                 async def execute_single_tool(tb):
                     """Execute a single tool and return (tool_block, result)"""
+                    # Set contextvars so wait_for_tool_result can store metadata
+                    # linking request_id -> tool_use_id/session_id for extend_deadline
+                    from tool_result_handler import _current_tool_use_id, _current_session_id
+                    _current_tool_use_id.set(tb.id)
+                    _current_session_id.set(session_id)
                     result = await execute_tool_with_queue(
                         tb.name,
                         tb.input,
