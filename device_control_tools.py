@@ -292,7 +292,7 @@ device_control_tools = [
             "properties": {
                 "volume_level": {
                     "type": "integer",
-                    "description": "The volume level to set (0-15, where 0 is mute and 15 is maximum)."
+                    "description": "The volume level to set (0 to 25, where 0 is mute). The tool response will include the actual max_volume for the device."
                 },
                 "stream": {
                     "type": "string",
