@@ -2991,6 +2991,25 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                     reason="superseded_by_new_request",
                     session_id=session_id
                 )
+
+        # For cancelled requests that had no bot messages yet (still processing),
+        # send a delete_message notification so the client can remove the request
+        # from pendingRequests and stop the typing indicator.
+        cancelled_with_bot_messages = {req_id for _, req_id in cancelled_bot_messages}
+        for req_id in cancelled_requests:
+            if req_id not in cancelled_with_bot_messages:
+                logger.info(f"Sending delete notification for request {req_id} with no bot messages (superseded before response)")
+                delete_notification = {
+                    "type": "delete_message",
+                    "message_id": None,
+                    "conversation_id": conversation_id,
+                    "request_id": req_id,
+                    "reason": "superseded_by_new_request"
+                }
+                try:
+                    await broadcast_to_conversation(conversation_id, delete_notification)
+                except Exception as e:
+                    logger.error(f"Failed to broadcast delete notification for request {req_id}: {e}")
             
     except Exception as e:
         logger.error(f"Error detecting subset requests: {e}")
