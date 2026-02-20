@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
-from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_get_next_alarm, agent_toggle_flashlight, agent_add_calendar_event, agent_dial_phone_number, agent_set_volume
+from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_get_next_alarm, agent_toggle_flashlight, agent_add_calendar_event, agent_dial_phone_number, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
 from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, get_music_app_preference, set_music_app_preference
@@ -1265,6 +1265,20 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "volume_level is required."} if args.get('volume_level') is None else None
     },
+    "agent_lookup_phone_contacts": {
+        "function_name": "agent_lookup_phone_contacts",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('name'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
+    },
     "agent_play_youtube_music": {
         "function_name": "agent_play_youtube_music",
         "requires_auth": False,
@@ -1471,7 +1485,12 @@ TOOL_REGISTRY = {
             args.get('nickname'),  # Optional - defaults to real_name if not provided
             args.get('real_name'),
             args.get('preferred_app'),
-            args.get('email')
+            args.get('phone_number'),
+            args.get('phone_label'),
+            args.get('email'),
+            args.get('email_label'),
+            args.get('address'),
+            args.get('address_label')
         ),
         "validation": lambda args: (
             {"error": "real_name is required."} if not args.get('real_name') else

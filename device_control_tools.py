@@ -153,6 +153,17 @@ async def agent_set_volume(volume_level: int, stream: str = "music",
     )
 
 
+# ========== Contacts Lookup ==========
+
+async def agent_lookup_phone_contacts(name: str, user_id: str = None, websocket=None,
+                                       tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Search the device's native phone contacts by name."""
+    return await _send_device_tool(
+        "agent_lookup_phone_contacts", {"name": name},
+        user_id, websocket, tool_result_handler, conversation_id
+    )
+
+
 # ========== Tool definitions for Claude ==========
 
 device_control_tools = [
@@ -301,6 +312,21 @@ device_control_tools = [
                 }
             },
             "required": ["volume_level"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_lookup_phone_contacts",
+        "description": "Search the device's native phone contacts by name. Returns matching contacts with their phone numbers, email addresses, and postal addresses, each labeled by type (mobile, work, home, personal, etc.). Use this before add_contact_preference if the user doesn't provide a phone number, email, or address — to auto-fill from their phone contacts. If the device hasn't granted contacts permission, returns an empty list — ask the user for the info directly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The name to search for in the device's phone contacts"
+                }
+            },
+            "required": ["name"]
         }
     }
 ]
