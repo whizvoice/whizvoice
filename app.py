@@ -2459,15 +2459,17 @@ async def websocket_endpoint(websocket: WebSocket):
                         status = message_data.get("status", "")
                         status_message = message_data.get("message", "")
                         logger.info(f"Received tool_status: request_id={tool_request_id}, status={status}")
-                        if tool_request_id and status == "waiting_for_unlock":
+                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_contacts_permission"):
                             metadata = tool_result_handler.extend_deadline(tool_request_id, 65.0)
                             # Update the Redis placeholder so Claude sees why the tool is waiting
                             if metadata and metadata.get('tool_use_id') and metadata.get('session_id'):
+                                placeholder = ("Waiting for user to unlock phone..." if status == "waiting_for_unlock"
+                                               else "Waiting for user to grant contacts permission...")
                                 await update_tool_results(
                                     metadata['session_id'],
-                                    {metadata['tool_use_id']: json.dumps("Waiting for user to unlock phone...")}
+                                    {metadata['tool_use_id']: json.dumps(placeholder)}
                                 )
-                                logger.info(f"Updated Redis placeholder for {metadata['tool_use_id']} to unlock-pending status")
+                                logger.info(f"Updated Redis placeholder for {metadata['tool_use_id']} to {status} status")
                         continue
 
                     # Handle cancellation requests
