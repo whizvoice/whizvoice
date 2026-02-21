@@ -310,7 +310,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_press_call_button",
-        "description": "Press the call button in the phone dialer to place a call. The dialer must already be open with a number entered (use agent_dial_phone_number first). Only use this after the user has verbally confirmed they want to place the call.",
+        "description": "Press the call button in the phone dialer to place a call. The dialer must already be open with a number entered (use agent_dial_phone_number first). Only use this after the user has verbally confirmed they want to place the call. Speakerphone is automatically enabled after the call is placed. After this tool succeeds, call agent_close_app right away to dismiss Whiz so the user can take the phone call.",
         "input_schema": {
             "type": "object",
             "properties": {
