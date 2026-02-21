@@ -141,6 +141,19 @@ async def agent_dial_phone_number(phone_number: str, user_id: str = None, websoc
     )
 
 
+async def agent_press_call_button(expected_number: str = None, user_id: str = None,
+                                  websocket=None, tool_result_handler=None,
+                                  conversation_id: str = None) -> dict:
+    """Press the call button in the dialer via accessibility service."""
+    params = {}
+    if expected_number:
+        params["expected_number"] = expected_number
+    return await _send_device_tool(
+        "agent_press_call_button", params,
+        user_id, websocket, tool_result_handler, conversation_id
+    )
+
+
 # ========== Volume ==========
 
 async def agent_set_volume(volume_level: int, stream: str = "music",
@@ -292,6 +305,21 @@ device_control_tools = [
                 }
             },
             "required": ["phone_number"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_press_call_button",
+        "description": "Press the call button in the phone dialer to place a call. The dialer must already be open with a number entered (use agent_dial_phone_number first). Only use this after the user has verbally confirmed they want to place the call.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expected_number": {
+                    "type": "string",
+                    "description": "Optional safety check: the phone number you expect to be dialed. If provided, the tool verifies the displayed number matches before pressing call."
+                }
+            },
+            "required": []
         }
     },
     {
