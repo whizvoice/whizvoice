@@ -425,7 +425,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "get_contact_preference",
-        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. This automatically searches saved contacts first, then falls back to the device's native phone contacts if not found. If the result includes 'device_contacts', those are matches from the phone — you can use that info directly or suggest saving it. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), send the message anyway. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name.",
+        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages or making phone calls. This automatically searches saved contacts first, then falls back to the device's native phone contacts if not found. If the result includes 'device_contacts', those are matches from the phone — you can use that info directly or suggest saving it. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), send the message anyway. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name.",
         "input_schema": {
             "type": "object",
             "properties": {

@@ -345,7 +345,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_lookup_phone_contacts",
-        "description": "Search the device's native phone contacts by name. Returns matching contacts with their phone numbers, email addresses, and postal addresses, each labeled by type (mobile, work, home, personal, etc.). Use this before add_contact_preference if the user doesn't provide a phone number, email, or address — to auto-fill from their phone contacts. If the device hasn't granted contacts permission, returns an empty list — ask the user for the info directly.",
+        "description": "Unless user specifies phone contacts or Android contacts, ALWAYS use get_contact_preference and NOT THIS TOOL since get_contact_preference will fallback to phone contacts. Otherwise, use this tool to search the device's native phone contacts by name. Returns matching contacts with their phone numbers, email addresses, and postal addresses, each labeled by type (mobile, work, home, personal, etc.). If the device hasn't granted contacts permission, returns an empty list — ask the user for the info directly.",
         "input_schema": {
             "type": "object",
             "properties": {
