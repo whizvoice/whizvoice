@@ -295,7 +295,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_dial_phone_number",
-        "description": "Open the phone dialer with a number pre-filled. The user will need to tap the call button to actually place the call. Use this when the user asks to call or dial a phone number.",
+        "description": "Open the phone dialer with a number pre-filled. If the number is for a saved contact, you can go ahead and call the agent_press_call_button tool after to make the call. Otherwise, confirm the number with the user before calling agent_press_call_button to make the call.",
         "input_schema": {
             "type": "object",
             "properties": {
