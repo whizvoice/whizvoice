@@ -1501,7 +1501,15 @@ TOOL_REGISTRY = {
     "get_contact_preference": {
         "function_name": "get_contact_preference",
         "requires_auth": True,
-        "args_mapping": lambda args, user_id: (user_id, args.get('name')),
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            args.get('name'),
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     },
     "list_contact_preferences": {

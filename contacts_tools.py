@@ -150,13 +150,20 @@ def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str
         }
 
 
-def get_contact_preference(user_id: str, name: str) -> Dict[str, Any]:
+async def get_contact_preference(user_id: str, name: str,
+                                  websocket=None, tool_result_handler=None,
+                                  conversation_id: str = None) -> Dict[str, Any]:
     """
     Look up a contact by name (can be nickname or real name) to get their details.
+    If not found in saved preferences, automatically falls back to searching the
+    device's native phone contacts.
 
     Args:
         user_id: The user ID
         name: The name to look up - can be a nickname (e.g., 'husband', 'mom') or real name (e.g., 'Robin Pham')
+        websocket: Optional websocket for device contact lookup fallback
+        tool_result_handler: Optional handler for device tool results
+        conversation_id: Optional conversation ID for device tool context
 
     Returns:
         Dictionary with found status and contact details if found
@@ -169,14 +176,12 @@ def get_contact_preference(user_id: str, name: str) -> Dict[str, Any]:
 
         # Get contacts from preferences
         contacts_json = get_preference(user_id, 'contacts')
-        if not contacts_json:
-            return {"found": False}
-
-        try:
-            contacts = json.loads(contacts_json) if isinstance(contacts_json, str) else contacts_json
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse contacts for user {user_id}")
-            return {"found": False}
+        contacts = {}
+        if contacts_json:
+            try:
+                contacts = json.loads(contacts_json) if isinstance(contacts_json, str) else contacts_json
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse contacts for user {user_id}")
 
         def _build_result(nickname, contact):
             return {
@@ -201,6 +206,30 @@ def get_contact_preference(user_id: str, name: str) -> Dict[str, Any]:
             real_name = contact.get("real_name", "")
             if real_name and normalize_nickname(real_name) == normalized_name:
                 return _build_result(nickname, contact)
+
+        # Not found in preferences — fall back to device phone contacts
+        if websocket is not None:
+            logger.info(f"Contact '{normalized_name}' not in preferences, falling back to device contacts")
+            try:
+                from device_control_tools import agent_lookup_phone_contacts
+                device_result = await agent_lookup_phone_contacts(
+                    name, user_id, websocket, tool_result_handler, conversation_id
+                )
+                device_contacts = device_result.get("contacts", [])
+                if device_contacts:
+                    logger.info(f"Found {len(device_contacts)} device contact(s) for '{name}'")
+                    return {
+                        "found": False,
+                        "device_contacts": device_contacts,
+                        "message": f"Not found in saved contacts, but found {len(device_contacts)} match(es) in phone contacts."
+                    }
+                elif device_result.get("permission_denied"):
+                    logger.info(f"Device contacts permission denied for '{name}'")
+                    # Fall through to the not-found response
+                else:
+                    logger.info(f"No device contacts found for '{name}'")
+            except Exception as e:
+                logger.warning(f"Device contacts fallback failed for '{name}': {e}")
 
         return {"found": False, "reminder": "DO NOT ask the user to create a contact unless you absolutely cannot proceed without it. For example if you have the name and messaging app you do not need to create a contact to proceed to send a message."}
 
@@ -396,7 +425,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "get_contact_preference",
-        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. If the contact isn't found and you have the info you need (e.g. name and messaging app), send the message anyway. If the contact isn't found and you don't have enough information, you can ask the user if they want to make the contact. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name.",
+        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. This automatically searches saved contacts first, then falls back to the device's native phone contacts if not found. If the result includes 'device_contacts', those are matches from the phone — you can use that info directly or suggest saving it. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), send the message anyway. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name.",
         "input_schema": {
             "type": "object",
             "properties": {
