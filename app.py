@@ -17,7 +17,7 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
 from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_get_next_alarm, agent_toggle_flashlight, agent_add_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
@@ -119,6 +119,10 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
    - If the user explicitly specifies an app in their request (e.g., "play on YouTube Music"), use that app and optionally save it as their preference
 7. For deciding on a random color when a list of colors isn't specified, ALWAYS use the pick_random_color tool
 8. For weather, use the get_weather tool with the appropriate days_ahead parameter (0 = today, 1 = tomorrow, etc.)
+9. For alarms and timers:
+   - For relative times like "in 5 minutes" or "1 minute from now", use 'agent_set_timer' with the duration in seconds
+   - For absolute times like "at 7 AM" or "at 3:30 PM", use 'agent_set_alarm'
+   - If you need to know the current date/time (e.g., to calculate an absolute alarm time), use 'get_current_datetime' first
 
 IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather than just describing what you would do.
 
@@ -905,6 +909,12 @@ TOOL_REGISTRY = {
     },
     "get_current_date": {
         "function_name": "get_current_date",
+        "requires_auth": False,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
+    "get_current_datetime": {
+        "function_name": "get_current_datetime",
         "requires_auth": False,
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None

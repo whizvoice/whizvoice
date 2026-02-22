@@ -186,6 +186,21 @@ def get_current_date(user_id: str = None) -> str:
     # Fallback to PST if no user_id or timezone error
     return datetime.now(pytz.timezone('America/Los_Angeles')).strftime('%Y-%m-%d')
 
+def get_current_datetime(user_id: str = None) -> str:
+    """Get the current date and time, using the user's timezone if available."""
+    if user_id:
+        try:
+            success, user_tz = get_user_timezone(user_id)
+            if success:
+                return datetime.now(user_tz).strftime('%Y-%m-%d %H:%M %Z')
+            else:
+                return f"Error using timezone for user {user_id}: {user_tz}"
+        except Exception as e:
+            return f"Error using timezone for user {user_id}, falling back to PST: {str(e)}"
+
+    # Fallback to PST if no user_id or timezone error
+    return datetime.now(pytz.timezone('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M %Z')
+
 def get_parent_tasks(user_id: str):
     workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
@@ -381,6 +396,16 @@ asana_tools = [
         "type": "custom",
         "name": "get_current_date",
         "description": "Get today's date in YYYY-MM-DD format.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "get_current_datetime",
+        "description": "Get the current date and time in the user's timezone.",
         "input_schema": {
             "type": "object",
             "properties": {},
