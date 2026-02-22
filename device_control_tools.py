@@ -183,7 +183,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_set_alarm",
-        "description": "Set an alarm on the user's Android device. The alarm will be created silently without opening the Clock app. Use this when the user asks to set an alarm, wake-up alarm, etc. Use the get_current_datetime tool to get the current date time, in order to calculate the date time the alarm needs to be set for.",
+        "description": "Set an alarm on the user's Android device. Use this when the user asks to set an alarm, wake-up alarm, etc. Use the get_current_datetime tool to get the current date time, in order to calculate the date time the alarm needs to be set for. If the user asks you to set an alarm for a relative time less than three minutes from now , use agent_set_timer instead so that it's more accurate .",
         "input_schema": {
             "type": "object",
             "properties": {
