@@ -133,12 +133,14 @@ async def agent_toggle_flashlight(turn_on: bool, user_id: str = None, websocket=
 
 # ========== Calendar ==========
 
-async def agent_add_calendar_event(title: str, begin_time: str, end_time: str = None,
-                                   description: str = None, location: str = None,
-                                   all_day: bool = False,
-                                   user_id: str = None, websocket=None,
-                                   tool_result_handler=None, conversation_id: str = None) -> dict:
-    """Add a calendar event (opens calendar app pre-filled)."""
+async def agent_draft_calendar_event(title: str, begin_time: str, end_time: str = None,
+                                     description: str = None, location: str = None,
+                                     all_day: bool = False, attendees: str = None,
+                                     recurrence: str = None, availability: str = None,
+                                     access_level: str = None, timezone: str = None,
+                                     user_id: str = None, websocket=None,
+                                     tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Draft a calendar event (opens calendar app pre-filled)."""
     params = {"title": title, "begin_time": begin_time, "all_day": all_day}
     if end_time:
         params["end_time"] = end_time
@@ -146,8 +148,27 @@ async def agent_add_calendar_event(title: str, begin_time: str, end_time: str = 
         params["description"] = description
     if location:
         params["location"] = location
+    if attendees:
+        params["attendees"] = attendees
+    if recurrence:
+        params["recurrence"] = recurrence
+    if availability:
+        params["availability"] = availability
+    if access_level:
+        params["access_level"] = access_level
+    if timezone:
+        params["timezone"] = timezone
     return await _send_device_tool(
-        "agent_add_calendar_event", params, user_id, websocket, tool_result_handler, conversation_id
+        "agent_draft_calendar_event", params, user_id, websocket, tool_result_handler, conversation_id
+    )
+
+
+async def agent_save_calendar_event(user_id: str = None, websocket=None,
+                                     tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Save the currently drafted calendar event by pressing the Save button."""
+    return await _send_device_tool(
+        "agent_save_calendar_event", {}, user_id, websocket, tool_result_handler, conversation_id,
+        timeout=10.0
     )
 
 
@@ -313,8 +334,8 @@ device_control_tools = [
     },
     {
         "type": "custom",
-        "name": "agent_add_calendar_event",
-        "description": "Add an event to the user's calendar. This opens the calendar app pre-filled with the event details. Use this when the user asks to add a meeting, event, appointment, or reminder to their calendar.",
+        "name": "agent_draft_calendar_event",
+        "description": "Draft a calendar event. Opens the calendar app pre-filled with event details. After calling this, immediately call agent_save_calendar_event to save. Use when user asks to add a meeting, event, appointment, or reminder to their calendar.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -341,9 +362,41 @@ device_control_tools = [
                 "all_day": {
                     "type": "boolean",
                     "description": "Whether this is an all-day event. Defaults to false."
+                },
+                "attendees": {
+                    "type": "string",
+                    "description": "Comma-separated email addresses of attendees (e.g., 'alice@example.com,bob@example.com')."
+                },
+                "recurrence": {
+                    "type": "string",
+                    "description": "Recurrence rule in RFC 5545 RRULE format (e.g., 'FREQ=WEEKLY;COUNT=10', 'FREQ=DAILY;UNTIL=20250301T000000Z')."
+                },
+                "availability": {
+                    "type": "string",
+                    "description": "Availability during the event: 'busy' or 'free'.",
+                    "enum": ["busy", "free"]
+                },
+                "access_level": {
+                    "type": "string",
+                    "description": "Access level/visibility of the event.",
+                    "enum": ["default", "private", "public"]
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Timezone for the event (e.g., 'America/Los_Angeles', 'Europe/London'). Defaults to device timezone."
                 }
             },
             "required": ["title", "begin_time"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_save_calendar_event",
+        "description": "Save the currently drafted calendar event by pressing the Save button in Google Calendar. Must call agent_draft_calendar_event first to open the calendar with event details pre-filled.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     },
     {
