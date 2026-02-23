@@ -115,7 +115,8 @@ async def agent_delete_alarm(hour: int, minute: int, label: str = None,
     if label:
         params["label"] = label
     return await _send_device_tool(
-        "agent_delete_alarm", params, user_id, websocket, tool_result_handler, conversation_id
+        "agent_delete_alarm", params, user_id, websocket, tool_result_handler, conversation_id,
+        timeout=30.0
     )
 
 
