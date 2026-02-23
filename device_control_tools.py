@@ -107,6 +107,14 @@ async def agent_get_next_alarm(user_id: str = None, websocket=None,
     )
 
 
+async def agent_delete_alarm(user_id: str = None, websocket=None,
+                             tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Open the alarm list so a scheduled alarm can be deleted."""
+    return await _send_device_tool(
+        "agent_delete_alarm", {}, user_id, websocket, tool_result_handler, conversation_id
+    )
+
+
 # ========== Flashlight ==========
 
 async def agent_toggle_flashlight(turn_on: bool, user_id: str = None, websocket=None,
@@ -254,6 +262,16 @@ device_control_tools = [
         "type": "custom",
         "name": "agent_get_next_alarm",
         "description": "Get the time of the next scheduled alarm on the user's Android device. Note: Android only provides the next alarm time, not a full list of all alarms. Use this when the user asks what alarm they have set or when their next alarm is.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_delete_alarm",
+        "description": "Delete a scheduled alarm on the user's Android device. This opens the Clock app's alarm list so the alarm can be removed. Unlike agent_dismiss_alarm (which silences a currently ringing alarm), this tool is for removing a future scheduled alarm.",
         "input_schema": {
             "type": "object",
             "properties": {},
