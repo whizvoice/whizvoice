@@ -1228,12 +1228,15 @@ TOOL_REGISTRY = {
         "is_async": True,
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('hour'),
+            args.get('minute'),
+            args.get('label'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id')
         ),
-        "validation": None
+        "validation": lambda args: {"error": "hour is required."} if args.get('hour') is None else ({"error": "minute is required."} if args.get('minute') is None else None)
     },
     "agent_toggle_flashlight": {
         "function_name": "agent_toggle_flashlight",

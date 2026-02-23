@@ -107,11 +107,15 @@ async def agent_get_next_alarm(user_id: str = None, websocket=None,
     )
 
 
-async def agent_delete_alarm(user_id: str = None, websocket=None,
+async def agent_delete_alarm(hour: int, minute: int, label: str = None,
+                             user_id: str = None, websocket=None,
                              tool_result_handler=None, conversation_id: str = None) -> dict:
-    """Open the alarm list so a scheduled alarm can be deleted."""
+    """Delete a scheduled alarm by finding it in the Clock app's alarm list."""
+    params = {"hour": hour, "minute": minute}
+    if label:
+        params["label"] = label
     return await _send_device_tool(
-        "agent_delete_alarm", {}, user_id, websocket, tool_result_handler, conversation_id
+        "agent_delete_alarm", params, user_id, websocket, tool_result_handler, conversation_id
     )
 
 
@@ -271,11 +275,24 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_delete_alarm",
-        "description": "Delete a scheduled alarm on the user's Android device. This opens the Clock app's alarm list so the alarm can be removed. Unlike agent_dismiss_alarm (which silences a currently ringing alarm), this tool is for removing a future scheduled alarm.",
+        "description": "Delete a scheduled alarm on the user's Android device. This opens the Clock app's alarm list and finds the matching active alarm. Unlike agent_dismiss_alarm (which silences a currently ringing alarm), this tool is for removing a future scheduled alarm.",
         "input_schema": {
             "type": "object",
-            "properties": {},
-            "required": []
+            "properties": {
+                "hour": {
+                    "type": "integer",
+                    "description": "The hour of the alarm to delete (0-23, 24-hour format)."
+                },
+                "minute": {
+                    "type": "integer",
+                    "description": "The minute of the alarm to delete (0-59)."
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Optional label of the alarm, to disambiguate if multiple alarms exist at the same time."
+                }
+            },
+            "required": ["hour", "minute"]
         }
     },
     {
