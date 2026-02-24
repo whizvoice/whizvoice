@@ -1269,7 +1269,6 @@ TOOL_REGISTRY = {
             args.get('availability'),
             args.get('access_level'),
             args.get('timezone'),
-            args.get('redraft', False),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),

@@ -186,13 +186,10 @@ async def agent_save_calendar_event(title: str, begin_time: str, end_time: str =
         params["access_level"] = access_level
     if timezone:
         params["timezone"] = timezone
-    result = await _send_device_tool(
+    return await _send_device_tool(
         "agent_save_calendar_event", params, user_id, websocket, tool_result_handler, conversation_id,
         timeout=30.0
     )
-    if isinstance(result, dict) and result.get("success"):
-        result["note"] = "Google Calendar can take 10 seconds or more to sync and we will show the event on the screen when it is done syncing"
-    return result
 
 
 # ========== Phone ==========
