@@ -466,32 +466,6 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         saved_conv_id = saved_message.get("conversation_id")
         logger.info(f"Successfully saved {message_sender} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}, content_type={content_type}")
 
-        # Update conversation last_message_time and updated_at for incremental sync
-        # Wrapped in retry logic: transient 5xx errors on this PATCH should not kill the
-        # whole request since the message INSERT already succeeded above.
-        conversation_updated = False
-        for attempt in range(3):
-            try:
-                update_result = supabase.table("conversations").update({
-                    "last_message_time": "now()",
-                    "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
-                }).eq("id", conversation_id).execute()
-
-                if update_result.data:
-                    logger.info(f"Updated conversation {conversation_id} timestamps for {message_sender} message")
-                    conversation_updated = True
-                    break
-                else:
-                    logger.warning(f"Conversation {conversation_id} timestamp update returned no data (attempt {attempt + 1}/3)")
-            except Exception as patch_err:
-                logger.warning(f"Conversation {conversation_id} timestamp PATCH failed (attempt {attempt + 1}/3): {patch_err}")
-                if attempt < 2:
-                    backoff = 0.2 * (2 ** attempt)  # 200ms, 400ms
-                    time.sleep(backoff)
-
-        if not conversation_updated:
-            logger.warning(f"All retries failed to update conversation {conversation_id} timestamps — message {message_id} was saved successfully, proceeding")
-
         return (conversation_id, message_id, cancelled_message_ids)
 
     except Exception as e:
@@ -557,17 +531,6 @@ def save_messages_to_db(messages: List[Dict], conversation_id: int, request_id: 
         # Extract saved message IDs
         message_ids = [msg.get("id") for msg in result.data]
         logger.info(f"Successfully batch saved {len(message_ids)} messages to conversation {conversation_id}: {message_ids}")
-
-        # Update conversation timestamps
-        update_result = supabase.table("conversations").update({
-            "last_message_time": "now()",
-            "updated_at": "now()"
-        }).eq("id", conversation_id).execute()
-
-        if update_result.data:
-            logger.info(f"Updated conversation {conversation_id} timestamps after batch insert")
-        else:
-            logger.warning(f"Failed to update conversation {conversation_id} timestamps after batch insert")
 
         return message_ids
 

@@ -3874,12 +3874,6 @@ async def create_message(
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create message")
         
-        # Update conversation last_message_time and updated_at for incremental sync
-        supabase.table("conversations").update({
-            "last_message_time": "now()",
-            "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
-        }).eq("id", actual_conversation_id).execute()
-        
         row = result.data[0]
         return MessageResponse(
             id=row["id"],
