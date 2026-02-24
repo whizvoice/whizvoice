@@ -4,6 +4,7 @@ Extracted from app.py to improve maintainability.
 """
 import json
 import logging
+import time
 from typing import Optional, List, Dict, Tuple
 from datetime import datetime, timedelta
 
@@ -599,14 +600,25 @@ def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_cont
         logger.info(f"Updating tool_result for tool_use_id={tool_use_id} in conversation={conversation_id}")
 
         # Find the pending tool_result message
-        result = supabase.table("messages")\
-            .select("id, tool_content, cancelled")\
-            .eq("conversation_id", conversation_id)\
-            .eq("content_type", "tool_result")\
-            .execute()
+        # Retry up to 3 times with 1s delay - handles race condition where
+        # tool executes before placeholder is saved to DB
+        max_retries = 3
+        result = None
+        for attempt in range(max_retries):
+            result = supabase.table("messages")\
+                .select("id, tool_content, cancelled")\
+                .eq("conversation_id", conversation_id)\
+                .eq("content_type", "tool_result")\
+                .execute()
+
+            if result.data:
+                break
+            if attempt < max_retries - 1:
+                logger.info(f"No tool_result messages found yet for conversation {conversation_id}, retrying in 1s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(1)
 
         if not result.data:
-            logger.error(f"No tool_result messages found in conversation {conversation_id}")
+            logger.error(f"No tool_result messages found in conversation {conversation_id} after {max_retries} attempts")
             return False
 
         # Find the message with matching tool_use_id

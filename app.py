@@ -489,6 +489,17 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     # Always use non-streaming mode
     stream = False
 
+    def _deduplicate_tool_results(blocks):
+        """Keep only the last tool_result per tool_use_id."""
+        seen = {}
+        for i, b in enumerate(blocks):
+            if isinstance(b, dict) and b.get('type') == 'tool_result':
+                seen[b['tool_use_id']] = i
+        # Keep blocks where: not a tool_result, OR it's the last one for its tool_use_id
+        return [b for i, b in enumerate(blocks)
+                if not (isinstance(b, dict) and b.get('type') == 'tool_result')
+                or seen.get(b.get('tool_use_id')) == i]
+
     # CRITICAL: Merge consecutive messages with same role (Claude API requirement)
     # When merging user messages, tool_result blocks MUST come before text blocks
     merged_messages = []
@@ -510,7 +521,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             if msg['role'] == 'user':
                 tool_results = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_result']
                 text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
-                merged_content = tool_results + text_blocks
+                merged_content = _deduplicate_tool_results(tool_results) + text_blocks
             else:
                 # For assistant messages: text blocks MUST come first, then tool_use blocks
                 text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
@@ -542,7 +553,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                     if msg['role'] == 'user':
                         tool_results = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_result']
                         text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
-                        merged_content = tool_results + text_blocks
+                        merged_content = _deduplicate_tool_results(tool_results) + text_blocks
                     else:
                         text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
                         tool_uses = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_use']
