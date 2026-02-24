@@ -1283,12 +1283,22 @@ TOOL_REGISTRY = {
         "is_async": True,
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('title'),
+            args.get('begin_time'),
+            args.get('end_time'),
+            args.get('description'),
+            args.get('location'),
+            args.get('all_day', False),
+            args.get('recurrence'),
+            args.get('availability'),
+            args.get('access_level'),
+            args.get('timezone'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id')
         ),
-        "validation": lambda args: None
+        "validation": lambda args: {"error": "title is required."} if not args.get('title') else ({"error": "begin_time is required."} if not args.get('begin_time') else None)
     },
     "agent_dial_phone_number": {
         "function_name": "agent_dial_phone_number",

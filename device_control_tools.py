@@ -166,11 +166,31 @@ async def agent_draft_calendar_event(title: str, begin_time: str, end_time: str 
     )
 
 
-async def agent_save_calendar_event(user_id: str = None, websocket=None,
+async def agent_save_calendar_event(title: str, begin_time: str, end_time: str = None,
+                                     description: str = None, location: str = None,
+                                     all_day: bool = False, recurrence: str = None,
+                                     availability: str = None, access_level: str = None,
+                                     timezone: str = None,
+                                     user_id: str = None, websocket=None,
                                      tool_result_handler=None, conversation_id: str = None) -> dict:
-    """Save the currently drafted calendar event by pressing the Save button."""
+    """Save a calendar event via ContentProvider insert and dismiss the draft UI."""
+    params = {"title": title, "begin_time": begin_time, "all_day": all_day}
+    if end_time:
+        params["end_time"] = end_time
+    if description:
+        params["description"] = description
+    if location:
+        params["location"] = location
+    if recurrence:
+        params["recurrence"] = recurrence
+    if availability:
+        params["availability"] = availability
+    if access_level:
+        params["access_level"] = access_level
+    if timezone:
+        params["timezone"] = timezone
     return await _send_device_tool(
-        "agent_save_calendar_event", {}, user_id, websocket, tool_result_handler, conversation_id,
+        "agent_save_calendar_event", params, user_id, websocket, tool_result_handler, conversation_id,
         timeout=10.0
     )
 
@@ -399,17 +419,60 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_save_calendar_event",
-        "description": "Save the currently drafted calendar event by pressing the Save button in Google Calendar. Must call agent_draft_calendar_event first to open the calendar with event details pre-filled.",
+        "description": "Save a calendar event directly to the device calendar and dismiss the draft UI. Must call agent_draft_calendar_event first. Pass the same event params (title, begin_time, etc.) that were used in the draft call.",
         "input_schema": {
             "type": "object",
-            "properties": {},
-            "required": []
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "The title/name of the calendar event (same as used in agent_draft_calendar_event)."
+                },
+                "begin_time": {
+                    "type": "string",
+                    "description": "The start time in ISO 8601 format (e.g., '2025-01-15T14:00:00'). Same as used in agent_draft_calendar_event."
+                },
+                "end_time": {
+                    "type": "string",
+                    "description": "The end time in ISO 8601 format. If not provided, defaults to 1 hour after begin_time."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional description/notes for the event."
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Optional location for the event."
+                },
+                "all_day": {
+                    "type": "boolean",
+                    "description": "Whether this is an all-day event. Defaults to false."
+                },
+                "recurrence": {
+                    "type": "string",
+                    "description": "Recurrence rule in RFC 5545 RRULE format (e.g., 'FREQ=WEEKLY;COUNT=10')."
+                },
+                "availability": {
+                    "type": "string",
+                    "description": "Availability during the event: 'busy' or 'free'.",
+                    "enum": ["busy", "free"]
+                },
+                "access_level": {
+                    "type": "string",
+                    "description": "Access level/visibility of the event.",
+                    "enum": ["default", "private", "public"]
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Timezone for the event (e.g., 'America/Los_Angeles'). Defaults to device timezone."
+                }
+            },
+            "required": ["title", "begin_time"]
         }
     },
     {
         "type": "custom",
         "name": "agent_dial_phone_number",
-        "description": "Open the phone dialer with a number pre-filled. If the number is for a saved contact, you can go ahead and call the agent_press_call_button tool after to make the call. Otherwise, confirm the number with the user before calling agent_press_call_button to make the call.",
+        "description": "Open the phone dialer with a number pre-filled. If the number is for a contact saved in the user's contact preferences, you can go ahead and call the agent_press_call_button tool after to make the call. Otherwise, confirm the number with the user before calling agent_press_call_button to make the call. You should always check contact preferences first, and if there's a match call that number and skip looking at the user's Android phone contacts.",
         "input_schema": {
             "type": "object",
             "properties": {

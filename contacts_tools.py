@@ -201,11 +201,33 @@ async def get_contact_preference(user_id: str, name: str,
         if normalized_name in contacts:
             return _build_result(normalized_name, contacts[normalized_name])
 
-        # If not found by nickname, try to match by real_name
+        # If not found by nickname, try to match by real_name (exact)
         for nickname, contact in contacts.items():
             real_name = contact.get("real_name", "")
             if real_name and normalize_nickname(real_name) == normalized_name:
                 return _build_result(nickname, contact)
+
+        # If still not found, try partial match: search term matches any word in real_name
+        partial_matches = []
+        for nickname, contact in contacts.items():
+            real_name = contact.get("real_name", "")
+            if real_name:
+                name_words = normalize_nickname(real_name).split()
+                if normalized_name in name_words:
+                    partial_matches.append((nickname, contact))
+
+        if len(partial_matches) == 1:
+            return _build_result(partial_matches[0][0], partial_matches[0][1])
+        elif len(partial_matches) > 1:
+            results = []
+            for nickname, contact in partial_matches:
+                results.append(_build_result(nickname, contact))
+            return {
+                "found": True,
+                "multiple_matches": True,
+                "contacts": results,
+                "message": f"Found {len(results)} saved contacts matching '{name}'."
+            }
 
         # Not found in preferences — fall back to device phone contacts
         if websocket is not None:
