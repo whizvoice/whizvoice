@@ -138,6 +138,7 @@ async def agent_draft_calendar_event(title: str, begin_time: str, end_time: str 
                                      all_day: bool = False, attendees: str = None,
                                      recurrence: str = None, availability: str = None,
                                      access_level: str = None, timezone: str = None,
+                                     redraft: bool = False,
                                      user_id: str = None, websocket=None,
                                      tool_result_handler=None, conversation_id: str = None) -> dict:
     """Draft a calendar event (opens calendar app pre-filled)."""
@@ -158,6 +159,8 @@ async def agent_draft_calendar_event(title: str, begin_time: str, end_time: str 
         params["access_level"] = access_level
     if timezone:
         params["timezone"] = timezone
+    if redraft:
+        params["redraft"] = redraft
     return await _send_device_tool(
         "agent_draft_calendar_event", params, user_id, websocket, tool_result_handler, conversation_id
     )
@@ -335,7 +338,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_draft_calendar_event",
-        "description": "Draft a calendar event. Opens the calendar app pre-filled with event details. After calling this, immediately call agent_save_calendar_event to save. Use when user asks to add a meeting, event, appointment, or reminder to their calendar.",
+        "description": "Draft a calendar event. Opens the calendar app pre-filled with event details. After calling this, ask the user to confirm the event looks good, and then call agent_save_calendar_event. Use when user asks to add a meeting, event, or appointmentto their calendar. If the user wants to change an already-drafted event, set redraft=true to dismiss the current draft first.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -384,6 +387,10 @@ device_control_tools = [
                 "timezone": {
                     "type": "string",
                     "description": "Timezone for the event (e.g., 'America/Los_Angeles', 'Europe/London'). Defaults to device timezone."
+                },
+                "redraft": {
+                    "type": "boolean",
+                    "description": "Set to true to dismiss the current calendar draft before creating a new one. Use when modifying an already-drafted event."
                 }
             },
             "required": ["title", "begin_time"]
