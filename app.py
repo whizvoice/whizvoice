@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
-from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
+from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
 from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, get_music_app_preference, set_music_app_preference
@@ -1209,6 +1209,19 @@ TOOL_REGISTRY = {
     },
     "agent_dismiss_timer": {
         "function_name": "agent_dismiss_timer",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "agent_dismiss_amdroid_alarm": {
+        "function_name": "agent_dismiss_amdroid_alarm",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
