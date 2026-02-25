@@ -19,9 +19,13 @@ def normalize_nickname(nickname: str) -> str:
     return normalized
 
 
-def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str, preferred_app: str, email: Optional[str] = None) -> Dict[str, Any]:
+def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str, preferred_app: str,
+                           phone_number: Optional[str] = None, phone_label: Optional[str] = None,
+                           email: Optional[str] = None, email_label: Optional[str] = None,
+                           address: Optional[str] = None, address_label: Optional[str] = None) -> Dict[str, Any]:
     """
-    Add or update a contact with nickname, real name, and preferred messaging app.
+    Add or update a contact with nickname, real name, preferred messaging app,
+    and optional keyed phone numbers, emails, and addresses.
 
     Args:
         user_id: The user ID
@@ -29,7 +33,12 @@ def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str
                   If not provided, defaults to the real_name.
         real_name: The real name of the contact (e.g., 'Robin Pham')
         preferred_app: The preferred messaging app ('whatsapp' or 'sms')
-        email: Optional email address for the contact (used for Asana task assignment)
+        phone_number: Optional phone number (e.g., '+1234567890')
+        phone_label: Label for the phone number (default 'mobile')
+        email: Optional email address
+        email_label: Label for the email (default 'personal')
+        address: Optional postal address
+        address_label: Label for the address (default 'home')
 
     Returns:
         Dictionary with success status and message
@@ -72,21 +81,49 @@ def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str
         # Add/update the contact
         is_update = normalized_nickname in contacts
 
-        # Preserve existing emails list when updating
-        existing_emails = contacts[normalized_nickname].get("emails", []) if is_update else []
+        # Preserve existing keyed fields when updating
+        existing_contact = contacts.get(normalized_nickname, {})
+        existing_phone_numbers = existing_contact.get("phone_numbers", {})
+        existing_emails = existing_contact.get("emails", {})
+        existing_addresses = existing_contact.get("addresses", {})
+        existing_primary_phone = existing_contact.get("primary_phone")
+        existing_primary_email = existing_contact.get("primary_email")
+        existing_primary_address = existing_contact.get("primary_address")
 
         contacts[normalized_nickname] = {
             "real_name": real_name,
             "preferred_app": preferred_app
         }
 
-        # Handle email: preserve existing list, add new email if provided
+        # Handle phone number
+        if phone_number:
+            label = phone_label or "mobile"
+            existing_phone_numbers[label] = phone_number
+            if not existing_primary_phone:
+                existing_primary_phone = label
+        if existing_phone_numbers:
+            contacts[normalized_nickname]["phone_numbers"] = existing_phone_numbers
+            contacts[normalized_nickname]["primary_phone"] = existing_primary_phone
+
+        # Handle email (keyed format)
         if email:
-            if email not in existing_emails:
-                existing_emails.append(email)
+            label = email_label or "personal"
+            existing_emails[label] = email
+            if not existing_primary_email:
+                existing_primary_email = label
+        if existing_emails:
             contacts[normalized_nickname]["emails"] = existing_emails
-        elif existing_emails:
-            contacts[normalized_nickname]["emails"] = existing_emails
+            contacts[normalized_nickname]["primary_email"] = existing_primary_email
+
+        # Handle address
+        if address:
+            label = address_label or "home"
+            existing_addresses[label] = address
+            if not existing_primary_address:
+                existing_primary_address = label
+        if existing_addresses:
+            contacts[normalized_nickname]["addresses"] = existing_addresses
+            contacts[normalized_nickname]["primary_address"] = existing_primary_address
 
         # Save back to preferences
         success = set_preference(user_id, 'contacts', json.dumps(contacts))
@@ -113,13 +150,20 @@ def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str
         }
 
 
-def get_contact_preference(user_id: str, name: str) -> Dict[str, Any]:
+async def get_contact_preference(user_id: str, name: str,
+                                  websocket=None, tool_result_handler=None,
+                                  conversation_id: str = None) -> Dict[str, Any]:
     """
     Look up a contact by name (can be nickname or real name) to get their details.
+    If not found in saved preferences, automatically falls back to searching the
+    device's native phone contacts.
 
     Args:
         user_id: The user ID
         name: The name to look up - can be a nickname (e.g., 'husband', 'mom') or real name (e.g., 'Robin Pham')
+        websocket: Optional websocket for device contact lookup fallback
+        tool_result_handler: Optional handler for device tool results
+        conversation_id: Optional conversation ID for device tool context
 
     Returns:
         Dictionary with found status and contact details if found
@@ -132,39 +176,84 @@ def get_contact_preference(user_id: str, name: str) -> Dict[str, Any]:
 
         # Get contacts from preferences
         contacts_json = get_preference(user_id, 'contacts')
-        if not contacts_json:
-            return {"found": False}
+        contacts = {}
+        if contacts_json:
+            try:
+                contacts = json.loads(contacts_json) if isinstance(contacts_json, str) else contacts_json
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse contacts for user {user_id}")
 
-        try:
-            contacts = json.loads(contacts_json) if isinstance(contacts_json, str) else contacts_json
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse contacts for user {user_id}")
-            return {"found": False}
+        def _build_result(nickname, contact):
+            return {
+                "found": True,
+                "nickname": nickname,
+                "real_name": contact.get("real_name"),
+                "preferred_app": contact.get("preferred_app"),
+                "phone_numbers": contact.get("phone_numbers", {}),
+                "primary_phone": contact.get("primary_phone"),
+                "emails": contact.get("emails", {}),
+                "primary_email": contact.get("primary_email"),
+                "addresses": contact.get("addresses", {}),
+                "primary_address": contact.get("primary_address")
+            }
 
         # First, try to match by nickname (key)
         if normalized_name in contacts:
-            contact = contacts[normalized_name]
-            return {
-                "found": True,
-                "nickname": normalized_name,
-                "real_name": contact.get("real_name"),
-                "preferred_app": contact.get("preferred_app"),
-                "emails": contact.get("emails", [])
-            }
+            return _build_result(normalized_name, contacts[normalized_name])
 
-        # If not found by nickname, try to match by real_name
+        # If not found by nickname, try to match by real_name (exact)
         for nickname, contact in contacts.items():
             real_name = contact.get("real_name", "")
             if real_name and normalize_nickname(real_name) == normalized_name:
-                return {
-                    "found": True,
-                    "nickname": nickname,
-                    "real_name": real_name,
-                    "preferred_app": contact.get("preferred_app"),
-                    "emails": contact.get("emails", [])
-                }
+                return _build_result(nickname, contact)
 
-        return {"found": False, "reminder": "DO NOT ask the user to create a contact unless you absolutely cannot proceed without it. For example if you have the name and messaging app you do not need to create a contact to proceed to send a message."}
+        # If still not found, try partial match: search term matches any word in real_name
+        partial_matches = []
+        for nickname, contact in contacts.items():
+            real_name = contact.get("real_name", "")
+            if real_name:
+                name_words = normalize_nickname(real_name).split()
+                if normalized_name in name_words:
+                    partial_matches.append((nickname, contact))
+
+        if len(partial_matches) == 1:
+            return _build_result(partial_matches[0][0], partial_matches[0][1])
+        elif len(partial_matches) > 1:
+            results = []
+            for nickname, contact in partial_matches:
+                results.append(_build_result(nickname, contact))
+            return {
+                "found": True,
+                "multiple_matches": True,
+                "contacts": results,
+                "message": f"Found {len(results)} saved contacts matching '{name}'."
+            }
+
+        # Not found in preferences — fall back to device phone contacts
+        if websocket is not None:
+            logger.info(f"Contact '{normalized_name}' not in preferences, falling back to device contacts")
+            try:
+                from device_control_tools import agent_lookup_phone_contacts
+                device_result = await agent_lookup_phone_contacts(
+                    name, user_id, websocket, tool_result_handler, conversation_id
+                )
+                device_contacts = device_result.get("contacts", [])
+                if device_contacts:
+                    logger.info(f"Found {len(device_contacts)} device contact(s) for '{name}'")
+                    return {
+                        "found": False,
+                        "device_contacts": device_contacts,
+                        "message": f"Not found in saved contacts, but found {len(device_contacts)} match(es) in phone contacts."
+                    }
+                elif device_result.get("permission_denied"):
+                    logger.info(f"Device contacts permission denied for '{name}'")
+                    # Fall through to the not-found response
+                else:
+                    logger.info(f"No device contacts found for '{name}'")
+            except Exception as e:
+                logger.warning(f"Device contacts fallback failed for '{name}': {e}")
+
+        return {"found": False, "reminder": "DO NOT ask the user to create a contact unless you absolutely cannot proceed without it. For example if you have the name and messaging app you do not need to create a contact to proceed to send a message. If the user asked you for directions, just try getting directions for the phrase they gave you; the address for that phrase may already be stored in Google Maps."}
 
     except Exception as e:
         logger.error(f"Error in get_contact_preference for user {user_id}: {str(e)}", exc_info=True)
@@ -204,7 +293,12 @@ def list_contact_preferences(user_id: str) -> Dict[str, Any]:
                 "nickname": nickname,
                 "real_name": data.get("real_name"),
                 "preferred_app": data.get("preferred_app"),
-                "emails": data.get("emails", [])
+                "phone_numbers": data.get("phone_numbers", {}),
+                "primary_phone": data.get("primary_phone"),
+                "emails": data.get("emails", {}),
+                "primary_email": data.get("primary_email"),
+                "addresses": data.get("addresses", {}),
+                "primary_address": data.get("primary_address")
             }
             for nickname, data in contacts.items()
         ]
@@ -305,7 +399,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "add_contact_preference",
-        "description": "Add or update a contact. Contact must have a real name, which can be mapped to a nickname and/or preferred messaging app. Use this when the user wants to save how to reach someone (e.g., 'My husband is Robin Pham, he uses WhatsApp'). If no nickname is provided, the real name will be used as the nickname.",
+        "description": "Add or update a contact with real name, nickname, preferred messaging app, and optional phone number, email, and address. Each phone/email/address is stored with a label (e.g. 'mobile', 'work', 'personal', 'home'). If the user doesn't provide phone/email/address details, consider using agent_lookup_phone_contacts first to auto-fill from their phone contacts.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -322,9 +416,29 @@ contacts_tools = [
                     "enum": ["whatsapp", "sms"],
                     "description": "The preferred messaging app for this contact"
                 },
+                "phone_number": {
+                    "type": "string",
+                    "description": "A phone number for the contact (e.g., '+1234567890', '555-1234')"
+                },
+                "phone_label": {
+                    "type": "string",
+                    "description": "Label for the phone number (e.g., 'mobile', 'work', 'home'). Defaults to 'mobile'."
+                },
                 "email": {
                     "type": "string",
-                    "description": "The email address for the contact, used for assigning Asana tasks. Added to the contact's email list."
+                    "description": "An email address for the contact"
+                },
+                "email_label": {
+                    "type": "string",
+                    "description": "Label for the email (e.g., 'personal', 'work'). Defaults to 'personal'."
+                },
+                "address": {
+                    "type": "string",
+                    "description": "A postal address for the contact"
+                },
+                "address_label": {
+                    "type": "string",
+                    "description": "Label for the address (e.g., 'home', 'work'). Defaults to 'home'."
                 }
             },
             "required": ["real_name", "preferred_app"]
@@ -333,7 +447,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "get_contact_preference",
-        "description": "Look up a contact by name to get their real name, preferred messaging app, and email addresses. Use this BEFORE sending messages. If the contact isn't found and you have the info you need (e.g. name and messaging app), send the message anyway. If the contact isn't found and you don't have enough information, you can ask the user if they want to make the contact. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name.",
+        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. Do NOT use this for searching addresses for agent_get_google_maps_directions unless the query involves someone's name. This automatically searches saved contacts first, then falls back to the device's native phone contacts if not found. If the result includes 'device_contacts', those are matches from the phone — you can use that info directly or suggest saving it. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), send the message anyway. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -348,7 +462,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "list_contact_preferences",
-        "description": "List all saved contacts with their nicknames, real names, preferred messaging apps, and email addresses.",
+        "description": "List all saved contacts with their nicknames, real names, preferred messaging apps, phone numbers, email addresses, and postal addresses.",
         "input_schema": {
             "type": "object",
             "properties": {},

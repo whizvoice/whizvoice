@@ -17,11 +17,12 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
+from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
+from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
-from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message
+from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
 from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
@@ -131,11 +132,11 @@ FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *
 
 DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. PLEASE CHECK THE HISTORY. Often multiple Asana tasks will be created as different versions of the same user intent, and YOU NEED TO PROACTIVELY DELETE THE OLD ONES.
 
-PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending...". This will be updated later with the real tool result.
+PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
 """
 
 # can concatenate additional tools here if needed
-tools = asana_tools + about_me_tools + screen_agent_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
+tools = asana_tools + about_me_tools + screen_agent_tools + device_control_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
 
 # Pre-build variant with parent-required description for get_new_asana_task_id
 tools_parent_required = []
@@ -238,6 +239,188 @@ async def get_anthropic_client(user_id: Optional[str]) -> Optional[AsyncAnthropi
         _anthropic_clients_cache[api_key] = new_client
         return new_client
 
+async def load_validated_messages_from_db(conversation_id: int, session_id: str) -> Optional[List[Dict]]:
+    """Load conversation from DB with tool_use/tool_result validation.
+
+    Two-pass validation:
+    1. Collect all tool_result IDs and valid (non-cancelled) tool_use IDs
+    2. Build messages, skipping orphaned tool_use (no result) and orphaned tool_result (cancelled tool_use)
+
+    Self-heals Redis by rewriting the session with validated messages.
+    Returns the validated messages, or None on failure.
+    """
+    try:
+        query = supabase.table("messages")\
+            .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
+            .eq("conversation_id", conversation_id)\
+            .order("timestamp", desc=False)
+
+        response = query.execute()
+        db_messages = response.data if response.data else []
+
+        # First pass: identify valid (non-cancelled) tool_use IDs and tool_result IDs
+        tool_use_ids_with_results = set()
+        valid_tool_use_ids = set()
+
+        # Collect all tool_result IDs
+        for msg in db_messages:
+            if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
+                for block in msg['tool_content']:
+                    if isinstance(block, dict) and block.get('tool_use_id'):
+                        tool_use_ids_with_results.add(block['tool_use_id'])
+
+        # Collect valid (non-cancelled) tool_use IDs
+        for msg in db_messages:
+            if not msg.get('cancelled') and msg.get('content_type') == 'tool_use' and msg.get('tool_content'):
+                for block in msg['tool_content']:
+                    if isinstance(block, dict) and block.get('id'):
+                        valid_tool_use_ids.add(block['id'])
+
+        # Second pass: build messages, skipping incomplete/orphaned tool blocks
+        redis_messages = []
+        for msg in db_messages:
+            # Skip cancelled messages
+            if msg.get('cancelled'):
+                continue
+
+            content_type = msg.get('content_type', 'text')
+            tool_content = msg.get('tool_content')
+
+            # Handle tool_use messages - skip if no corresponding tool_result
+            if content_type == 'tool_use' and tool_content:
+                tool_use_id = None
+                for block in tool_content:
+                    if isinstance(block, dict) and block.get('id'):
+                        tool_use_id = block['id']
+                        break
+
+                if tool_use_id and tool_use_id not in tool_use_ids_with_results:
+                    logger.warning(f"[load_validated] Skipping incomplete tool_use (no result): {tool_use_id}")
+                    continue
+
+                redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
+            elif content_type == 'tool_result' and tool_content:
+                # Skip orphaned tool_results whose tool_use was cancelled
+                tool_use_id = None
+                for block in tool_content:
+                    if isinstance(block, dict) and block.get('tool_use_id'):
+                        tool_use_id = block['tool_use_id']
+                        break
+
+                if tool_use_id and tool_use_id not in valid_tool_use_ids:
+                    logger.warning(f"[load_validated] Skipping orphaned tool_result (tool_use was cancelled): {tool_use_id}")
+                    continue
+
+                redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
+            # Handle regular text messages
+            elif msg['message_sender'] == 'USER':
+                redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
+            elif msg['message_sender'] == 'ASSISTANT':
+                redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
+
+        # Self-heal Redis by rewriting the session with validated messages
+        if redis_messages:
+            await set_chat_messages(session_id, redis_messages)
+            logger.info(f"[load_validated] Populated Redis session with {len(redis_messages)} validated messages from database")
+
+        return redis_messages
+
+    except Exception as e:
+        logger.error(f"[load_validated] Error loading conversation history from database: {str(e)}")
+        return None
+
+
+def _has_orphaned_tool_uses(messages: List[Dict]) -> bool:
+    """Quick scan for tool_use blocks without matching tool_result in the next user message.
+
+    This checks the merged message list for the Claude API requirement that every
+    tool_use in an assistant message must have a corresponding tool_result in the
+    immediately following user message.
+    """
+    for i, msg in enumerate(messages):
+        if msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content', [])
+        if not isinstance(content, list):
+            continue
+        # Collect tool_use IDs from this assistant message
+        tool_use_ids = set()
+        for block in content:
+            if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
+                tool_use_ids.add(block['id'])
+        if not tool_use_ids:
+            continue
+        # Check the next message for matching tool_results
+        if i + 1 >= len(messages):
+            return True
+        next_msg = messages[i + 1]
+        if next_msg.get('role') != 'user':
+            return True
+        next_content = next_msg.get('content', [])
+        if not isinstance(next_content, list):
+            return True
+        result_ids = set()
+        for block in next_content:
+            if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id'):
+                result_ids.add(block['tool_use_id'])
+        if not tool_use_ids.issubset(result_ids):
+            return True
+    return False
+
+
+def _fix_orphaned_tool_uses(messages: List[Dict]) -> None:
+    """Fallback: insert synthetic tool_result blocks for orphaned tool_use blocks.
+
+    Mutates messages in place. For each assistant message containing tool_use blocks
+    without a corresponding tool_result in the next user message, inserts synthetic
+    tool_result blocks.
+    """
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get('role') != 'assistant':
+            i += 1
+            continue
+        content = msg.get('content', [])
+        if not isinstance(content, list):
+            i += 1
+            continue
+        # Collect tool_use IDs from this assistant message
+        tool_use_ids = set()
+        for block in content:
+            if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
+                tool_use_ids.add(block['id'])
+        if not tool_use_ids:
+            i += 1
+            continue
+        # Check what tool_results exist in the next message
+        existing_result_ids = set()
+        if i + 1 < len(messages) and messages[i + 1].get('role') == 'user':
+            next_content = messages[i + 1].get('content', [])
+            if isinstance(next_content, list):
+                for block in next_content:
+                    if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id'):
+                        existing_result_ids.add(block['tool_use_id'])
+        missing_ids = tool_use_ids - existing_result_ids
+        if missing_ids:
+            logger.warning(f"[_fix_orphaned_tool_uses] Inserting synthetic tool_results for: {missing_ids}")
+            synthetic_blocks = [
+                {"type": "tool_result", "tool_use_id": tid, "content": "Result pending - request was interrupted."}
+                for tid in missing_ids
+            ]
+            if i + 1 < len(messages) and messages[i + 1].get('role') == 'user':
+                # Prepend synthetic tool_results to existing user message
+                next_content = messages[i + 1].get('content', [])
+                if isinstance(next_content, list):
+                    messages[i + 1]['content'] = synthetic_blocks + next_content
+                else:
+                    messages[i + 1]['content'] = synthetic_blocks + [{"type": "text", "text": next_content}]
+            else:
+                # Insert a new user message with synthetic tool_results
+                messages.insert(i + 1, {"role": "user", "content": synthetic_blocks})
+        i += 1
+
+
 async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True, user_id: str = None):
     """
     Standard method to call Claude API with consistent parameters.
@@ -306,6 +489,17 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     # Always use non-streaming mode
     stream = False
 
+    def _deduplicate_tool_results(blocks):
+        """Keep only the last tool_result per tool_use_id."""
+        seen = {}
+        for i, b in enumerate(blocks):
+            if isinstance(b, dict) and b.get('type') == 'tool_result':
+                seen[b['tool_use_id']] = i
+        # Keep blocks where: not a tool_result, OR it's the last one for its tool_use_id
+        return [b for i, b in enumerate(blocks)
+                if not (isinstance(b, dict) and b.get('type') == 'tool_result')
+                or seen.get(b.get('tool_use_id')) == i]
+
     # CRITICAL: Merge consecutive messages with same role (Claude API requirement)
     # When merging user messages, tool_result blocks MUST come before text blocks
     merged_messages = []
@@ -327,7 +521,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             if msg['role'] == 'user':
                 tool_results = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_result']
                 text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
-                merged_content = tool_results + text_blocks
+                merged_content = _deduplicate_tool_results(tool_results) + text_blocks
             else:
                 # For assistant messages: text blocks MUST come first, then tool_use blocks
                 text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
@@ -337,6 +531,44 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             prev_msg['content'] = merged_content
 
     messages = merged_messages
+
+    # Validate: check for orphaned tool_use blocks (no matching tool_result)
+    # This can happen when user messages arrive while tools are executing
+    if _has_orphaned_tool_uses(messages) and conversation_id:
+        logger.warning(f"[CLAUDE_CONTEXT] Orphaned tool_use detected in session {session_id}, reloading from DB to self-heal")
+        reloaded = await load_validated_messages_from_db(conversation_id, session_id)
+        if reloaded:
+            # Re-fetch stripped messages and re-run merge logic
+            messages = await get_chat_messages_for_claude(session_id)
+            merged_messages = []
+            for msg in messages:
+                if not merged_messages or merged_messages[-1]['role'] != msg['role']:
+                    merged_messages.append(msg)
+                else:
+                    prev_msg = merged_messages[-1]
+                    prev_content = prev_msg['content']
+                    curr_content = msg['content']
+                    prev_blocks = prev_content if isinstance(prev_content, list) else [{"type": "text", "text": prev_content}]
+                    curr_blocks = curr_content if isinstance(curr_content, list) else [{"type": "text", "text": curr_content}]
+                    if msg['role'] == 'user':
+                        tool_results = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_result']
+                        text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
+                        merged_content = _deduplicate_tool_results(tool_results) + text_blocks
+                    else:
+                        text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
+                        tool_uses = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_use']
+                        merged_content = text_blocks + tool_uses
+                    prev_msg['content'] = merged_content
+            messages = merged_messages
+            logger.info(f"[CLAUDE_CONTEXT] Self-healed: reloaded and re-merged {len(messages)} messages")
+        else:
+            # Fallback: insert synthetic tool_results so the API call doesn't fail
+            logger.warning(f"[CLAUDE_CONTEXT] DB reload failed, inserting synthetic tool_results as fallback")
+            _fix_orphaned_tool_uses(messages)
+    elif _has_orphaned_tool_uses(messages):
+        # No conversation_id available, use fallback
+        logger.warning(f"[CLAUDE_CONTEXT] Orphaned tool_use detected but no conversation_id, inserting synthetic tool_results")
+        _fix_orphaned_tool_uses(messages)
 
     # Log the conversation context being sent to Claude
     logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}, stream={stream}")
@@ -356,7 +588,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
             tools_to_send = tools
 
     api_params = {
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 1000,
         "messages": messages,
         "system": CLAUDE_SYSTEM_PROMPT,
@@ -464,6 +696,18 @@ session_timestamps_lock = asyncio.Lock()
 anthropic_clients_cache_lock = asyncio.Lock()
 request_states_lock = asyncio.Lock()
 
+# Per-conversation locks for subset detection to prevent race conditions
+# when multiple messages arrive concurrently for the same conversation
+subset_detection_locks: Dict[int, asyncio.Lock] = {}
+subset_detection_locks_lock = asyncio.Lock()
+
+
+async def get_subset_detection_lock(conversation_id: int) -> asyncio.Lock:
+    """Get or create a per-conversation lock for subset detection"""
+    async with subset_detection_locks_lock:
+        if conversation_id not in subset_detection_locks:
+            subset_detection_locks[conversation_id] = asyncio.Lock()
+        return subset_detection_locks[conversation_id]
 
 
 
@@ -676,6 +920,12 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
     },
+    "get_current_datetime": {
+        "function_name": "get_current_datetime",
+        "requires_auth": False,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
     "get_parent_tasks": {
         "function_name": "get_parent_tasks",
         "requires_auth": True,
@@ -859,6 +1109,19 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Message is required."} if not args.get('message') else None
     },
+    "agent_dismiss_draft": {
+        "function_name": "agent_dismiss_draft",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: None
+    },
     "agent_disable_continuous_listening": {
         "function_name": "agent_disable_continuous_listening",
         "requires_auth": False,
@@ -898,6 +1161,211 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": None
+    },
+    # ========== Device Control Tools (direct intents/APIs) ==========
+    "agent_set_alarm": {
+        "function_name": "agent_set_alarm",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('hour'),
+            args.get('minute'),
+            args.get('label'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "hour is required."} if args.get('hour') is None else ({"error": "minute is required."} if args.get('minute') is None else None)
+    },
+    "agent_set_timer": {
+        "function_name": "agent_set_timer",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('seconds'),
+            args.get('label'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "seconds is required."} if args.get('seconds') is None else None
+    },
+    "agent_dismiss_alarm": {
+        "function_name": "agent_dismiss_alarm",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "agent_dismiss_timer": {
+        "function_name": "agent_dismiss_timer",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "agent_get_next_alarm": {
+        "function_name": "agent_get_next_alarm",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "agent_delete_alarm": {
+        "function_name": "agent_delete_alarm",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('hour'),
+            args.get('minute'),
+            args.get('label'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "hour is required."} if args.get('hour') is None else ({"error": "minute is required."} if args.get('minute') is None else None)
+    },
+    "agent_toggle_flashlight": {
+        "function_name": "agent_toggle_flashlight",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('turn_on'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "turn_on is required."} if args.get('turn_on') is None else None
+    },
+    "agent_draft_calendar_event": {
+        "function_name": "agent_draft_calendar_event",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('title'),
+            args.get('begin_time'),
+            args.get('end_time'),
+            args.get('description'),
+            args.get('location'),
+            args.get('all_day', False),
+            args.get('attendees'),
+            args.get('recurrence'),
+            args.get('availability'),
+            args.get('access_level'),
+            args.get('timezone'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "title is required."} if not args.get('title') else ({"error": "begin_time is required."} if not args.get('begin_time') else None)
+    },
+    "agent_save_calendar_event": {
+        "function_name": "agent_save_calendar_event",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('title'),
+            args.get('begin_time'),
+            args.get('end_time'),
+            args.get('description'),
+            args.get('location'),
+            args.get('all_day', False),
+            args.get('recurrence'),
+            args.get('availability'),
+            args.get('access_level'),
+            args.get('timezone'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "title is required."} if not args.get('title') else ({"error": "begin_time is required."} if not args.get('begin_time') else None)
+    },
+    "agent_dial_phone_number": {
+        "function_name": "agent_dial_phone_number",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('phone_number'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "phone_number is required."} if not args.get('phone_number') else None
+    },
+    "agent_press_call_button": {
+        "function_name": "agent_press_call_button",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('expected_number'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: None
+    },
+    "agent_set_volume": {
+        "function_name": "agent_set_volume",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('volume_level'),
+            args.get('stream', 'music'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "volume_level is required."} if args.get('volume_level') is None else None
+    },
+    "agent_lookup_phone_contacts": {
+        "function_name": "agent_lookup_phone_contacts",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('name'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     },
     "agent_play_youtube_music": {
         "function_name": "agent_play_youtube_music",
@@ -1105,7 +1573,12 @@ TOOL_REGISTRY = {
             args.get('nickname'),  # Optional - defaults to real_name if not provided
             args.get('real_name'),
             args.get('preferred_app'),
-            args.get('email')
+            args.get('phone_number'),
+            args.get('phone_label'),
+            args.get('email'),
+            args.get('email_label'),
+            args.get('address'),
+            args.get('address_label')
         ),
         "validation": lambda args: (
             {"error": "real_name is required."} if not args.get('real_name') else
@@ -1116,7 +1589,15 @@ TOOL_REGISTRY = {
     "get_contact_preference": {
         "function_name": "get_contact_preference",
         "requires_auth": True,
-        "args_mapping": lambda args, user_id: (user_id, args.get('name')),
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            args.get('name'),
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     },
     "list_contact_preferences": {
@@ -2059,7 +2540,27 @@ async def websocket_endpoint(websocket: WebSocket):
                             logger.warning("Received tool_result without request_id")
                         
                         continue  # Don't process as a regular message
-                    
+
+                    # Handle tool status messages (e.g., waiting for unlock)
+                    if message_type == "tool_status":
+                        tool_request_id = message_data.get("request_id")
+                        status = message_data.get("status", "")
+                        status_message = message_data.get("message", "")
+                        logger.info(f"Received tool_status: request_id={tool_request_id}, status={status}")
+                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_contacts_permission", "waiting_for_calendar_permission"):
+                            metadata = tool_result_handler.extend_deadline(tool_request_id, 65.0)
+                            # Update the Redis placeholder so Claude sees why the tool is waiting
+                            if metadata and metadata.get('tool_use_id') and metadata.get('session_id'):
+                                placeholder = ("Waiting for user to unlock phone..." if status == "waiting_for_unlock"
+                                               else "Waiting for user to grant calendar permission..." if status == "waiting_for_calendar_permission"
+                                               else "Waiting for user to grant contacts permission...")
+                                await update_tool_results(
+                                    metadata['session_id'],
+                                    {metadata['tool_use_id']: json.dumps(placeholder)}
+                                )
+                                logger.info(f"Updated Redis placeholder for {metadata['tool_use_id']} to {status} status")
+                        continue
+
                     # Handle cancellation requests
                     if message_type == "cancel":
                         cancel_request_id = message_data.get("cancel_request_id")
@@ -2494,16 +2995,15 @@ async def cancel_and_broadcast_messages(
         except Exception as e:
             logger.error(f"Failed to mark messages as cancelled in Redis: {e}")
 
-    # Mark messages as cancelled in database
-    for msg_id in message_ids:
-        try:
-            supabase.table("messages")\
-                .update({"cancelled": "now()"})\
-                .eq("id", msg_id)\
-                .execute()
-            logger.info(f"Marked message {msg_id} as cancelled in database")
-        except Exception as e:
-            logger.error(f"Failed to mark message {msg_id} as cancelled: {e}")
+    # Mark messages as cancelled in database (single batch update)
+    try:
+        supabase.table("messages")\
+            .update({"cancelled": "now()"})\
+            .in_("id", message_ids)\
+            .execute()
+        logger.info(f"Marked {len(message_ids)} messages as cancelled in database")
+    except Exception as e:
+        logger.error(f"Failed to batch-cancel messages {message_ids}: {e}")
 
     # Broadcast DeleteMessage to all clients in conversation
     for msg_id in message_ids:
@@ -2553,18 +3053,15 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                 try:
                     # Get ALL ASSISTANT messages with their content_type in a single query
                     bot_msg_result = supabase.table("messages")\
-                        .select("id, content_type")\
+                        .select("id")\
                         .eq("request_id", request_id)\
                         .eq("message_sender", "ASSISTANT")\
                         .is_("cancelled", "null")\
+                        .not_.in_("content_type", ["tool_use", "tool_result"])\
                         .execute()
 
                     if bot_msg_result.data:
-                        # Filter out tool_use and tool_result messages - we never cancel these
-                        message_ids_to_cancel = [
-                            bot_msg["id"] for bot_msg in bot_msg_result.data
-                            if bot_msg.get("content_type") not in ["tool_use", "tool_result"]
-                        ]
+                        message_ids_to_cancel = [bot_msg["id"] for bot_msg in bot_msg_result.data]
 
                         if message_ids_to_cancel:
                             # Store tuples for tracking
@@ -2608,6 +3105,25 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                     reason="superseded_by_new_request",
                     session_id=session_id
                 )
+
+        # For cancelled requests that had no bot messages yet (still processing),
+        # send a delete_message notification so the client can remove the request
+        # from pendingRequests and stop the typing indicator.
+        cancelled_with_bot_messages = {req_id for _, req_id in cancelled_bot_messages}
+        for req_id in cancelled_requests:
+            if req_id not in cancelled_with_bot_messages:
+                logger.info(f"Sending delete notification for request {req_id} with no bot messages (superseded before response)")
+                delete_notification = {
+                    "type": "delete_message",
+                    "message_id": None,
+                    "conversation_id": conversation_id,
+                    "request_id": req_id,
+                    "reason": "superseded_by_new_request"
+                }
+                try:
+                    await broadcast_to_conversation(conversation_id, delete_notification)
+                except Exception as e:
+                    logger.error(f"Failed to broadcast delete notification for request {req_id}: {e}")
             
     except Exception as e:
         logger.error(f"Error detecting subset requests: {e}")
@@ -3354,12 +3870,6 @@ async def create_message(
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create message")
         
-        # Update conversation last_message_time and updated_at for incremental sync
-        supabase.table("conversations").update({
-            "last_message_time": "now()",
-            "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
-        }).eq("id", actual_conversation_id).execute()
-        
         row = result.data[0]
         return MessageResponse(
             id=row["id"],
@@ -3770,90 +4280,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.warning(f"Redis session for conversation {session_conversation_id} has incomplete tool execution, reloading from database")
             elif len(messages) == 0:
                 logger.info(f"Redis session empty for conversation {session_conversation_id}, loading history from database")
-            try:
-                # Get all messages from database for this conversation
-                query = supabase.table("messages")\
-                    .select("id, content, message_sender, timestamp, request_id, cancelled, content_type, tool_content")\
-                    .eq("conversation_id", session_conversation_id)\
-                    .order("timestamp", desc=False)
-
-                response = query.execute()
-                db_messages = response.data if response.data else []
-
-                # Build Redis session from database messages
-                redis_messages = []
-                # First pass: identify valid (non-cancelled) tool_use IDs
-                tool_use_ids_with_results = set()
-                valid_tool_use_ids = set()
-
-                # Collect all tool_result IDs
-                for msg in db_messages:
-                    if msg.get('content_type') == 'tool_result' and msg.get('tool_content'):
-                        for block in msg['tool_content']:
-                            if isinstance(block, dict) and block.get('tool_use_id'):
-                                tool_use_ids_with_results.add(block['tool_use_id'])
-
-                # Collect valid (non-cancelled) tool_use IDs
-                for msg in db_messages:
-                    if not msg.get('cancelled') and msg.get('content_type') == 'tool_use' and msg.get('tool_content'):
-                        for block in msg['tool_content']:
-                            if isinstance(block, dict) and block.get('id'):
-                                valid_tool_use_ids.add(block['id'])
-
-                # Second pass: build messages, skipping incomplete/orphaned tool blocks
-                for msg in db_messages:
-                    # Skip cancelled messages
-                    if msg.get('cancelled'):
-                        continue
-
-                    content_type = msg.get('content_type', 'text')
-                    tool_content = msg.get('tool_content')
-
-                    # Handle tool_use messages - skip if no corresponding tool_result
-                    if content_type == 'tool_use' and tool_content:
-                        tool_use_id = None
-                        for block in tool_content:
-                            if isinstance(block, dict) and block.get('id'):
-                                tool_use_id = block['id']
-                                break
-
-                        if tool_use_id and tool_use_id not in tool_use_ids_with_results:
-                            logger.warning(f"Skipping incomplete tool_use (no result): {tool_use_id}")
-                            continue
-
-                        logger.info(f"📥 DB load (process_message_task): tool_use, db_timestamp={msg.get('timestamp')}")
-                        redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
-                    elif content_type == 'tool_result' and tool_content:
-                        # Skip orphaned tool_results whose tool_use was cancelled
-                        tool_use_id = None
-                        for block in tool_content:
-                            if isinstance(block, dict) and block.get('tool_use_id'):
-                                tool_use_id = block['tool_use_id']
-                                break
-
-                        if tool_use_id and tool_use_id not in valid_tool_use_ids:
-                            logger.warning(f"Skipping orphaned tool_result (tool_use was cancelled): {tool_use_id}")
-                            continue
-
-                        logger.info(f"📥 DB load (process_message_task): tool_result, db_timestamp={msg.get('timestamp')}")
-                        redis_messages.append({"role": "user", "content": tool_content, "_timestamp": msg.get('timestamp')})
-                    # Handle regular text messages
-                    elif msg['message_sender'] == 'USER':
-                        logger.info(f"📥 DB load (process_message_task): USER text, db_timestamp={msg.get('timestamp')}")
-                        redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
-                    elif msg['message_sender'] == 'ASSISTANT':
-                        logger.info(f"📥 DB load (process_message_task): ASSISTANT text, db_timestamp={msg.get('timestamp')}")
-                        redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
-
-                # Populate Redis session with conversation history
-                if redis_messages:
-                    await set_chat_messages(session_id, redis_messages)
-                    messages = redis_messages
-                    logger.info(f"Populated Redis session with {len(redis_messages)} messages from database")
-                
-            except Exception as e:
-                logger.error(f"Error loading conversation history from database: {str(e)}")
-                # Continue with empty context if database load fails
+            validated = await load_validated_messages_from_db(session_conversation_id, session_id)
+            if validated is not None:
+                messages = validated
         
         logger.info(f"Processing message in session {session_id}, conversation {session_conversation_id}, context length: {len(messages)}")
         
@@ -4134,19 +4563,25 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # Track which message IDs this request is responding to
         # Use processing_conversation_id for database queries
-        user_message_ids = get_user_message_ids_since_last_bot(processing_conversation_id)
-        if redis_managers and "request_messages" in redis_managers:
-            await redis_managers["request_messages"].set_messages(
-                request_id, user_message_ids, processing_conversation_id
-            )
-            logger.info(f"Tracking request {request_id} responding to message IDs: {user_message_ids}")
+        # CRITICAL: Lock per-conversation to prevent race condition when multiple messages
+        # arrive concurrently (e.g. from retry queue). Without this lock, Task B's
+        # detect_and_cancel_subset_requests() may run before Task A's set_messages()
+        # completes, causing subset detection to miss requests not yet registered in Redis.
+        subset_lock = await get_subset_detection_lock(processing_conversation_id)
+        async with subset_lock:
+            user_message_ids = get_user_message_ids_since_last_bot(processing_conversation_id)
+            if redis_managers and "request_messages" in redis_managers:
+                await redis_managers["request_messages"].set_messages(
+                    request_id, user_message_ids, processing_conversation_id
+                )
+                logger.info(f"Tracking request {request_id} responding to message IDs: {user_message_ids}")
 
-        # Detect and cancel subset requests
-        cancelled_requests = await detect_and_cancel_subset_requests(
-            processing_conversation_id, user_message_ids, websocket, session_id
-        )
-        if cancelled_requests:
-            logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {processing_conversation_id}")
+            # Detect and cancel subset requests
+            cancelled_requests = await detect_and_cancel_subset_requests(
+                processing_conversation_id, user_message_ids, websocket, session_id
+            )
+            if cancelled_requests:
+                logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {processing_conversation_id}")
 
         # Check if this task has been marked for cancellation AFTER critical housekeeping
         # All important work (DB save, Redis add) is done, safe to exit if cancelled
@@ -4779,6 +5214,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Screen agent tools will be queued (one at a time), others run in parallel
                 async def execute_single_tool(tb):
                     """Execute a single tool and return (tool_block, result)"""
+                    # Set contextvars so wait_for_tool_result can store metadata
+                    # linking request_id -> tool_use_id/session_id for extend_deadline
+                    from tool_result_handler import _current_tool_use_id, _current_session_id
+                    _current_tool_use_id.set(tb.id)
+                    _current_session_id.set(session_id)
                     result = await execute_tool_with_queue(
                         tb.name,
                         tb.input,

@@ -624,7 +624,7 @@ maps_tools = [
     {
         "type": "custom",
         "name": "agent_get_google_maps_directions",
-        "description": "Get directions to a location in Google Maps. This tool automatically opens Google Maps. Use 'search' to find a location and get directions in one step (e.g., search='Slice House' or search='1885 Mission St'). If already on a search results list, use 'position' or 'fragment' to select from it. If already on a location details page, no parameters needed. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation. If you want to change the mode of transportation and are ALREADY on navigation, run this without the search parameter so it uses the location you already have.",
+        "description": "Get directions to a location in Google Maps. This tool automatically opens Google Maps. Use 'search' to find a location and get directions in one step (e.g., search='Slice House' or search='1885 Mission St'). You do not need an exact address; phrases like 'home', 'office', 'closest hardware store' are all fine. If already on a search results list, use 'position' or 'fragment' to select from it. If already on a location details page, no parameters needed. If you do not know the mode of transportation, you must call this tool without the mode specified so it can use the user's default mode of transportation. If you want to change the mode of transportation and are ALREADY on navigation, run this without the search parameter so it uses the location you already have.",
         "input_schema": {
             "type": "object",
             "properties": {

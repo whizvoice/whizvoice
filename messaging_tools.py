@@ -591,6 +591,82 @@ async def agent_sms_send_message(message: str, user_id: str = None, websocket = 
         }
 
 
+async def agent_dismiss_draft(user_id: str = None, websocket = None,
+                             tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Dismiss the currently displayed message draft overlay.
+
+    Args:
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the dismiss operation
+    """
+    try:
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        if websocket:
+            tool_execution_message = {
+                "type": "tool_execution",
+                "tool": "agent_dismiss_draft",
+                "request_id": tool_request_id,
+                "params": {},
+                "conversation_id": conversation_id
+            }
+
+            if tool_result_handler:
+                tool_result_handler.register_pending_tool(tool_request_id, "agent_dismiss_draft")
+
+            try:
+                message_json = json.dumps(tool_execution_message)
+                logger.debug(f"Sending dismiss draft command to Android: {tool_execution_message}")
+                await websocket.send_text(message_json)
+                logger.info(f"Successfully sent agent_dismiss_draft command")
+            except Exception as e:
+                logger.error(f"Failed to send WebSocket message: {str(e)}")
+                return {
+                    "error": f"Failed to send dismiss command to device: {str(e)}",
+                    "success": False
+                }
+
+            if tool_result_handler:
+                try:
+                    result = await tool_result_handler.wait_for_tool_result(
+                        request_id=tool_request_id,
+                        timeout=5.0
+                    )
+                    logger.info(f"Dismiss draft result for {tool_request_id}: {result}")
+                    return result
+                except Exception as e:
+                    logger.error(f"Error waiting for dismiss draft result: {str(e)}")
+                    return {
+                        "status": "error",
+                        "error": f"Error waiting for device response: {str(e)}",
+                        "success": False
+                    }
+            else:
+                return {
+                    "status": "sent",
+                    "message": "Dismiss draft command sent to device",
+                    "request_id": tool_request_id
+                }
+        else:
+            return {
+                "error": "No WebSocket connection available",
+                "success": False
+            }
+
+    except Exception as e:
+        logger.error(f"Error in dismiss_draft for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to dismiss draft: {str(e)}",
+            "success": False
+        }
+
+
 # Define the messaging tools for Claude
 messaging_tools = [
     {
@@ -697,6 +773,16 @@ messaging_tools = [
                 }
             },
             "required": ["message"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_dismiss_draft",
+        "description": "Dismiss the currently displayed message draft overlay. Use this when the user wants to cancel or discard a drafted message (WhatsApp or SMS) that is currently shown on screen for review. This removes the yellow draft overlay from the screen.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     }
 ]

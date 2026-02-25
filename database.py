@@ -4,6 +4,7 @@ Extracted from app.py to improve maintainability.
 """
 import json
 import logging
+import time
 from typing import Optional, List, Dict, Tuple
 from datetime import datetime, timedelta
 
@@ -349,19 +350,16 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 # Find all previous ASSISTANT messages with this request_id that aren't already cancelled
                 # Exclude tool_use and tool_result messages from cancellation
                 previous_messages = supabase.table("messages")\
-                    .select("id, content_type")\
+                    .select("id")\
                     .eq("conversation_id", conversation_id)\
                     .eq("request_id", request_id)\
                     .eq("message_sender", "ASSISTANT")\
                     .is_("cancelled", "null")\
+                    .not_.in_("content_type", ["tool_use", "tool_result"])\
                     .execute()
 
                 if previous_messages.data:
-                    # Filter out tool_use and tool_result messages - we never cancel these
-                    messages_to_cancel = [
-                        msg["id"] for msg in previous_messages.data
-                        if msg.get("content_type") not in ["tool_use", "tool_result"]
-                    ]
+                    messages_to_cancel = [msg["id"] for msg in previous_messages.data]
 
                     if messages_to_cancel:
                         cancelled_message_ids = messages_to_cancel
@@ -465,17 +463,6 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         saved_conv_id = saved_message.get("conversation_id")
         logger.info(f"Successfully saved {message_sender} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}, content_type={content_type}")
 
-        # Update conversation last_message_time and updated_at for incremental sync
-        update_result = supabase.table("conversations").update({
-            "last_message_time": "now()",
-            "updated_at": "now()"  # Critical: update this so incremental sync catches new messages
-        }).eq("id", conversation_id).execute()
-
-        if update_result.data:
-            logger.info(f"Updated conversation {conversation_id} timestamps for {message_sender} message")
-        else:
-            logger.warning(f"Failed to update conversation {conversation_id} timestamps")
-
         return (conversation_id, message_id, cancelled_message_ids)
 
     except Exception as e:
@@ -542,17 +529,6 @@ def save_messages_to_db(messages: List[Dict], conversation_id: int, request_id: 
         message_ids = [msg.get("id") for msg in result.data]
         logger.info(f"Successfully batch saved {len(message_ids)} messages to conversation {conversation_id}: {message_ids}")
 
-        # Update conversation timestamps
-        update_result = supabase.table("conversations").update({
-            "last_message_time": "now()",
-            "updated_at": "now()"
-        }).eq("id", conversation_id).execute()
-
-        if update_result.data:
-            logger.info(f"Updated conversation {conversation_id} timestamps after batch insert")
-        else:
-            logger.warning(f"Failed to update conversation {conversation_id} timestamps after batch insert")
-
         return message_ids
 
     except Exception as e:
@@ -599,14 +575,25 @@ def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_cont
         logger.info(f"Updating tool_result for tool_use_id={tool_use_id} in conversation={conversation_id}")
 
         # Find the pending tool_result message
-        result = supabase.table("messages")\
-            .select("id, tool_content, cancelled")\
-            .eq("conversation_id", conversation_id)\
-            .eq("content_type", "tool_result")\
-            .execute()
+        # Retry up to 3 times with 1s delay - handles race condition where
+        # tool executes before placeholder is saved to DB
+        max_retries = 3
+        result = None
+        for attempt in range(max_retries):
+            result = supabase.table("messages")\
+                .select("id, tool_content, cancelled")\
+                .eq("conversation_id", conversation_id)\
+                .eq("content_type", "tool_result")\
+                .execute()
+
+            if result.data:
+                break
+            if attempt < max_retries - 1:
+                logger.info(f"No tool_result messages found yet for conversation {conversation_id}, retrying in 1s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(1)
 
         if not result.data:
-            logger.error(f"No tool_result messages found in conversation {conversation_id}")
+            logger.error(f"No tool_result messages found in conversation {conversation_id} after {max_retries} attempts")
             return False
 
         # Find the message with matching tool_use_id
