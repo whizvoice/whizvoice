@@ -350,19 +350,16 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 # Find all previous ASSISTANT messages with this request_id that aren't already cancelled
                 # Exclude tool_use and tool_result messages from cancellation
                 previous_messages = supabase.table("messages")\
-                    .select("id, content_type")\
+                    .select("id")\
                     .eq("conversation_id", conversation_id)\
                     .eq("request_id", request_id)\
                     .eq("message_sender", "ASSISTANT")\
                     .is_("cancelled", "null")\
+                    .not_.in_("content_type", ["tool_use", "tool_result"])\
                     .execute()
 
                 if previous_messages.data:
-                    # Filter out tool_use and tool_result messages - we never cancel these
-                    messages_to_cancel = [
-                        msg["id"] for msg in previous_messages.data
-                        if msg.get("content_type") not in ["tool_use", "tool_result"]
-                    ]
+                    messages_to_cancel = [msg["id"] for msg in previous_messages.data]
 
                     if messages_to_cancel:
                         cancelled_message_ids = messages_to_cancel

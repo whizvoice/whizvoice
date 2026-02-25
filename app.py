@@ -2995,16 +2995,15 @@ async def cancel_and_broadcast_messages(
         except Exception as e:
             logger.error(f"Failed to mark messages as cancelled in Redis: {e}")
 
-    # Mark messages as cancelled in database
-    for msg_id in message_ids:
-        try:
-            supabase.table("messages")\
-                .update({"cancelled": "now()"})\
-                .eq("id", msg_id)\
-                .execute()
-            logger.info(f"Marked message {msg_id} as cancelled in database")
-        except Exception as e:
-            logger.error(f"Failed to mark message {msg_id} as cancelled: {e}")
+    # Mark messages as cancelled in database (single batch update)
+    try:
+        supabase.table("messages")\
+            .update({"cancelled": "now()"})\
+            .in_("id", message_ids)\
+            .execute()
+        logger.info(f"Marked {len(message_ids)} messages as cancelled in database")
+    except Exception as e:
+        logger.error(f"Failed to batch-cancel messages {message_ids}: {e}")
 
     # Broadcast DeleteMessage to all clients in conversation
     for msg_id in message_ids:
@@ -3054,18 +3053,15 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
                 try:
                     # Get ALL ASSISTANT messages with their content_type in a single query
                     bot_msg_result = supabase.table("messages")\
-                        .select("id, content_type")\
+                        .select("id")\
                         .eq("request_id", request_id)\
                         .eq("message_sender", "ASSISTANT")\
                         .is_("cancelled", "null")\
+                        .not_.in_("content_type", ["tool_use", "tool_result"])\
                         .execute()
 
                     if bot_msg_result.data:
-                        # Filter out tool_use and tool_result messages - we never cancel these
-                        message_ids_to_cancel = [
-                            bot_msg["id"] for bot_msg in bot_msg_result.data
-                            if bot_msg.get("content_type") not in ["tool_use", "tool_result"]
-                        ]
+                        message_ids_to_cancel = [bot_msg["id"] for bot_msg in bot_msg_result.data]
 
                         if message_ids_to_cancel:
                             # Store tuples for tracking
