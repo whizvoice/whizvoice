@@ -4184,7 +4184,7 @@ async def create_ui_dump(
         insert_data = {
             "user_id": user_id,
             "dump_reason": ui_dump.dump_reason,
-            "ui_hierarchy": ui_dump.ui_hierarchy,
+            "ui_hierarchy": ui_dump.ui_hierarchy or "",
         }
 
         # Add optional fields if provided
@@ -4859,6 +4859,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         "dump_reason": "BadRequestError from Claude API",
                         "error_message": str(api_error),
                         "conversation_id": session_conversation_id,
+                        "ui_hierarchy": "",
                     }
                     supabase.table("screen_agent_ui_dumps").insert(error_dump_data).execute()
                     logger.info(f"Logged BadRequest error to screen_agent_ui_dumps for conversation {session_conversation_id}")
