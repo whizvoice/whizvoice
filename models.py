@@ -169,3 +169,9 @@ class UiDumpCreate(BaseModel):
 class UiDumpResponse(BaseModel):
     id: int
     created_at: str
+
+
+# Wake word audio clip models
+class WakeWordAudioResponse(BaseModel):
+    id: int
+    created_at: str

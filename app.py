@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ValidationError
@@ -46,7 +46,8 @@ from models import (
     DialogflowWebhookRequest, DialogflowWebhookResponse,
     CreateCheckoutSessionRequest, CreateCheckoutSessionResponse,
     CancelSubscriptionResponse, SubscriptionStatusResponse,
-    UiDumpCreate, UiDumpResponse
+    UiDumpCreate, UiDumpResponse,
+    WakeWordAudioResponse
 )
 from database import (
     load_conversation_history,
@@ -4229,6 +4230,70 @@ async def create_ui_dump(
     except Exception as e:
         logger.error(f"Error saving UI dump for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to save UI dump")
+
+
+@app.post("/wake-word-audio", response_model=WakeWordAudioResponse)
+async def upload_wake_word_audio(
+    file: UploadFile = File(...),
+    phrase: str = Form(...),
+    confidence: str = Form(...),
+    accepted: str = Form(...),
+    timestamp: str = Form(...),
+    raw_vosk_json: str = Form(...),
+    current_user: Dict = Depends(get_current_user)
+):
+    """
+    Upload a wake word detection audio clip with metadata.
+    Audio is stored in Supabase Storage, metadata in database.
+    """
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+
+    try:
+        file_content = await file.read()
+        file_size = len(file_content)
+
+        storage_path = f"wake_word_audio/{user_id}/{file.filename}"
+
+        supabase.storage.from_("wake-word-audio").upload(
+            path=storage_path,
+            file=file_content,
+            file_options={"content-type": "audio/wav"}
+        )
+
+        confidence_val = float(confidence)
+        accepted_val = accepted.lower() == "true"
+        timestamp_val = int(timestamp)
+
+        insert_data = {
+            "user_id": user_id,
+            "phrase": phrase,
+            "confidence": confidence_val,
+            "accepted": accepted_val,
+            "detection_timestamp": timestamp_val,
+            "raw_vosk_json": raw_vosk_json,
+            "storage_path": storage_path,
+            "file_size_bytes": file_size,
+        }
+
+        result = supabase.table("wake_word_audio_clips").insert(insert_data).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to save audio clip metadata")
+
+        row = result.data[0]
+        logger.info(f"Saved wake word audio for user {user_id}: phrase={phrase}, confidence={confidence_val}, accepted={accepted_val}, id={row['id']}")
+
+        return WakeWordAudioResponse(
+            id=row["id"],
+            created_at=row["created_at"]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading wake word audio: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload audio: {str(e)}")
 
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
