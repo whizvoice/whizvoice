@@ -108,6 +108,15 @@ async def agent_dismiss_amdroid_alarm(user_id: str = None, websocket=None,
     )
 
 
+async def agent_stop_ringing(user_id: str = None, websocket=None,
+                              tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Stop any currently ringing alarm or timer by trying all dismiss methods."""
+    return await _send_device_tool(
+        "agent_stop_ringing", {}, user_id, websocket, tool_result_handler, conversation_id,
+        timeout=20.0
+    )
+
+
 async def agent_get_next_alarm(user_id: str = None, websocket=None,
                                tool_result_handler=None, conversation_id: str = None) -> dict:
     """Get the time of the next scheduled alarm."""
@@ -296,7 +305,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_dismiss_alarm",
-        "description": "Dismiss the currently ringing alarm on the user's Android device. Use this when the user asks to stop, dismiss, or turn off a ringing alarm.",
+        "description": "Dismiss the currently ringing alarm on the user's Android device. Use this when the user asks to stop, dismiss, or turn off a ringing alarm. If you're unsure whether it's an alarm or timer, use agent_stop_ringing instead.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -306,7 +315,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_dismiss_amdroid_alarm",
-        "description": "Dismiss a currently ringing AMdroid alarm. Use when the user's alarm is from the AMdroid app. This uses UI automation to find and click AMdroid's dismiss button.",
+        "description": "Dismiss a currently ringing AMdroid alarm. Use when the user's alarm is from the AMdroid app. This uses UI automation to find and click AMdroid's dismiss button. If you're unsure of the alarm source, use agent_stop_ringing instead.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -316,7 +325,17 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_dismiss_timer",
-        "description": "Dismiss the currently ringing timer on the user's Android device. Use this when the user asks to stop, dismiss, cancel, or turn off a ringing timer.",
+        "description": "Dismiss the currently ringing timer on the user's Android device. Use this when the user asks to stop, dismiss, cancel, or turn off a ringing timer. If you're unsure whether it's an alarm or timer, use agent_stop_ringing instead.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_stop_ringing",
+        "description": "Stop any currently ringing alarm or timer. Automatically tries all dismiss methods (standard alarm, timer, and AMdroid). Use when the user says 'stop', 'turn it off', 'stop ringing', etc. and you don't know the source. Prefer this over individual dismiss tools when the source is unknown.",
         "input_schema": {
             "type": "object",
             "properties": {},
