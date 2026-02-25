@@ -99,6 +99,15 @@ async def agent_dismiss_timer(user_id: str = None, websocket=None,
     )
 
 
+async def agent_dismiss_amdroid_alarm(user_id: str = None, websocket=None,
+                                       tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Dismiss a currently ringing AMdroid alarm."""
+    return await _send_device_tool(
+        "agent_dismiss_amdroid_alarm", {}, user_id, websocket, tool_result_handler, conversation_id,
+        timeout=15.0
+    )
+
+
 async def agent_get_next_alarm(user_id: str = None, websocket=None,
                                tool_result_handler=None, conversation_id: str = None) -> dict:
     """Get the time of the next scheduled alarm."""
@@ -288,6 +297,16 @@ device_control_tools = [
         "type": "custom",
         "name": "agent_dismiss_alarm",
         "description": "Dismiss the currently ringing alarm on the user's Android device. Use this when the user asks to stop, dismiss, or turn off a ringing alarm.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_dismiss_amdroid_alarm",
+        "description": "Dismiss a currently ringing AMdroid alarm. Use when the user's alarm is from the AMdroid app. This uses UI automation to find and click AMdroid's dismiss button.",
         "input_schema": {
             "type": "object",
             "properties": {},
