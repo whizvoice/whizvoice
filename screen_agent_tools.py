@@ -537,7 +537,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_close_app",
-        "description": "Close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, or quit the app.",
+        "description": "Close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, or quit the app. IMPORTANT: If you used agent_get_google_maps_directions earlier in this conversation, you MUST call launch_app to bring Google Maps to the foreground BEFORE calling this tool, so the user can still see their navigation.",
         "input_schema": {
             "type": "object",
             "properties": {},
