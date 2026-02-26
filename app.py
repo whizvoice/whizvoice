@@ -23,7 +23,7 @@ from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disab
 from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
-from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, get_music_app_preference, set_music_app_preference
+from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, agent_pause_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
@@ -134,6 +134,8 @@ FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *
 DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. PLEASE CHECK THE HISTORY. Often multiple Asana tasks will be created as different versions of the same user intent, and YOU NEED TO PROACTIVELY DELETE THE OLD ONES.
 
 PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
+
+EXTRA NOTE ABOUT NAVIGATION: If you are about to close yourself but you used agent_get_google_maps_directions during the converation, please launch_app Google Maps before you close so the user can continue to navigate.
 """
 
 # can concatenate additional tools here if needed
@@ -1422,6 +1424,19 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": lambda args: {"error": "Query is required."} if not args.get('query') else None
+    },
+    "agent_pause_youtube_music": {
+        "function_name": "agent_pause_youtube_music",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
     },
     "get_music_app_preference": {
         "function_name": "get_music_app_preference",
