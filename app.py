@@ -3077,7 +3077,7 @@ async def cancel_and_broadcast_messages(
             logger.error(f"Failed to broadcast delete notification for message {msg_id}: {e}")
 
 
-async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int], websocket=None, session_id=None) -> List[str]:
+async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int], websocket=None, session_id=None, new_request_id=None) -> List[str]:
     """
     Detect requests that are subsets of the new message set and cancel them.
     Returns list of cancelled request IDs.
@@ -3101,7 +3101,7 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
             new_message_ids_set = set(new_message_ids)
 
             # Check if old request is a subset of new request
-            if old_message_ids and old_message_ids.issubset(new_message_ids_set) and old_message_ids != new_message_ids_set:
+            if old_message_ids and old_message_ids.issubset(new_message_ids_set) and request_id != new_request_id:
                 logger.info(f"Request {request_id} (messages {old_message_ids}) is subset of new request (messages {new_message_ids_set})")
 
                 # Get all ASSISTANT messages for this request and filter out tool messages
@@ -4698,7 +4698,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
             # Detect and cancel subset requests
             cancelled_requests = await detect_and_cancel_subset_requests(
-                processing_conversation_id, user_message_ids, websocket, session_id
+                processing_conversation_id, user_message_ids, websocket, session_id,
+                new_request_id=request_id
             )
             if cancelled_requests:
                 logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {processing_conversation_id}")
