@@ -5729,7 +5729,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                                 tool_use_id = block.get("id")
 
                                 # Check if this is a get_* or agent_* tool
-                                if tool_name.startswith("get_") or tool_name.startswith("agent_"):
+                                if tool_name.startswith("get_"):
                                     # Now check if its tool_result is still pending
                                     for user_msg in reversed(messages):
                                         if user_msg.get("role") == "user":
@@ -5752,7 +5752,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     if should_skip_broadcast_for_pending_get or (msg.get("role") == "assistant" and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in (content if isinstance(content, list) else []))):
                         break
         except Exception as e:
-            logger.error(f"Error checking for pending get_*/agent_* tool: {e}")
+            logger.error(f"Error checking for pending get_* tool: {e}")
 
         if not request_cancelled and not should_skip_broadcast_for_pending_get and not skip_duplicate_response:
             # Only send response if there's actual text content
