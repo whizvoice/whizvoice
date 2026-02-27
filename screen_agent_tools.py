@@ -406,6 +406,92 @@ async def agent_close_app(user_id: str = None, websocket = None,
             "success": False
         }
 
+async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, websocket = None,
+                                          tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Add quick calories to the user's Fitbit food log for today.
+
+    This tool sends a tool_execution message to the Android app via WebSocket,
+    which automates the Fitbit UI to log the specified calories.
+
+    Args:
+        calories: The number of calories to log
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the operation
+    """
+    try:
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Adding quick calories to Fitbit: {calories} (user: {user_id}, request: {tool_request_id})")
+
+        if not websocket:
+            logger.error("No WebSocket connection available for fitbit_add_quick_calories")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "agent_fitbit_add_quick_calories",
+            "request_id": tool_request_id,
+            "params": {
+                "calories": calories
+            },
+            "conversation_id": conversation_id
+        }
+
+        try:
+            message_json = json.dumps(tool_execution_message)
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent agent_fitbit_add_quick_calories command for {calories} calories")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        if tool_result_handler:
+            logger.info(f"Waiting for fitbit_add_quick_calories result (request_id: {tool_request_id})")
+
+            try:
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=30.0
+                )
+
+                logger.info(f"Fitbit add quick calories result for {tool_request_id}: {result}")
+                return result
+
+            except Exception as e:
+                logger.error(f"Error waiting for fitbit_add_quick_calories result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            return {
+                "status": "sent",
+                "message": f"Command to add {calories} quick calories sent to device",
+                "request_id": tool_request_id
+            }
+
+    except Exception as e:
+        logger.error(f"Error in fitbit_add_quick_calories for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to add quick calories: {str(e)}",
+            "success": False
+        }
+
+
 # Define the Screen Agent tools for Claude
 screen_agent_tools = [
     {
@@ -451,7 +537,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_close_app",
-        "description": "Close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, or quit the app.",
+        "description": "Close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, or quit the app. IMPORTANT: If you used agent_get_google_maps_directions earlier in this conversation, you MUST call launch_app to bring Google Maps to the foreground BEFORE calling this tool, so the user can still see their navigation.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -466,6 +552,21 @@ screen_agent_tools = [
             "type": "object",
             "properties": {},
             "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_fitbit_add_quick_calories",
+        "description": "Add quick calories to the user's Fitbit food log for today. This opens the Fitbit app, navigates to the Food section, and logs the specified number of calories. Use this when the user wants to log calories to Fitbit.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "calories": {
+                    "type": "integer",
+                    "description": "The number of calories to log (e.g., 500, 1200)"
+                }
+            },
+            "required": ["calories"]
         }
     }
 ]

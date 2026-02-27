@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ValidationError
@@ -19,11 +19,11 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
-from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools
+from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories
 from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
-from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, get_music_app_preference, set_music_app_preference
+from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, agent_pause_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
@@ -46,7 +46,8 @@ from models import (
     DialogflowWebhookRequest, DialogflowWebhookResponse,
     CreateCheckoutSessionRequest, CreateCheckoutSessionResponse,
     CancelSubscriptionResponse, SubscriptionStatusResponse,
-    UiDumpCreate, UiDumpResponse
+    UiDumpCreate, UiDumpResponse,
+    WakeWordAudioResponse
 )
 from database import (
     load_conversation_history,
@@ -133,6 +134,8 @@ FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *
 DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. PLEASE CHECK THE HISTORY. Often multiple Asana tasks will be created as different versions of the same user intent, and YOU NEED TO PROACTIVELY DELETE THE OLD ONES.
 
 PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
+
+EXTRA NOTE ABOUT NAVIGATION: If you are about to close yourself but you used agent_get_google_maps_directions during the converation, please launch_app Google Maps before you close so the user can continue to navigate.
 """
 
 # can concatenate additional tools here if needed
@@ -1422,6 +1425,19 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Query is required."} if not args.get('query') else None
     },
+    "agent_pause_youtube_music": {
+        "function_name": "agent_pause_youtube_music",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
     "get_music_app_preference": {
         "function_name": "get_music_app_preference",
         "requires_auth": True,
@@ -1590,6 +1606,20 @@ TOOL_REGISTRY = {
             "conversation_id": kwargs.get("conversation_id")
         },
         "validation": None
+    },
+    "agent_fitbit_add_quick_calories": {
+        "function_name": "agent_fitbit_add_quick_calories",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('calories'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Calories is required."} if not args.get('calories') else None
     },
     "add_contact_preference": {
         "function_name": "add_contact_preference",
@@ -3047,7 +3077,7 @@ async def cancel_and_broadcast_messages(
             logger.error(f"Failed to broadcast delete notification for message {msg_id}: {e}")
 
 
-async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int], websocket=None, session_id=None) -> List[str]:
+async def detect_and_cancel_subset_requests(conversation_id: int, new_message_ids: List[int], websocket=None, session_id=None, new_request_id=None) -> List[str]:
     """
     Detect requests that are subsets of the new message set and cancel them.
     Returns list of cancelled request IDs.
@@ -3071,7 +3101,7 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
             new_message_ids_set = set(new_message_ids)
 
             # Check if old request is a subset of new request
-            if old_message_ids and old_message_ids.issubset(new_message_ids_set) and old_message_ids != new_message_ids_set:
+            if old_message_ids and old_message_ids.issubset(new_message_ids_set) and request_id != new_request_id:
                 logger.info(f"Request {request_id} (messages {old_message_ids}) is subset of new request (messages {new_message_ids_set})")
 
                 # Get all ASSISTANT messages for this request and filter out tool messages
@@ -4231,6 +4261,70 @@ async def create_ui_dump(
         raise HTTPException(status_code=500, detail="Failed to save UI dump")
 
 
+@app.post("/wake-word-audio", response_model=WakeWordAudioResponse)
+async def upload_wake_word_audio(
+    file: UploadFile = File(...),
+    phrase: str = Form(...),
+    confidence: str = Form(...),
+    accepted: str = Form(...),
+    timestamp: str = Form(...),
+    raw_vosk_json: str = Form(...),
+    current_user: Dict = Depends(get_current_user)
+):
+    """
+    Upload a wake word detection audio clip with metadata.
+    Audio is stored in Supabase Storage, metadata in database.
+    """
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+
+    try:
+        file_content = await file.read()
+        file_size = len(file_content)
+
+        storage_path = f"wake_word_audio/{user_id}/{file.filename}"
+
+        supabase.storage.from_("wake-word-audio").upload(
+            path=storage_path,
+            file=file_content,
+            file_options={"content-type": "audio/wav"}
+        )
+
+        confidence_val = float(confidence)
+        accepted_val = accepted.lower() == "true"
+        timestamp_val = int(timestamp)
+
+        insert_data = {
+            "user_id": user_id,
+            "phrase": phrase,
+            "confidence": confidence_val,
+            "accepted": accepted_val,
+            "detection_timestamp": timestamp_val,
+            "raw_vosk_json": raw_vosk_json,
+            "storage_path": storage_path,
+            "file_size_bytes": file_size,
+        }
+
+        result = supabase.table("wake_word_audio_clips").insert(insert_data).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to save audio clip metadata")
+
+        row = result.data[0]
+        logger.info(f"Saved wake word audio for user {user_id}: phrase={phrase}, confidence={confidence_val}, accepted={accepted_val}, id={row['id']}")
+
+        return WakeWordAudioResponse(
+            id=row["id"],
+            created_at=row["created_at"]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading wake word audio: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload audio: {str(e)}")
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
@@ -4604,7 +4698,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
             # Detect and cancel subset requests
             cancelled_requests = await detect_and_cancel_subset_requests(
-                processing_conversation_id, user_message_ids, websocket, session_id
+                processing_conversation_id, user_message_ids, websocket, session_id,
+                new_request_id=request_id
             )
             if cancelled_requests:
                 logger.info(f"Cancelled {len(cancelled_requests)} subset requests for conversation {processing_conversation_id}")
@@ -5650,7 +5745,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                                 tool_use_id = block.get("id")
 
                                 # Check if this is a get_* or agent_* tool
-                                if tool_name.startswith("get_") or tool_name.startswith("agent_"):
+                                if tool_name.startswith("get_"):
                                     # Now check if its tool_result is still pending
                                     for user_msg in reversed(messages):
                                         if user_msg.get("role") == "user":
@@ -5673,7 +5768,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     if should_skip_broadcast_for_pending_get or (msg.get("role") == "assistant" and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in (content if isinstance(content, list) else []))):
                         break
         except Exception as e:
-            logger.error(f"Error checking for pending get_*/agent_* tool: {e}")
+            logger.error(f"Error checking for pending get_* tool: {e}")
 
         if not request_cancelled and not should_skip_broadcast_for_pending_get and not skip_duplicate_response:
             # Only send response if there's actual text content
