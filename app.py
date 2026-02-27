@@ -5046,7 +5046,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Log the initial response to see if Claude is trying to use tools
         logger.info(f"Claude response stop_reason: {response.stop_reason}")
         if hasattr(response, 'content'):
-            logger.info(f"Claude response content: {[{'type': getattr(block, 'type', 'unknown'), 'text': getattr(block, 'text', None)[:100] if hasattr(block, 'text') else None} for block in response.content]}")
+            logger.info(f"Claude response content: {[{'type': getattr(block, 'type', 'unknown'), 'text': (getattr(block, 'text', '') or '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
 
         # Track the last tool_result timestamp for proper message ordering
         last_tool_result_timestamp = None
@@ -5601,7 +5601,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # Log final response details
         logger.info(f"Final AI response - stop_reason: {response.stop_reason}")
-        logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': getattr(block, 'text', '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
+        logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': (getattr(block, 'text', '') or '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
 
         # Handle pause_turn stop reason (web search can produce this for long-running searches)
         # For v1, treat it the same as end_turn - extract whatever text Claude already returned
