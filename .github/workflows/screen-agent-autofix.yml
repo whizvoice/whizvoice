@@ -2,14 +2,20 @@ name: Screen Agent Auto-Fix
 
 on:
   schedule:
-    # Run every 6 hours
-    - cron: '0 */6 * * *'
+    # Daily fallback in case server restarts lose a pending debounce timer
+    - cron: '0 8 * * *'
+  repository_dispatch:
+    types: [screen-agent-autofix]
   workflow_dispatch:
     inputs:
       dump_reason:
         description: 'Specific dump_reason to process (leave empty for all)'
         required: false
         type: string
+
+concurrency:
+  group: screen-agent-autofix
+  cancel-in-progress: false
 
 jobs:
   autofix:

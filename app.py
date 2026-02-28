@@ -22,6 +22,7 @@ from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories
 from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
+from autofix_trigger import schedule_autofix_trigger
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
 from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, agent_pause_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
@@ -4257,6 +4258,10 @@ async def create_ui_dump(
 
         row = result.data[0]
         logger.info(f"Saved UI dump for user {user_id}: reason={ui_dump.dump_reason}, id={row['id']}")
+
+        # Trigger auto-fix pipeline for screen agent errors (not rage shakes)
+        if ui_dump.dump_reason != "rage_shake":
+            asyncio.create_task(schedule_autofix_trigger())
 
         return UiDumpResponse(
             id=row["id"],
