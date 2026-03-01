@@ -2539,8 +2539,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}, client_timestamp: {client_timestamp}")
 
-                        # Require client_timestamp - fail fast if missing
-                        if client_timestamp is None:
+                        # Require client_timestamp - fail fast if missing (except for cancel messages)
+                        if client_timestamp is None and message_type != "cancel":
                             error_msg = f"Required timestamp missing in WebSocket message. request_id={request_id}, type={message_type}"
                             logger.error(f"MISSING_TIMESTAMP: {error_msg}")
                             await websocket.send_json({
