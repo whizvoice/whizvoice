@@ -2631,7 +2631,13 @@ async def websocket_endpoint(websocket: WebSocket):
                             task = await redis_managers["local_objects"].get_and_cancel_task(cancel_request_id)
                             if task:
                                 logger.info(f"Cancelling request {cancel_request_id}")
-                        
+
+                        # Cancel pending screen agent tools for this device
+                        if device_id:
+                            cancel_result = await screen_agent_queue.cancel_pending(device_id)
+                            if cancel_result.get("cancelled_count", 0) > 0:
+                                logger.info(f"Cancelled {cancel_result['cancelled_count']} pending screen agent tools for device {device_id}")
+
                         # Remove from active requests tracking in Redis
                         if redis_managers and "active_requests" in redis_managers:
                             await redis_managers["active_requests"].remove(session_id, cancel_request_id)
