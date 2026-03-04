@@ -322,7 +322,11 @@ async def load_validated_messages_from_db(conversation_id: int, session_id: str)
             elif msg['message_sender'] == 'USER':
                 redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
             elif msg['message_sender'] == 'ASSISTANT':
-                redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
+                if tool_content:
+                    # Preserve server tool blocks (e.g. web search) for multi-turn context
+                    redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
+                else:
+                    redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
 
         # Self-heal Redis by rewriting the session with validated messages
         if redis_messages:
@@ -5136,12 +5140,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "input": tb.input
                 })
 
-            # Serialize web search blocks (server_tool_use + web_search_tool_result) for multi-turn context
+            # Serialize server tool blocks (server_tool_use + web_search_tool_result) for multi-turn context
             # These are server-side tool blocks that don't need user-side execution
-            web_search_block_dicts = []
+            server_tool_block_dicts = []
             for block in response.content:
                 if block.type == 'server_tool_use':
-                    web_search_block_dicts.append({
+                    server_tool_block_dicts.append({
                         "type": "server_tool_use",
                         "id": block.id,
                         "name": block.name,
@@ -5156,7 +5160,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         serialized_content = raw_content.model_dump()
                     else:
                         serialized_content = raw_content
-                    web_search_block_dicts.append({
+                    server_tool_block_dicts.append({
                         "type": "web_search_tool_result",
                         "tool_use_id": block.tool_use_id,
                         "content": serialized_content
@@ -5258,9 +5262,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     await chat_sessions_lock.acquire()
 
                 # Build assistant content: text_before + web search blocks + ALL tool_uses (NO text_after)
-                # Web search blocks (server_tool_use, web_search_tool_result) must be preserved
+                # Server tool blocks (server_tool_use, web_search_tool_result) must be preserved
                 # for multi-turn context so Claude knows what it already searched
-                assistant_content = text_before_tool + web_search_block_dicts + tool_block_dicts
+                assistant_content = text_before_tool + server_tool_block_dicts + tool_block_dicts
 
                 # CRITICAL: Create pending tool_result for EACH tool_use IMMEDIATELY
                 # Add BOTH assistant message and pending results to Redis ATOMICALLY
@@ -5295,7 +5299,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     message_sender="ASSISTANT",
                     request_id=request_id,
                     content_type="tool_use",  # Type is tool_use even with text/web search content
-                    tool_content=web_search_block_dicts + tool_block_dicts,  # Web search blocks + ALL tool_uses
+                    tool_content=server_tool_block_dicts + tool_block_dicts,  # Server tool blocks + ALL tool_uses
                     client_timestamp=text_before_and_tool_use_timestamp,
                     local_objects=local_objects
                 )
@@ -5637,8 +5641,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         assistant_response_text = ""
         all_text_parts = []
         content_list = []
-        # Also collect web search blocks for DB persistence (multi-turn context)
-        final_web_search_blocks = []
+        # Also collect server tool blocks for DB persistence (multi-turn context)
+        server_tool_blocks = []
         # Collect citation URLs from web search text blocks
         citation_urls = []
         if response.content:
@@ -5654,7 +5658,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             if url and url not in [c[0] for c in citation_urls]:
                                 citation_urls.append((url, title))
                 elif block.type == 'server_tool_use':
-                    final_web_search_blocks.append({
+                    server_tool_blocks.append({
                         "type": "server_tool_use",
                         "id": block.id,
                         "name": block.name,
@@ -5669,7 +5673,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         serialized_content = raw_content.model_dump()
                     else:
                         serialized_content = raw_content
-                    final_web_search_blocks.append({
+                    server_tool_blocks.append({
                         "type": "web_search_tool_result",
                         "tool_use_id": block.tool_use_id,
                         "content": serialized_content
@@ -5753,7 +5757,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # STEP 2: Only add to Redis if NOT cancelled
         # Include web search blocks in Redis content for multi-turn context
-        redis_content_list = content_list + final_web_search_blocks if final_web_search_blocks else content_list
+        redis_content_list = content_list + server_tool_blocks if server_tool_blocks else content_list
         async with chat_sessions_lock:
             # Only add message if there's text content AND not already cancelled
             if content_list and not request_cancelled:
@@ -5813,10 +5817,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         if assistant_response_text and not skip_duplicate_response:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
             local_objects = redis_managers.get("local_objects") if redis_managers else None
-            save_content_type = "tool_use" if final_web_search_blocks else "text"
-            # Include text blocks in tool_content so they're preserved when loading from DB
-            # (DB load for tool_use messages uses tool_content as the full message content)
-            save_tool_content = content_list + final_web_search_blocks if final_web_search_blocks else None
+            # Only save as tool_use if there are actual client-side tool_use blocks
+            # server_tool_use blocks (e.g. web search) are server-side and should be saved as text
+            # so the Android sync API includes them
+            has_client_tool_use = any(block.type == 'tool_use' for block in response.content)
+            save_content_type = "tool_use" if has_client_tool_use else "text"
+            # Still save server tool blocks in tool_content for multi-turn context
+            save_tool_content = content_list + server_tool_blocks if server_tool_blocks else None
             save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type=save_content_type, tool_content=save_tool_content, client_timestamp=final_text_timestamp, local_objects=local_objects)
             if save_result:
                 saved_conversation_id, bot_message_id, cancelled_ids = save_result
