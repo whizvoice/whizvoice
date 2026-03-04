@@ -2539,8 +2539,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}, client_timestamp: {client_timestamp}")
 
-                        # Require client_timestamp - fail fast if missing (except for cancel messages)
-                        if client_timestamp is None and message_type != "cancel":
+                        # Require client_timestamp - fail fast if missing
+                        if client_timestamp is None:
                             error_msg = f"Required timestamp missing in WebSocket message. request_id={request_id}, type={message_type}"
                             logger.error(f"MISSING_TIMESTAMP: {error_msg}")
                             await websocket.send_json({
@@ -2641,7 +2641,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         # Remove from active requests tracking in Redis
                         if redis_managers and "active_requests" in redis_managers:
                             await redis_managers["active_requests"].remove(session_id, cancel_request_id)
-                        
+
                         # Send cancellation confirmation
                         cancel_response = {
                             "type": "cancelled",
@@ -2650,7 +2650,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         }
                         await websocket.send_text(json.dumps(cancel_response))
                         continue
-                    
+
                     # Handle regular messages
                     if message_type == "message" and message:
                         # Before creating the new task, detect and cancel subset requests
