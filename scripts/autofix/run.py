@@ -448,7 +448,9 @@ def invoke_claude_code(repo_path: str, prompt: str) -> bool:
     if result.returncode != 0:
         log.error(f"Claude Code failed (exit {result.returncode})")
         if result.stderr:
-            log.error(f"stderr: {result.stderr[:1000]}")
+            log.error(f"stderr: {result.stderr[:2000]}")
+        if result.stdout:
+            log.error(f"stdout: {result.stdout[:2000]}")
         return False
 
     log.info("Claude Code completed successfully")
@@ -527,7 +529,6 @@ def process_dump(supabase, dump: dict, repo_path: str) -> dict:
 
     if not success:
         result["status"] = "claude_failed"
-        mark_processed(supabase, dump_reason, dump["app_version"], None)
         return result
 
     # Check if Claude determined this isn't a UI change issue
