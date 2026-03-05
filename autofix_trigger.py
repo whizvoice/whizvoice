@@ -23,6 +23,7 @@ _PAT_FILE = Path(__file__).parent / "whizvoice-autofix-personal-access-token.txt
 
 _trigger_task: Optional[asyncio.Task] = None
 _trigger_lock = asyncio.Lock()
+_last_triggered_at: Optional[float] = None
 
 
 async def schedule_autofix_trigger():
@@ -38,8 +39,16 @@ async def schedule_autofix_trigger():
 
 async def _debounced_trigger():
     """Wait for the debounce period, then trigger the GitHub Action."""
+    global _last_triggered_at
     try:
-        await asyncio.sleep(DEBOUNCE_SECONDS)
+        now = asyncio.get_event_loop().time()
+        if _last_triggered_at is not None:
+            elapsed = now - _last_triggered_at
+            if elapsed < DEBOUNCE_SECONDS:
+                remaining = DEBOUNCE_SECONDS - elapsed
+                logger.info(f"Debouncing autofix trigger for {remaining:.0f}s")
+                await asyncio.sleep(remaining)
+        # else: first trigger or >10min since last — fire immediately
     except asyncio.CancelledError:
         return
 
@@ -67,6 +76,7 @@ async def _debounced_trigger():
         async with httpx.AsyncClient() as client:
             resp = await client.post(url, headers=headers, json=body, timeout=30)
         if resp.status_code == 204:
+            _last_triggered_at = asyncio.get_event_loop().time()
             logger.info("Successfully triggered autofix workflow")
         else:
             logger.error(
