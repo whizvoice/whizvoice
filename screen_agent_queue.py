@@ -136,6 +136,57 @@ class ScreenAgentQueueManager:
         result = await self._execute_and_process_queue(device_id, tool_name, tool_args, context)
         return result
 
+    async def _refresh_websocket_if_stale(self, context: dict):
+        """Replace stale WebSocket in context with active one from existing registries."""
+        websocket = context.get("websocket")
+        if not websocket:
+            return
+
+        from starlette.websockets import WebSocketState
+        if websocket.client_state == WebSocketState.CONNECTED:
+            return  # Still good
+
+        session_id = context.get("session_id")
+        conversation_id = context.get("conversation_id")
+        logger.warning(
+            f"Screen agent queue: WebSocket is {websocket.client_state}, "
+            f"looking up active connection (session={session_id}, conversation={conversation_id})"
+        )
+
+        # Strategy 1: Resolve session redirect and look up new WebSocket
+        if session_id:
+            try:
+                from redis_managers import chat_session_manager, local_manager
+                resolved_id = await chat_session_manager.resolve_session_id(session_id)
+                if resolved_id != session_id:
+                    fresh_ws = await local_manager.get_session_websocket(resolved_id)
+                    if fresh_ws and fresh_ws.client_state == WebSocketState.CONNECTED:
+                        context["websocket"] = fresh_ws
+                        logger.info(f"Refreshed WebSocket via session redirect: {session_id} -> {resolved_id}")
+                        return
+            except Exception as e:
+                logger.warning(f"Error resolving session redirect: {e}")
+
+        # Strategy 2: Look up by conversation_id
+        if conversation_id is not None:
+            try:
+                from redis_managers import local_manager
+                real_id = conversation_id
+                if isinstance(conversation_id, int) and conversation_id < 0:
+                    cached_real = await local_manager.get_real_id_cached(conversation_id)
+                    if cached_real:
+                        real_id = cached_real
+                registrations = await local_manager.get_conversation_websockets(real_id)
+                for sid, ws in registrations:
+                    if ws.client_state == WebSocketState.CONNECTED:
+                        context["websocket"] = ws
+                        logger.info(f"Refreshed WebSocket via conversation lookup (conv_id={real_id}, session={sid})")
+                        return
+            except Exception as e:
+                logger.warning(f"Error looking up WebSocket by conversation: {e}")
+
+        logger.warning(f"Could not find active WebSocket to replace stale one")
+
     async def _execute_and_process_queue(
         self,
         device_id: str,
@@ -154,6 +205,8 @@ class ScreenAgentQueueManager:
             return {"error": "Queue manager not initialized", "success": False}
 
         try:
+            # Refresh WebSocket if the original one disconnected (e.g., during optimistic→real ID migration)
+            await self._refresh_websocket_if_stale(context)
             # Execute the current tool
             # Note: user_id is already in context, passed via **context
             result = await self._execute_tool_func(
@@ -201,6 +254,8 @@ class ScreenAgentQueueManager:
                 logger.error("Screen agent queue: execute_tool function not set!")
                 result = {"error": "Queue manager not initialized", "success": False}
             else:
+                # Refresh WebSocket if the original one disconnected
+                await self._refresh_websocket_if_stale(next_item.context)
                 # Note: user_id is already in context, passed via **context
                 result = await self._execute_tool_func(
                     next_item.tool_name,
@@ -222,6 +277,7 @@ class ScreenAgentQueueManager:
 
     async def _send_queued_result(self, item: QueuedToolExecution, result: Dict[str, Any]):
         """Send the result of a queued tool execution via WebSocket."""
+        await self._refresh_websocket_if_stale(item.context)
         websocket = item.context.get("websocket")
         if not websocket:
             logger.warning(f"Screen agent queue: No websocket for queued result delivery")
