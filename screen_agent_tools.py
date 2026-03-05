@@ -406,6 +406,89 @@ async def agent_close_app(user_id: str = None, websocket = None,
             "success": False
         }
 
+async def agent_close_other_app(app_name: str, user_id: str = None, websocket = None,
+                                tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Close another app running on the user's Android device by dismissing it from recent apps.
+
+    Args:
+        app_name: The name of the app to close (e.g., "YouTube", "Chrome", "Maps")
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the close operation
+    """
+    try:
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Closing other app '{app_name}' (user: {user_id}, request: {tool_request_id})")
+
+        if not websocket:
+            logger.error("No WebSocket connection available for close_other_app")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "agent_close_other_app",
+            "request_id": tool_request_id,
+            "params": {
+                "app_name": app_name
+            },
+            "conversation_id": conversation_id
+        }
+
+        try:
+            message_json = json.dumps(tool_execution_message)
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent agent_close_other_app command for '{app_name}'")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        if tool_result_handler:
+            logger.info(f"Waiting for close_other_app result (request_id: {tool_request_id})")
+
+            try:
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=15.0
+                )
+
+                logger.info(f"Close other app result for {tool_request_id}: {result}")
+                return result
+
+            except Exception as e:
+                logger.error(f"Error waiting for close_other_app result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            return {
+                "status": "sent",
+                "message": f"Command to close {app_name} sent to device",
+                "request_id": tool_request_id
+            }
+
+    except Exception as e:
+        logger.error(f"Error in close_other_app for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to close app: {str(e)}",
+            "success": False
+        }
+
+
 async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, websocket = None,
                                           tool_result_handler = None, conversation_id: str = None) -> dict:
     """
@@ -537,11 +620,26 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_close_app",
-        "description": "Close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, or quit the app. IMPORTANT: If you used agent_get_google_maps_directions earlier in this conversation, you MUST call launch_app to bring Google Maps to the foreground BEFORE calling this tool, so the user can still see their navigation.",
+        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit the app, or wants you to go away. IMPORTANT: If you used agent_get_google_maps_directions earlier in this conversation, you MUST call launch_app to bring Google Maps to the foreground BEFORE calling this tool, so the user can still see their navigation.",
         "input_schema": {
             "type": "object",
             "properties": {},
             "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_close_other_app",
+        "description": "Close another app running on the device by dismissing it from recent apps. Use this when the user wants to close, exit, or quit an app other than WhizVoice (e.g., 'close YouTube', 'exit Chrome'). This does NOT close WhizVoice itself - use agent_close_app for that.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "app_name": {
+                    "type": "string",
+                    "description": "The name of the app to close (e.g., 'YouTube', 'Chrome', 'Maps', 'WhatsApp', 'Spotify')"
+                }
+            },
+            "required": ["app_name"]
         }
     },
     {

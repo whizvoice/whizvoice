@@ -19,9 +19,10 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
-from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories
+from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_close_other_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories
 from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
+from autofix_trigger import schedule_autofix_trigger
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
 from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, agent_pause_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
@@ -273,10 +274,11 @@ async def load_validated_messages_from_db(conversation_id: int, session_id: str)
                         tool_use_ids_with_results.add(block['tool_use_id'])
 
         # Collect valid (non-cancelled) tool_use IDs
+        # Only count actual tool_use blocks, not server_tool_use (web search)
         for msg in db_messages:
             if not msg.get('cancelled') and msg.get('content_type') == 'tool_use' and msg.get('tool_content'):
                 for block in msg['tool_content']:
-                    if isinstance(block, dict) and block.get('id'):
+                    if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
                         valid_tool_use_ids.add(block['id'])
 
         # Second pass: build messages, skipping incomplete/orphaned tool blocks
@@ -290,10 +292,11 @@ async def load_validated_messages_from_db(conversation_id: int, session_id: str)
             tool_content = msg.get('tool_content')
 
             # Handle tool_use messages - skip if no corresponding tool_result
+            # Only check actual tool_use blocks, not server_tool_use (web search)
             if content_type == 'tool_use' and tool_content:
                 tool_use_id = None
                 for block in tool_content:
-                    if isinstance(block, dict) and block.get('id'):
+                    if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
                         tool_use_id = block['id']
                         break
 
@@ -319,7 +322,11 @@ async def load_validated_messages_from_db(conversation_id: int, session_id: str)
             elif msg['message_sender'] == 'USER':
                 redis_messages.append({"role": "user", "content": msg['content'], "_timestamp": msg.get('timestamp')})
             elif msg['message_sender'] == 'ASSISTANT':
-                redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
+                if tool_content:
+                    # Preserve server tool blocks (e.g. web search) for multi-turn context
+                    redis_messages.append({"role": "assistant", "content": tool_content, "_timestamp": msg.get('timestamp')})
+                else:
+                    redis_messages.append({"role": "assistant", "content": msg['content'], "_timestamp": msg.get('timestamp')})
 
         # Self-heal Redis by rewriting the session with validated messages
         if redis_messages:
@@ -347,6 +354,7 @@ def _has_orphaned_tool_uses(messages: List[Dict]) -> bool:
         if not isinstance(content, list):
             continue
         # Collect tool_use IDs from this assistant message
+        # Skip server_tool_use blocks (web search) - they don't need user-side tool_result
         tool_use_ids = set()
         for block in content:
             if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
@@ -389,6 +397,7 @@ def _fix_orphaned_tool_uses(messages: List[Dict]) -> None:
             i += 1
             continue
         # Collect tool_use IDs from this assistant message
+        # Skip server_tool_use blocks (web search) - they don't need user-side tool_result
         tool_use_ids = set()
         for block in content:
             if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
@@ -526,10 +535,11 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
                 merged_content = _deduplicate_tool_results(tool_results) + text_blocks
             else:
-                # For assistant messages: text blocks MUST come first, then tool_use blocks
+                # For assistant messages: text blocks first, then other blocks (server_tool_use,
+                # web_search_tool_result, tool_use) in their original order
                 text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
-                tool_uses = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_use']
-                merged_content = text_blocks + tool_uses
+                other_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') != 'text']
+                merged_content = text_blocks + other_blocks
 
             prev_msg['content'] = merged_content
 
@@ -559,8 +569,8 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                         merged_content = _deduplicate_tool_results(tool_results) + text_blocks
                     else:
                         text_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'text']
-                        tool_uses = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') == 'tool_use']
-                        merged_content = text_blocks + tool_uses
+                        other_blocks = [b for b in prev_blocks + curr_blocks if isinstance(b, dict) and b.get('type') != 'text']
+                        merged_content = text_blocks + other_blocks
                     prev_msg['content'] = merged_content
             messages = merged_messages
             logger.info(f"[CLAUDE_CONTEXT] Self-healed: reloaded and re-merged {len(messages)} messages")
@@ -600,11 +610,12 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
 
     # Only add tools-related params if we have tools
     if tools_to_send:
-        api_params["tools"] = tools_to_send
+        # Web search is a server-side tool with a different schema than custom tools
+        web_search_tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+        api_params["tools"] = tools_to_send + [web_search_tool]
         api_params["tool_choice"] = {"type": "auto"}
-        api_params["betas"] = ["token-efficient-tools-2025-02-19"]
 
-    return client.beta.messages.create(**api_params)
+    return client.messages.create(**api_params)
 
 # Allow-list of preference keys that can be set via this endpoint
 ALLOWED_API_KEY_NAMES = {
@@ -1164,6 +1175,20 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": None
+    },
+    "agent_close_other_app": {
+        "function_name": "agent_close_other_app",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('app_name'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "app_name is required."} if not args.get('app_name') else None
     },
     # ========== Device Control Tools (direct intents/APIs) ==========
     "agent_set_alarm": {
@@ -2624,11 +2649,17 @@ async def websocket_endpoint(websocket: WebSocket):
                             task = await redis_managers["local_objects"].get_and_cancel_task(cancel_request_id)
                             if task:
                                 logger.info(f"Cancelling request {cancel_request_id}")
-                        
+
+                        # Cancel pending screen agent tools for this device
+                        if device_id:
+                            cancel_result = await screen_agent_queue.cancel_pending(device_id)
+                            if cancel_result.get("cancelled_count", 0) > 0:
+                                logger.info(f"Cancelled {cancel_result['cancelled_count']} pending screen agent tools for device {device_id}")
+
                         # Remove from active requests tracking in Redis
                         if redis_managers and "active_requests" in redis_managers:
                             await redis_managers["active_requests"].remove(session_id, cancel_request_id)
-                        
+
                         # Send cancellation confirmation
                         cancel_response = {
                             "type": "cancelled",
@@ -2637,7 +2668,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         }
                         await websocket.send_text(json.dumps(cancel_response))
                         continue
-                    
+
                     # Handle regular messages
                     if message_type == "message" and message:
                         # Before creating the new task, detect and cancel subset requests
@@ -4074,10 +4105,12 @@ async def check_and_retry_failed_messages(
                                 # Use timeout like in normal flow
                                 response = await asyncio.wait_for(retry_task, timeout=60.0)
                                 
-                                # Extract text response
+                                # Extract text response (skip server_tool_use/web_search_tool_result blocks)
                                 assistant_response = ""
-                                if response.content and response.content[0].type == 'text':
-                                    assistant_response = response.content[0].text
+                                for block in (response.content or []):
+                                    if block.type == 'text':
+                                        assistant_response = block.text
+                                        break
                                 
                                 if assistant_response:
                                     # Save the new assistant response (error message already deleted)
@@ -4249,6 +4282,10 @@ async def create_ui_dump(
 
         row = result.data[0]
         logger.info(f"Saved UI dump for user {user_id}: reason={ui_dump.dump_reason}, id={row['id']}")
+
+        # Trigger auto-fix pipeline for screen agent errors (not rage shakes)
+        if ui_dump.dump_reason != "rage_shake":
+            asyncio.create_task(schedule_autofix_trigger())
 
         return UiDumpResponse(
             id=row["id"],
@@ -4765,12 +4802,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # Now check if we got a streaming response or a regular message
             # AsyncStream is from anthropic module and is for streaming
-            # BetaMessage is for non-streaming responses (including tool calls)
+            # Message is for non-streaming responses (including tool calls)
             is_streaming = (
                 type(api_result).__name__ == 'AsyncStream' or
                 'AsyncStream' in str(type(api_result)) or
                 'AsyncMessageStream' in str(type(api_result))
-            ) and type(api_result).__name__ != 'BetaMessage'
+            ) and type(api_result).__name__ not in ('Message', 'BetaMessage')
             
             if is_streaming:
                 logger.info(f"[STREAMING] Processing streaming response for request {request_id}")
@@ -4790,11 +4827,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             break
                         
                         # Handle different chunk types
+                        # Skip server_tool_use and web_search_tool_result chunks (web search)
+                        # - only extract text for the streaming response
                         if hasattr(chunk, 'type'):
                             if chunk.type == 'content_block_delta' and hasattr(chunk, 'delta'):
                                 text_chunk = chunk.delta.text if hasattr(chunk.delta, 'text') else ""
                                 full_response += text_chunk
-                                
+
                                 # Don't send chunks to client - streaming is only for cancellation support
                                 # The complete response will be sent once streaming finishes
                             elif chunk.type == 'message_stop':
@@ -5036,7 +5075,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Log the initial response to see if Claude is trying to use tools
         logger.info(f"Claude response stop_reason: {response.stop_reason}")
         if hasattr(response, 'content'):
-            logger.info(f"Claude response content: {[{'type': getattr(block, 'type', 'unknown'), 'text': getattr(block, 'text', None)[:100] if hasattr(block, 'text') else None} for block in response.content]}")
+            logger.info(f"Claude response content: {[{'type': getattr(block, 'type', 'unknown'), 'text': (getattr(block, 'text', '') or '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
 
         # Track the last tool_result timestamp for proper message ordering
         last_tool_result_timestamp = None
@@ -5100,6 +5139,32 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "name": tb.name,
                     "input": tb.input
                 })
+
+            # Serialize server tool blocks (server_tool_use + web_search_tool_result) for multi-turn context
+            # These are server-side tool blocks that don't need user-side execution
+            server_tool_block_dicts = []
+            for block in response.content:
+                if block.type == 'server_tool_use':
+                    server_tool_block_dicts.append({
+                        "type": "server_tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input if hasattr(block, 'input') else {}
+                    })
+                elif block.type == 'web_search_tool_result':
+                    # Content is Pydantic objects - serialize to dicts for JSON storage
+                    raw_content = block.content if hasattr(block, 'content') else []
+                    if isinstance(raw_content, list):
+                        serialized_content = [item.model_dump() if hasattr(item, 'model_dump') else item for item in raw_content]
+                    elif hasattr(raw_content, 'model_dump'):
+                        serialized_content = raw_content.model_dump()
+                    else:
+                        serialized_content = raw_content
+                    server_tool_block_dicts.append({
+                        "type": "web_search_tool_result",
+                        "tool_use_id": block.tool_use_id,
+                        "content": serialized_content
+                    })
 
             # Extract ALL text blocks from response - all text goes BEFORE tool_uses
             # Claude API expects: ASSISTANT [text, tool_use_A, tool_use_B] then USER [tool_result_A, tool_result_B]
@@ -5196,8 +5261,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     logger.warning(f"Using local lock (not distributed) for conversation {session_conversation_id}")
                     await chat_sessions_lock.acquire()
 
-                # Build assistant content: text_before + ALL tool_uses (NO text_after)
-                assistant_content = text_before_tool + tool_block_dicts
+                # Build assistant content: text_before + web search blocks + ALL tool_uses (NO text_after)
+                # Server tool blocks (server_tool_use, web_search_tool_result) must be preserved
+                # for multi-turn context so Claude knows what it already searched
+                assistant_content = text_before_tool + server_tool_block_dicts + tool_block_dicts
 
                 # CRITICAL: Create pending tool_result for EACH tool_use IMMEDIATELY
                 # Add BOTH assistant message and pending results to Redis ATOMICALLY
@@ -5221,8 +5288,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     request_id=request_id
                 )
 
-                # Save merged text_before+ALL tool_uses to database as ONE message
-                # content_type is "tool_use" even though it may also contain text content
+                # Save merged text_before+web search blocks+ALL tool_uses to database as ONE message
+                # content_type is "tool_use" even though it may also contain text/web search content
                 # This ensures proper timestamp ordering: merged message at T+1ms
                 local_objects = redis_managers.get("local_objects") if redis_managers else None
                 tool_use_save_result = save_message_to_db(
@@ -5231,8 +5298,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     content=assistant_response_text_before,  # Include text_before (may be empty string)
                     message_sender="ASSISTANT",
                     request_id=request_id,
-                    content_type="tool_use",  # Type is tool_use even with text content
-                    tool_content=tool_block_dicts,  # ALL tool_uses
+                    content_type="tool_use",  # Type is tool_use even with text/web search content
+                    tool_content=server_tool_block_dicts + tool_block_dicts,  # Server tool blocks + ALL tool_uses
                     client_timestamp=text_before_and_tool_use_timestamp,
                     local_objects=local_objects
                 )
@@ -5563,18 +5630,65 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # Log final response details
         logger.info(f"Final AI response - stop_reason: {response.stop_reason}")
-        logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': getattr(block, 'text', '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
+        logger.info(f"Final AI response - content blocks: {[{'type': block.type, 'text': (getattr(block, 'text', '') or '')[:100] if hasattr(block, 'text') else None} for block in response.content]}")
+
+        # Handle pause_turn stop reason (web search can produce this for long-running searches)
+        # For v1, treat it the same as end_turn - extract whatever text Claude already returned
+        if hasattr(response, 'stop_reason') and response.stop_reason == 'pause_turn':
+            logger.warning(f"Received pause_turn stop_reason for request {request_id} - treating as end_turn. Response may be truncated.")
 
         # Extract text content from response
         assistant_response_text = ""
+        all_text_parts = []
         content_list = []
+        # Also collect server tool blocks for DB persistence (multi-turn context)
+        server_tool_blocks = []
+        # Collect citation URLs from web search text blocks
+        citation_urls = []
         if response.content:
             for block in response.content:
                 if block.type == 'text':
                     content_list.append({"type": "text", "text": block.text})
-                    if not assistant_response_text:
-                        assistant_response_text = block.text
+                    all_text_parts.append(block.text)
+                    # Collect citations from web search results
+                    if hasattr(block, 'citations') and block.citations:
+                        for citation in block.citations:
+                            url = getattr(citation, 'url', None) if hasattr(citation, 'url') else (citation.get('url') if isinstance(citation, dict) else None)
+                            title = getattr(citation, 'title', None) if hasattr(citation, 'title') else (citation.get('title') if isinstance(citation, dict) else None)
+                            if url and url not in [c[0] for c in citation_urls]:
+                                citation_urls.append((url, title))
+                elif block.type == 'server_tool_use':
+                    server_tool_blocks.append({
+                        "type": "server_tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input if hasattr(block, 'input') else {}
+                    })
+                elif block.type == 'web_search_tool_result':
+                    # Content is Pydantic objects - serialize to dicts for JSON storage
+                    raw_content = block.content if hasattr(block, 'content') else []
+                    if isinstance(raw_content, list):
+                        serialized_content = [item.model_dump() if hasattr(item, 'model_dump') else item for item in raw_content]
+                    elif hasattr(raw_content, 'model_dump'):
+                        serialized_content = raw_content.model_dump()
+                    else:
+                        serialized_content = raw_content
+                    server_tool_blocks.append({
+                        "type": "web_search_tool_result",
+                        "tool_use_id": block.tool_use_id,
+                        "content": serialized_content
+                    })
                 # Skip tool_use blocks - they were already added in the tool loop
+
+        # Combine all text parts and append citation sources if present
+        combined_text = "\n\n".join(all_text_parts) if len(all_text_parts) > 1 else (all_text_parts[0] if all_text_parts else "")
+        if citation_urls:
+            sources_section = "\n\n**Sources:**\n" + "\n".join(
+                f"- [{title or url}]({url})" for url, title in citation_urls
+            )
+            combined_text += sources_section
+            logger.info(f"Appended {len(citation_urls)} citation sources to response")
+        assistant_response_text = combined_text
 
         # Calculate timestamp for final assistant text (after tool_result if applicable)
         final_text_timestamp = None
@@ -5642,10 +5756,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.info(f"Request {request_id} was cancelled, skipping add to Redis session")
 
         # STEP 2: Only add to Redis if NOT cancelled
+        # Include web search blocks in Redis content for multi-turn context
+        redis_content_list = content_list + server_tool_blocks if server_tool_blocks else content_list
         async with chat_sessions_lock:
             # Only add message if there's text content AND not already cancelled
             if content_list and not request_cancelled:
-                await add_chat_message(session_id, {"role": "assistant", "content": content_list}, timestamp=final_text_timestamp, request_id=request_id)
+                await add_chat_message(session_id, {"role": "assistant", "content": redis_content_list}, timestamp=final_text_timestamp, request_id=request_id)
 
                 # STEP 3: Check AGAIN after adding to handle race condition
                 # where request was cancelled during the add operation
@@ -5695,12 +5811,20 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 logger.error(f"Error checking for duplicate responses: {e}")
 
         # Save assistant message to database if there's text content (always save, but mark as cancelled if needed)
+        # If web search blocks are present, save them as tool_content for multi-turn context
         saved_conversation_id = session_conversation_id
         save_result = None
         if assistant_response_text and not skip_duplicate_response:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
             local_objects = redis_managers.get("local_objects") if redis_managers else None
-            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type="text", client_timestamp=final_text_timestamp, local_objects=local_objects)
+            # Only save as tool_use if there are actual client-side tool_use blocks
+            # server_tool_use blocks (e.g. web search) are server-side and should be saved as text
+            # so the Android sync API includes them
+            has_client_tool_use = any(block.type == 'tool_use' for block in response.content)
+            save_content_type = "tool_use" if has_client_tool_use else "text"
+            # Still save server tool blocks in tool_content for multi-turn context
+            save_tool_content = content_list + server_tool_blocks if server_tool_blocks else None
+            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type=save_content_type, tool_content=save_tool_content, client_timestamp=final_text_timestamp, local_objects=local_objects)
             if save_result:
                 saved_conversation_id, bot_message_id, cancelled_ids = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
