@@ -86,13 +86,85 @@ def is_emulator_running() -> bool:
         return False
 
 
-def boot_emulator() -> bool:
+def get_snapshot_path() -> str:
+    """Return the expected path to the emulator snapshot."""
+    android_avd_home = os.path.join(os.path.expanduser("~"), ".android", "avd")
+    return os.path.join(android_avd_home, f"{AVD_NAME}.avd", "snapshots", SNAPSHOT_NAME)
+
+
+def ensure_avd_snapshot(whizvoiceapp_path: str | None) -> bool:
+    """Download the AVD snapshot if it doesn't exist locally. Returns True if available."""
+    snapshot_path = get_snapshot_path()
+    if os.path.isdir(snapshot_path):
+        log.info(f"AVD snapshot already exists at {snapshot_path}")
+        return True
+
+    # Find the download script
+    download_script = None
+    if whizvoiceapp_path:
+        candidate = os.path.join(whizvoiceapp_path, "scripts", "avd-snapshot-download.sh")
+        if os.path.isfile(candidate):
+            download_script = candidate
+
+    if not download_script:
+        # Try relative to this script's location (whizvoice/scripts/autofix/run.py -> whizvoiceapp/scripts/)
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        whiz_root = os.path.join(scripts_dir, "..", "..", "..")
+        candidate = os.path.join(whiz_root, "whizvoiceapp", "scripts", "avd-snapshot-download.sh")
+        if os.path.isfile(candidate):
+            download_script = candidate
+
+    if not download_script:
+        log.error(
+            f"AVD snapshot not found at {snapshot_path} and download script not found.\n"
+            f"Either create the snapshot manually or ensure whizvoiceapp/scripts/avd-snapshot-download.sh exists."
+        )
+        return False
+
+    log.info(f"AVD snapshot not found. Downloading via {download_script}...")
+    try:
+        result = subprocess.run(
+            ["bash", download_script],
+            timeout=600,  # 10 minute timeout
+        )
+        if result.returncode != 0:
+            log.error("AVD snapshot download failed")
+            return False
+    except subprocess.TimeoutExpired:
+        log.error("AVD snapshot download timed out after 10 minutes")
+        return False
+
+    # Verify it actually arrived
+    if not os.path.isdir(snapshot_path):
+        log.error(f"Download script completed but snapshot not found at {snapshot_path}")
+        return False
+
+    log.info("AVD snapshot downloaded successfully")
+    return True
+
+
+def boot_emulator(whizvoiceapp_path: str | None = None) -> bool:
     """Boot the emulator from snapshot. Returns True if ready."""
     global _we_booted_emulator
 
     if is_emulator_running():
         log.info(f"Emulator already running on {EMULATOR_SERIAL}")
         return True
+
+    # Auto-download snapshot if missing
+    if not ensure_avd_snapshot(whizvoiceapp_path):
+        return False
+
+    # Validate snapshot exists
+    snapshot_path = get_snapshot_path()
+    if not os.path.isdir(snapshot_path):
+        log.error(
+            f"Emulator snapshot not found at: {snapshot_path}\n"
+            f"Create it by booting the emulator manually, setting up the desired state, "
+            f"then saving a snapshot named '{SNAPSHOT_NAME}' via the emulator UI "
+            f"(Extended Controls > Snapshots > Take Snapshot)."
+        )
+        return False
 
     log.info(f"Booting emulator '{AVD_NAME}' from snapshot '{SNAPSHOT_NAME}'...")
 
@@ -820,7 +892,7 @@ def test_pr_mode(pr_ref: str, repo_path: str):
     )
 
     # Boot emulator
-    if not boot_emulator():
+    if not boot_emulator(repo_path):
         log.error("Failed to boot emulator")
         sys.exit(1)
 
@@ -963,14 +1035,14 @@ def main():
             )
         return
 
-    # Boot emulator (unless skipped)
-    if not args.skip_emulator_boot:
-        if not boot_emulator():
-            log.error("Failed to boot emulator, aborting")
-            sys.exit(1)
-
     # Ensure whizvoiceapp checkout
     repo_path = ensure_whizvoiceapp(args.whizvoiceapp_path)
+
+    # Boot emulator (unless skipped)
+    if not args.skip_emulator_boot:
+        if not boot_emulator(repo_path):
+            log.error("Failed to boot emulator, aborting")
+            sys.exit(1)
     log.info(f"Using whizvoiceapp at: {repo_path}")
 
     try:
