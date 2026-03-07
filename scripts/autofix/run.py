@@ -30,6 +30,8 @@ Environment variables:
     WHIZVOICEAPP_REPO     - (optional) Git repo URL, default: git@github.com:whizvoice/whizvoiceapp.git
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
 import json
@@ -555,25 +557,30 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
      import os
      from helpers import (
          check_element_exists_in_ui, save_failed_screenshot,
-         navigate_to_my_chats, EMULATOR_SERIAL,
+         navigate_to_my_chats, send_voice_command, EMULATOR_SERIAL,
      )
      ```
    - Use the `tester` fixture (provided by conftest.py) which gives you an
      AndroidAccessibilityTester connected to the emulator with the Whiz app open.
    - The `tester` object provides these methods directly:
-     `tester.check_element_exists(content_desc=None, text=None, wait_after_dump=0.5)` - check if a UI element exists,
-     `tester.save_debug_artifacts(output_dir, test_name, step_name)` - save screenshot + UI dump for debugging.
-   - The `helpers` module also provides wrapper functions for backwards compatibility:
+     `tester.screenshot(path)`, `tester.tap(x, y)`, `tester.swipe(...)`,
+     `tester.press_back()`, `tester.open_app(package)`, `tester.shell(cmd)`,
+     `tester.validate_screenshot(path, description)` (uses Claude vision to check what's on screen),
+     `tester.input_text(text)`, `tester.press_key(keycode)`.
+   - The `helpers` module provides:
      `check_element_exists_in_ui(tester, content_desc=None, text=None, wait_after_dump=0.5)`,
      `save_failed_screenshot(tester, test_name, step_name)`,
-     `navigate_to_my_chats(tester, test_name)`,
+     `navigate_to_my_chats(tester, test_name)` -> (success, error_msg),
+     `send_voice_command(text)` - sends a test voice transcription to the Whiz app,
      `EMULATOR_SERIAL` (the adb serial for the emulator).
+   - IMPORTANT: The test MUST exercise the actual screen agent feature on the emulator
+     by sending a voice command that triggers the screen agent, then validating the result
+     on screen. A test that only reads source code or runs a Gradle build is NOT acceptable.
    - Trigger the same user action that caused the original failure (e.g., send a
      voice command via the Whiz app that exercises the screen agent feature).
    - Verify the screen agent navigates successfully by checking for expected UI
      elements after the action completes.
-   - Use `tester.save_debug_artifacts(output_dir, "test_name", "step_name")` or
-     `save_failed_screenshot(tester, "test_name", "step_name")` on failures.
+   - Use `save_failed_screenshot(tester, "test_name", "step_name")` on failures.
    - Keep the test focused on just this one fix. Name the test function
      `test_autofix_{{dump_reason}}` (replacing non-alphanumeric chars with underscores).
 
@@ -581,17 +588,28 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
    ```python
    def test_autofix_{{dump_reason_sanitized}}(tester):
        \"\"\"Verify fix for {{dump_reason}}.\"\"\"
-       from helpers import navigate_to_my_chats, check_element_exists_in_ui, save_failed_screenshot
+       import time
+       from helpers import navigate_to_my_chats, send_voice_command, save_failed_screenshot
 
        # Navigate to My Chats page first
        success, error = navigate_to_my_chats(tester, "autofix_verification")
        assert success, f"Could not reach My Chats: {{error}}"
 
-       # Trigger the voice command / action that exercises the fixed feature
-       # ... (specific to this fix)
+       # Open new chat
+       tester.tap(950, 2225)
+       time.sleep(2)
 
-       # Verify the expected outcome
-       # ... (check for expected UI elements)
+       # Send a voice command that exercises the screen agent feature
+       send_voice_command("what are the trader joes near me?")
+       time.sleep(25)  # wait for screen agent to complete
+
+       # Validate the result
+       tester.screenshot("/tmp/whiz_screen.png")
+       result = tester.validate_screenshot("/tmp/whiz_screen.png",
+           "Google Maps is showing search results")
+       if not result:
+           save_failed_screenshot(tester, "autofix_verification", "validation_failed")
+       assert result, "Screen agent did not produce expected result"
    ```
 
 8. Run the verification test you wrote. Do NOT commit before running the test.
@@ -622,21 +640,75 @@ code or the test so that the verification passes.
 {test_failure_output}
 ```
 
+## Test Infrastructure
+
+The `autofix_tests/` directory has `conftest.py` and `helpers.py` that provide:
+
+- **`tester` fixture** (from conftest.py): Creates an `AndroidAccessibilityTester` connected
+  to the emulator with the Whiz debug app open, logged in, and accessibility service enabled.
+  The tester provides: `tester.screenshot(path)`, `tester.tap(x, y)`, `tester.swipe(...)`,
+  `tester.press_back()`, `tester.open_app(package)`, `tester.shell(cmd)`,
+  `tester.validate_screenshot(path, description)` (uses Claude vision to check what's on screen),
+  `tester.input_text(text)`, `tester.press_key(keycode)`.
+
+- **`helpers` module**: Import from `helpers` (same directory):
+  ```python
+  from helpers import (
+      check_element_exists_in_ui,  # check_element_exists_in_ui(tester, content_desc=None, text=None)
+      save_failed_screenshot,       # save_failed_screenshot(tester, test_name, step_name)
+      navigate_to_my_chats,         # navigate_to_my_chats(tester, test_name) -> (success, error_msg)
+      send_voice_command,            # send_voice_command("text") - sends test voice transcription
+      EMULATOR_SERIAL,
+  )
+  ```
+
+- **IMPORTANT**: Tests MUST exercise the actual screen agent feature on the emulator by sending
+  a voice command that triggers the screen agent, then validating the result. A test that only
+  reads source code or runs a Gradle build is NOT a proper verification test.
+
+Example test structure:
+```python
+def test_autofix_example(tester):
+    from helpers import navigate_to_my_chats, send_voice_command, save_failed_screenshot
+
+    # Navigate to My Chats page
+    success, error = navigate_to_my_chats(tester, "autofix_example")
+    assert success, f"Could not reach My Chats: {{error}}"
+
+    # Open new chat
+    tester.tap(950, 2225)
+    time.sleep(2)
+
+    # Send a voice command that exercises the screen agent feature
+    send_voice_command("what are the trader joes near me?")
+    time.sleep(25)  # wait for screen agent to complete
+
+    # Validate the result
+    tester.screenshot("/tmp/whiz_screen.png")
+    result = tester.validate_screenshot("/tmp/whiz_screen.png",
+        "Google Maps is showing search results for Trader Joe's locations")
+    if not result:
+        save_failed_screenshot(tester, "autofix_example", "validation_failed")
+    assert result, "Screen agent did not produce expected result"
+```
+
 ## Your Task
 
 1. Read the test failure output carefully. Understand what's failing and why.
 2. Read the code that was changed in this PR to understand the fix that was attempted.
 3. Determine whether the issue is in the fix code or in the test itself.
-4. Make the MINIMAL changes needed. The same backwards-compatibility rules apply:
+4. If the test only does static source analysis or build checks (no emulator interaction),
+   REWRITE it as a proper end-to-end test that sends a voice command and validates the result.
+5. Make the MINIMAL changes needed. The same backwards-compatibility rules apply:
    - NEVER remove or replace existing selectors, only ADD new ones alongside them.
    - If a resource ID changed, try new first, fall back to old.
    - Keep the fix working for both old and new versions of the target app.
-5. Run the test: `ANDROID_SERIAL=emulator-5556 python -m pytest autofix_tests/test_autofix_verification.py -v`
+6. Run the test: `ANDROID_SERIAL=emulator-5556 python -m pytest autofix_tests/test_autofix_verification.py -v`
    - If it fails, read the error, fix, and re-run (up to 3 attempts total).
    - Only commit after the test passes.
    - If the test still fails after 3 attempts, commit what you have and include
      "VERIFICATION TEST FAILED" in the commit message.
-6. Commit your changes."""
+7. Commit your changes."""
 
 
 def build_prompt(dump: dict) -> str:
