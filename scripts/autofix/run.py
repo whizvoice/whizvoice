@@ -16,12 +16,21 @@ Usage:
     # Process a specific dump_reason only:
     python scripts/autofix/run.py --dump-reason "whatsapp_chat_not_found"
 
+    # Skip emulator boot (if already running):
+    python scripts/autofix/run.py --skip-emulator-boot
+
+    # Test (and fix) a previous autofix PR:
+    python scripts/autofix/run.py --test-pr 42 --whizvoiceapp-path /path/to/repo
+    python scripts/autofix/run.py --test-pr https://github.com/whizvoice/whizvoiceapp/pull/42
+
 Environment variables:
     SUPABASE_URL          - Supabase project URL
     SUPABASE_SERVICE_ROLE - Supabase service role key
     ANTHROPIC_API_KEY     - Anthropic API key for Claude Code
     WHIZVOICEAPP_REPO     - (optional) Git repo URL, default: git@github.com:whizvoice/whizvoiceapp.git
 """
+
+from __future__ import annotations
 
 import argparse
 import base64
@@ -32,6 +41,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 
 try:
@@ -53,6 +63,162 @@ log = logging.getLogger("autofix")
 WHIZVOICEAPP_REPO = os.getenv(
     "WHIZVOICEAPP_REPO", "git@github.com:whizvoice/whizvoiceapp.git"
 )
+
+
+EMULATOR_SERIAL = "emulator-5556"
+AVD_NAME = "whiz-test-device"
+SNAPSHOT_NAME = "baseline_clean"
+ANDROID_HOME = os.getenv("ANDROID_HOME", "/opt/homebrew/share/android-commandlinetools")
+EMULATOR_BIN = os.path.join(ANDROID_HOME, "emulator", "emulator")
+ADB_BIN = os.path.join(ANDROID_HOME, "platform-tools", "adb")
+
+# Track whether we booted the emulator so we know whether to shut it down
+_we_booted_emulator = False
+
+
+def is_emulator_running() -> bool:
+    """Check if an emulator is running on EMULATOR_SERIAL."""
+    try:
+        result = subprocess.run(
+            [ADB_BIN, "-s", EMULATOR_SERIAL, "get-state"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0 and "device" in result.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def get_snapshot_path() -> str:
+    """Return the expected path to the emulator snapshot."""
+    android_avd_home = os.path.join(os.path.expanduser("~"), ".android", "avd")
+    return os.path.join(android_avd_home, f"{AVD_NAME}.avd", "snapshots", SNAPSHOT_NAME)
+
+
+def ensure_avd_snapshot(whizvoiceapp_path: str | None) -> bool:
+    """Download the AVD snapshot if it doesn't exist locally. Returns True if available."""
+    snapshot_path = get_snapshot_path()
+    if os.path.isdir(snapshot_path):
+        log.info(f"AVD snapshot already exists at {snapshot_path}")
+        return True
+
+    # Find the download script
+    download_script = None
+    if whizvoiceapp_path:
+        candidate = os.path.join(whizvoiceapp_path, "scripts", "avd-snapshot-download.sh")
+        if os.path.isfile(candidate):
+            download_script = candidate
+
+    if not download_script:
+        # Try relative to this script's location (whizvoice/scripts/autofix/run.py -> whizvoiceapp/scripts/)
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        whiz_root = os.path.join(scripts_dir, "..", "..", "..")
+        candidate = os.path.join(whiz_root, "whizvoiceapp", "scripts", "avd-snapshot-download.sh")
+        if os.path.isfile(candidate):
+            download_script = candidate
+
+    if not download_script:
+        log.error(
+            f"AVD snapshot not found at {snapshot_path} and download script not found.\n"
+            f"Either create the snapshot manually or ensure whizvoiceapp/scripts/avd-snapshot-download.sh exists."
+        )
+        return False
+
+    log.info(f"AVD snapshot not found. Downloading via {download_script}...")
+    try:
+        result = subprocess.run(
+            ["bash", download_script],
+            timeout=600,  # 10 minute timeout
+        )
+        if result.returncode != 0:
+            log.error("AVD snapshot download failed")
+            return False
+    except subprocess.TimeoutExpired:
+        log.error("AVD snapshot download timed out after 10 minutes")
+        return False
+
+    # Verify it actually arrived
+    if not os.path.isdir(snapshot_path):
+        log.error(f"Download script completed but snapshot not found at {snapshot_path}")
+        return False
+
+    log.info("AVD snapshot downloaded successfully")
+    return True
+
+
+def boot_emulator(whizvoiceapp_path: str | None = None) -> bool:
+    """Boot the emulator from snapshot. Returns True if ready."""
+    global _we_booted_emulator
+
+    if is_emulator_running():
+        log.info(f"Emulator already running on {EMULATOR_SERIAL}")
+        return True
+
+    # Auto-download snapshot if missing
+    if not ensure_avd_snapshot(whizvoiceapp_path):
+        return False
+
+    # Validate snapshot exists
+    snapshot_path = get_snapshot_path()
+    if not os.path.isdir(snapshot_path):
+        log.error(
+            f"Emulator snapshot not found at: {snapshot_path}\n"
+            f"Create it by booting the emulator manually, setting up the desired state, "
+            f"then saving a snapshot named '{SNAPSHOT_NAME}' via the emulator UI "
+            f"(Extended Controls > Snapshots > Take Snapshot)."
+        )
+        return False
+
+    log.info(f"Booting emulator '{AVD_NAME}' from snapshot '{SNAPSHOT_NAME}'...")
+
+    # Kill any stale emulator on this port
+    subprocess.run(
+        [ADB_BIN, "-s", EMULATOR_SERIAL, "emu", "kill"],
+        capture_output=True, timeout=10,
+    )
+    time.sleep(3)
+
+    # Boot from snapshot
+    subprocess.Popen(
+        [EMULATOR_BIN, "-avd", AVD_NAME, "-snapshot", SNAPSHOT_NAME,
+         "-port", "5556", "-no-audio", "-gpu", "swiftshader_indirect"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _we_booted_emulator = True
+
+    # Wait for boot (120s timeout)
+    max_wait = 120
+    elapsed = 0
+    while elapsed < max_wait:
+        try:
+            result = subprocess.run(
+                [ADB_BIN, "-s", EMULATOR_SERIAL, "shell", "getprop", "sys.boot_completed"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip() == "1":
+                log.info("Emulator is ready")
+                time.sleep(5)  # Let the system settle
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        time.sleep(2)
+        elapsed += 2
+
+    log.error(f"Emulator did not boot within {max_wait}s")
+    return False
+
+
+def shutdown_emulator():
+    """Kill the emulator if we booted it."""
+    if not _we_booted_emulator:
+        return
+    log.info("Shutting down emulator...")
+    try:
+        subprocess.run(
+            [ADB_BIN, "-s", EMULATOR_SERIAL, "emu", "kill"],
+            capture_output=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
 
 
 def load_supabase():
@@ -253,13 +419,23 @@ def commit_and_push(repo_path: str, branch: str, dump_reason: str) -> bool:
     return True
 
 
-def create_pr(repo_path: str, branch: str, dump_reason: str, error_message: str | None) -> str | None:
+def create_pr(
+    repo_path: str,
+    branch: str,
+    dump_reason: str,
+    error_message: str | None,
+    test_result: str | None = None,
+) -> str | None:
     """Create a PR via gh CLI. Returns the PR URL or None."""
     title = f"autofix: {dump_reason}"[:70]
+    test_status_line = ""
+    if test_result is not None:
+        test_status_line = f"\n**Verification test**: {test_result}\n"
     body = (
         f"## Auto-Fix: Screen Agent Navigation Failure\n\n"
         f"**Error tag**: `{dump_reason}`\n"
-        f"**Error message**: {error_message or 'N/A'}\n\n"
+        f"**Error message**: {error_message or 'N/A'}\n"
+        f"{test_status_line}\n"
         f"This PR was generated by the screen agent auto-fix pipeline. "
         f"It attempts to fix a UI navigation failure caused by a target app update.\n\n"
         f"## Review Checklist\n"
@@ -371,6 +547,167 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
 6. If you determine the error is NOT caused by a UI change (e.g., it's a timing
    issue, network error, or missing accessibility service), make NO code changes.
    Instead, create a file called SKIP_REASON.txt explaining why.
+7. Generate a verification test. Create the file `autofix_tests/test_autofix_verification.py`
+   that exercises the specific screen agent feature you just fixed. The test should:
+
+   - Import helpers from the `helpers` module in the same directory:
+     ```python
+     import time
+     import subprocess
+     import os
+     from helpers import (
+         check_element_exists_in_ui, save_failed_screenshot,
+         navigate_to_my_chats, send_voice_command, EMULATOR_SERIAL,
+     )
+     ```
+   - Use the `tester` fixture (provided by conftest.py) which gives you an
+     AndroidAccessibilityTester connected to the emulator with the Whiz app open.
+   - The `tester` object provides these methods directly:
+     `tester.screenshot(path)`, `tester.tap(x, y)`, `tester.swipe(...)`,
+     `tester.press_back()`, `tester.open_app(package)`, `tester.shell(cmd)`,
+     `tester.validate_screenshot(path, description)` (uses Claude vision to check what's on screen),
+     `tester.input_text(text)`, `tester.press_key(keycode)`.
+   - The `helpers` module provides:
+     `check_element_exists_in_ui(tester, content_desc=None, text=None, wait_after_dump=0.5)`,
+     `save_failed_screenshot(tester, test_name, step_name)`,
+     `navigate_to_my_chats(tester, test_name)` -> (success, error_msg),
+     `send_voice_command(text)` - sends a test voice transcription to the Whiz app,
+     `EMULATOR_SERIAL` (the adb serial for the emulator).
+   - IMPORTANT: The test MUST exercise the actual screen agent feature on the emulator
+     by sending a voice command that triggers the screen agent, then validating the result
+     on screen. A test that only reads source code or runs a Gradle build is NOT acceptable.
+   - Trigger the same user action that caused the original failure (e.g., send a
+     voice command via the Whiz app that exercises the screen agent feature).
+   - Verify the screen agent navigates successfully by checking for expected UI
+     elements after the action completes.
+   - Use `save_failed_screenshot(tester, "test_name", "step_name")` on failures.
+   - Keep the test focused on just this one fix. Name the test function
+     `test_autofix_{{dump_reason}}` (replacing non-alphanumeric chars with underscores).
+
+   Example test structure:
+   ```python
+   def test_autofix_{{dump_reason_sanitized}}(tester):
+       \"\"\"Verify fix for {{dump_reason}}.\"\"\"
+       import time
+       from helpers import navigate_to_my_chats, send_voice_command, save_failed_screenshot
+
+       # Navigate to My Chats page first
+       success, error = navigate_to_my_chats(tester, "autofix_verification")
+       assert success, f"Could not reach My Chats: {{error}}"
+
+       # Open new chat
+       tester.tap(950, 2225)
+       time.sleep(2)
+
+       # Send a voice command that exercises the screen agent feature
+       send_voice_command("what are the trader joes near me?")
+       time.sleep(25)  # wait for screen agent to complete
+
+       # Validate the result
+       tester.screenshot("/tmp/whiz_screen.png")
+       result = tester.validate_screenshot("/tmp/whiz_screen.png",
+           "Google Maps is showing search results")
+       if not result:
+           save_failed_screenshot(tester, "autofix_verification", "validation_failed")
+       assert result, "Screen agent did not produce expected result"
+   ```
+
+8. Run the verification test you wrote. Do NOT commit before running the test.
+   Run: `ANDROID_SERIAL=emulator-5556 python -m pytest autofix_tests/test_autofix_verification.py -v`
+   - If the test fails, read the error output, fix your code or the test, and re-run.
+   - You may retry up to 3 times total.
+   - Only commit after the test passes.
+   - If the test still fails after 3 attempts, commit what you have and include
+     "VERIFICATION TEST FAILED" in the commit message so reviewers know.
+9. Commit your changes (including the test file)."""
+
+
+CLAUDE_RETEST_PROMPT_TEMPLATE = """A previous autofix PR has a failing verification test. Your job is to fix the
+code or the test so that the verification passes.
+
+## Original PR Context
+- **PR Title**: {pr_title}
+- **PR Body**:
+{pr_body}
+
+## Test File Contents
+```python
+{test_file_contents}
+```
+
+## Test Failure Output
+```
+{test_failure_output}
+```
+
+## Test Infrastructure
+
+The `autofix_tests/` directory has `conftest.py` and `helpers.py` that provide:
+
+- **`tester` fixture** (from conftest.py): Creates an `AndroidAccessibilityTester` connected
+  to the emulator with the Whiz debug app open, logged in, and accessibility service enabled.
+  The tester provides: `tester.screenshot(path)`, `tester.tap(x, y)`, `tester.swipe(...)`,
+  `tester.press_back()`, `tester.open_app(package)`, `tester.shell(cmd)`,
+  `tester.validate_screenshot(path, description)` (uses Claude vision to check what's on screen),
+  `tester.input_text(text)`, `tester.press_key(keycode)`.
+
+- **`helpers` module**: Import from `helpers` (same directory):
+  ```python
+  from helpers import (
+      check_element_exists_in_ui,  # check_element_exists_in_ui(tester, content_desc=None, text=None)
+      save_failed_screenshot,       # save_failed_screenshot(tester, test_name, step_name)
+      navigate_to_my_chats,         # navigate_to_my_chats(tester, test_name) -> (success, error_msg)
+      send_voice_command,            # send_voice_command("text") - sends test voice transcription
+      EMULATOR_SERIAL,
+  )
+  ```
+
+- **IMPORTANT**: Tests MUST exercise the actual screen agent feature on the emulator by sending
+  a voice command that triggers the screen agent, then validating the result. A test that only
+  reads source code or runs a Gradle build is NOT a proper verification test.
+
+Example test structure:
+```python
+def test_autofix_example(tester):
+    from helpers import navigate_to_my_chats, send_voice_command, save_failed_screenshot
+
+    # Navigate to My Chats page
+    success, error = navigate_to_my_chats(tester, "autofix_example")
+    assert success, f"Could not reach My Chats: {{error}}"
+
+    # Open new chat
+    tester.tap(950, 2225)
+    time.sleep(2)
+
+    # Send a voice command that exercises the screen agent feature
+    send_voice_command("what are the trader joes near me?")
+    time.sleep(25)  # wait for screen agent to complete
+
+    # Validate the result
+    tester.screenshot("/tmp/whiz_screen.png")
+    result = tester.validate_screenshot("/tmp/whiz_screen.png",
+        "Google Maps is showing search results for Trader Joe's locations")
+    if not result:
+        save_failed_screenshot(tester, "autofix_example", "validation_failed")
+    assert result, "Screen agent did not produce expected result"
+```
+
+## Your Task
+
+1. Read the test failure output carefully. Understand what's failing and why.
+2. Read the code that was changed in this PR to understand the fix that was attempted.
+3. Determine whether the issue is in the fix code or in the test itself.
+4. If the test only does static source analysis or build checks (no emulator interaction),
+   REWRITE it as a proper end-to-end test that sends a voice command and validates the result.
+5. Make the MINIMAL changes needed. The same backwards-compatibility rules apply:
+   - NEVER remove or replace existing selectors, only ADD new ones alongside them.
+   - If a resource ID changed, try new first, fall back to old.
+   - Keep the fix working for both old and new versions of the target app.
+6. Run the test: `ANDROID_SERIAL=emulator-5556 python -m pytest autofix_tests/test_autofix_verification.py -v`
+   - If it fails, read the error, fix, and re-run (up to 3 attempts total).
+   - Only commit after the test passes.
+   - If the test still fails after 3 attempts, commit what you have and include
+     "VERIFICATION TEST FAILED" in the commit message.
 7. Commit your changes."""
 
 
@@ -430,6 +767,8 @@ def save_screenshot(dump: dict, repo_path: str) -> bool:
 def invoke_claude_code(repo_path: str, prompt: str) -> bool:
     """Run Claude Code CLI with the given prompt. Returns True if it succeeded."""
     log.info("Invoking Claude Code CLI...")
+    env = os.environ.copy()
+    env["ANDROID_SERIAL"] = EMULATOR_SERIAL
     result = subprocess.run(
         [
             "claude",
@@ -442,7 +781,8 @@ def invoke_claude_code(repo_path: str, prompt: str) -> bool:
         cwd=repo_path,
         capture_output=True,
         text=True,
-        timeout=600,  # 10 minute timeout
+        timeout=1800,  # 30 minute timeout (test execution adds time)
+        env=env,
     )
 
     if result.returncode != 0:
@@ -467,6 +807,30 @@ def check_skip_reason(repo_path: str) -> str | None:
         with open(skip_path) as f:
             return f.read().strip()
     return None
+
+
+def run_verification_test(repo_path: str) -> tuple[bool, str]:
+    """Run the autofix verification test. Returns (passed, output)."""
+    test_file = os.path.join(repo_path, "autofix_tests", "test_autofix_verification.py")
+    if not os.path.exists(test_file):
+        return False, "Test file not found"
+
+    env = os.environ.copy()
+    env["ANDROID_SERIAL"] = EMULATOR_SERIAL
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest",
+             "autofix_tests/test_autofix_verification.py", "-v"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout for test
+            env=env,
+        )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        return result.returncode == 0, output
+    except subprocess.TimeoutExpired:
+        return False, "Test timed out after 300s"
 
 
 def cleanup_screenshot(repo_path: str):
@@ -541,6 +905,17 @@ def process_dump(supabase, dump: dict, repo_path: str) -> dict:
         result["skip_reason"] = skip_reason
         return result
 
+    # Run verification test as a post-invocation sanity check
+    test_passed, test_output = run_verification_test(repo_path)
+    if test_passed:
+        log.info(f"Verification test PASSED for '{dump_reason}'")
+        test_result = "PASSED"
+    else:
+        log.warning(f"Verification test FAILED for '{dump_reason}'")
+        log.warning(f"Test output (tail): ...{test_output[-500:]}")
+        test_result = "FAILED"
+    result["test_result"] = test_result
+
     # Commit and push
     has_changes = commit_and_push(repo_path, branch, dump_reason)
     if not has_changes:
@@ -551,12 +926,124 @@ def process_dump(supabase, dump: dict, repo_path: str) -> dict:
 
     # Create PR
     pr_url = create_pr(
-        repo_path, branch, dump_reason, dump.get("error_message")
+        repo_path, branch, dump_reason, dump.get("error_message"),
+        test_result=test_result,
     )
     mark_processed(supabase, dump_reason, dump["app_version"], pr_url)
     result["status"] = "pr_created"
     result["pr_url"] = pr_url
     return result
+
+
+def parse_pr_number(pr_ref: str) -> int:
+    """Parse a PR number from a URL or plain number string."""
+    # Handle URLs like https://github.com/whizvoice/whizvoiceapp/pull/42
+    match = re.search(r"/pull/(\d+)", pr_ref)
+    if match:
+        return int(match.group(1))
+    # Plain number
+    try:
+        return int(pr_ref)
+    except ValueError:
+        log.error(f"Cannot parse PR number from: {pr_ref}")
+        sys.exit(1)
+
+
+def test_pr_mode(pr_ref: str, repo_path: str):
+    """
+    Test (and fix) a previous autofix PR.
+    Checks out the PR branch, runs tests, invokes Claude to fix on failure.
+    """
+    pr_number = parse_pr_number(pr_ref)
+    log.info(f"Testing PR #{pr_number}")
+
+    # Check out the PR branch
+    subprocess.run(
+        ["gh", "pr", "checkout", str(pr_number)],
+        cwd=repo_path, check=True,
+    )
+
+    # Boot emulator
+    if not boot_emulator(repo_path):
+        log.error("Failed to boot emulator")
+        sys.exit(1)
+
+    try:
+        # Run the verification test
+        test_passed, test_output = run_verification_test(repo_path)
+
+        if test_passed:
+            log.info(f"PR #{pr_number} verification test PASSED")
+            return
+
+        log.warning(f"PR #{pr_number} verification test FAILED, invoking Claude to fix...")
+
+        # Get PR context
+        pr_view = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "title,body"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        pr_info = json.loads(pr_view.stdout) if pr_view.returncode == 0 else {}
+        pr_title = pr_info.get("title", f"PR #{pr_number}")
+        pr_body = pr_info.get("body", "(no body)")
+
+        # Read test file contents
+        test_file_path = os.path.join(repo_path, "autofix_tests", "test_autofix_verification.py")
+        test_file_contents = "(test file not found)"
+        if os.path.exists(test_file_path):
+            with open(test_file_path) as f:
+                test_file_contents = f.read()
+
+        # Build retest prompt
+        prompt = CLAUDE_RETEST_PROMPT_TEMPLATE.format(
+            pr_title=pr_title,
+            pr_body=pr_body,
+            test_file_contents=test_file_contents,
+            test_failure_output=test_output[-3000:],  # Last 3000 chars
+        )
+
+        try:
+            success = invoke_claude_code(repo_path, prompt)
+        except subprocess.TimeoutExpired:
+            log.error("Claude Code timed out during retest fix")
+            return
+
+        if not success:
+            log.error("Claude Code failed during retest fix")
+            return
+
+        # Re-run verification test
+        test_passed, test_output = run_verification_test(repo_path)
+        test_result = "PASSED" if test_passed else "FAILED"
+        log.info(f"Post-fix verification test: {test_result}")
+
+        # Check if Claude committed changes; if not, commit them
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        if status.stdout.strip():
+            subprocess.run(["git", "add", "-A"], cwd=repo_path, check=True)
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"autofix: fix verification test for PR #{pr_number}\n\n"
+                 f"Verification test: {test_result}"],
+                cwd=repo_path, check=True,
+            )
+            subprocess.run(["git", "push"], cwd=repo_path, check=True)
+            log.info(f"Pushed fix commits to PR #{pr_number}")
+
+        # Update PR body with test result
+        current_body = pr_body
+        updated_body = current_body.rstrip() + f"\n\n---\n**Re-test result**: {test_result}\n"
+        subprocess.run(
+            ["gh", "pr", "edit", str(pr_number), "--body", updated_body],
+            cwd=repo_path, check=True,
+        )
+        log.info(f"Updated PR #{pr_number} body with test result: {test_result}")
+
+    finally:
+        shutdown_emulator()
 
 
 def main():
@@ -576,7 +1063,23 @@ def main():
         action="store_true",
         help="Print what would be processed without making changes",
     )
+    parser.add_argument(
+        "--test-pr",
+        metavar="URL_OR_NUMBER",
+        help="Test (and fix) a previous autofix PR instead of running the normal pipeline",
+    )
+    parser.add_argument(
+        "--skip-emulator-boot",
+        action="store_true",
+        help="Skip emulator boot (assumes emulator is already running)",
+    )
     args = parser.parse_args()
+
+    # Handle --test-pr mode (skips normal pipeline)
+    if args.test_pr:
+        repo_path = ensure_whizvoiceapp(args.whizvoiceapp_path)
+        test_pr_mode(args.test_pr, repo_path)
+        return
 
     supabase = load_supabase()
 
@@ -606,35 +1109,45 @@ def main():
 
     # Ensure whizvoiceapp checkout
     repo_path = ensure_whizvoiceapp(args.whizvoiceapp_path)
+
+    # Boot emulator (unless skipped)
+    if not args.skip_emulator_boot:
+        if not boot_emulator(repo_path):
+            log.error("Failed to boot emulator, aborting")
+            sys.exit(1)
     log.info(f"Using whizvoiceapp at: {repo_path}")
 
-    # Process each error
-    results = []
-    for dump in errors:
+    try:
+        # Process each error
+        results = []
+        for dump in errors:
+            log.info(f"\n{'='*60}")
+            log.info(f"Processing: {dump['dump_reason']}")
+            log.info(f"Error: {dump.get('error_message', 'N/A')[:100]}")
+            log.info(f"{'='*60}")
+
+            try:
+                result = process_dump(supabase, dump, repo_path)
+                results.append(result)
+                log.info(f"Result: {result['status']}")
+            except Exception as e:
+                log.error(f"Failed to process '{dump['dump_reason']}': {e}", exc_info=True)
+                results.append(
+                    {"dump_reason": dump["dump_reason"], "status": "error", "error": str(e)}
+                )
+
+        # Summary
         log.info(f"\n{'='*60}")
-        log.info(f"Processing: {dump['dump_reason']}")
-        log.info(f"Error: {dump.get('error_message', 'N/A')[:100]}")
+        log.info("SUMMARY")
         log.info(f"{'='*60}")
-
-        try:
-            result = process_dump(supabase, dump, repo_path)
-            results.append(result)
-            log.info(f"Result: {result['status']}")
-        except Exception as e:
-            log.error(f"Failed to process '{dump['dump_reason']}': {e}", exc_info=True)
-            results.append(
-                {"dump_reason": dump["dump_reason"], "status": "error", "error": str(e)}
-            )
-
-    # Summary
-    log.info(f"\n{'='*60}")
-    log.info("SUMMARY")
-    log.info(f"{'='*60}")
-    for r in results:
-        status = r["status"]
-        reason = r["dump_reason"]
-        extra = r.get("pr_url") or r.get("skip_reason") or r.get("error") or ""
-        log.info(f"  [{status}] {reason} {extra}")
+        for r in results:
+            status = r["status"]
+            reason = r["dump_reason"]
+            extra = r.get("pr_url") or r.get("skip_reason") or r.get("error") or ""
+            log.info(f"  [{status}] {reason} {extra}")
+    finally:
+        if not args.skip_emulator_boot:
+            shutdown_emulator()
 
 
 if __name__ == "__main__":
