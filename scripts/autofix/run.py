@@ -576,10 +576,14 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
    - IMPORTANT: The test MUST exercise the actual screen agent feature on the emulator
      by sending a voice command that triggers the screen agent, then validating the result
      on screen. A test that only reads source code or runs a Gradle build is NOT acceptable.
+   - Do NOT write tests that only check source code, run Gradle builds, or verify the app
+     opens. Do NOT write placeholder tests or tests that just assert True. The test must
+     call `send_voice_command()` and validate the specific end state on screen.
    - Trigger the same user action that caused the original failure (e.g., send a
      voice command via the Whiz app that exercises the screen agent feature).
    - Verify the screen agent navigates successfully by checking for expected UI
-     elements after the action completes.
+     elements after the action completes — not just that the app opened, but that the
+     **specific action** described by the dump_reason completed successfully.
    - Use `save_failed_screenshot(tester, "test_name", "step_name")` on failures.
    - Keep the test focused on just this one fix. Name the test function
      `test_autofix_{{dump_reason}}` (replacing non-alphanumeric chars with underscores).
@@ -630,6 +634,16 @@ code or the test so that the verification passes.
 - **PR Body**:
 {pr_body}
 
+## Original Error Context
+The autofix was created to fix this specific screen agent failure:
+- **Error tag (dump_reason)**: {dump_reason}
+- **Error message**: {error_message}
+
+The test MUST exercise the **same user action** that caused this original failure. For example,
+if the dump_reason is "gmaps_no_nonsponsored_result", the test must send a voice command that
+triggers a Google Maps search AND validate that the screen agent successfully selects a
+non-sponsored result from the list — not just that Maps opened or shows search results.
+
 ## Test File Contents
 ```python
 {test_file_contents}
@@ -662,9 +676,16 @@ The `autofix_tests/` directory has `conftest.py` and `helpers.py` that provide:
   )
   ```
 
-- **IMPORTANT**: Tests MUST exercise the actual screen agent feature on the emulator by sending
-  a voice command that triggers the screen agent, then validating the result. A test that only
-  reads source code or runs a Gradle build is NOT a proper verification test.
+## CRITICAL REQUIREMENTS FOR THE TEST
+
+- The test MUST call `send_voice_command()` to send a voice command that triggers the screen agent
+  feature that was fixed. This is NON-NEGOTIABLE.
+- The test MUST validate that the screen agent completed the **specific action** described by the
+  dump_reason — not just that an app opened or shows generic results.
+- Do NOT write tests that only check source code, run Gradle builds, verify the app opens, or do
+  other shallow checks. These are NOT verification tests.
+- The test should be 30+ lines with proper setup, voice command, wait time (20-30 seconds for
+  screen agent completion), and detailed validation of the end state.
 
 Example test structure:
 ```python
@@ -696,9 +717,13 @@ def test_autofix_example(tester):
 
 1. Read the test failure output carefully. Understand what's failing and why.
 2. Read the code that was changed in this PR to understand the fix that was attempted.
-3. Determine whether the issue is in the fix code or in the test itself.
-4. If the test only does static source analysis or build checks (no emulator interaction),
-   REWRITE it as a proper end-to-end test that sends a voice command and validates the result.
+3. Understand the original error (dump_reason: "{dump_reason}", error: "{error_message}").
+   The test must verify the fix for THIS specific error.
+4. If the test only does static source analysis, build checks, or shallow app-opening checks
+   (no `send_voice_command()` call), REWRITE it as a proper end-to-end test that:
+   a. Calls `send_voice_command()` with a command that triggers the exact screen agent feature
+   b. Waits 20-30 seconds for the screen agent to complete
+   c. Validates the specific end state (not just "app is open")
 5. Make the MINIMAL changes needed. The same backwards-compatibility rules apply:
    - NEVER remove or replace existing selectors, only ADD new ones alongside them.
    - If a resource ID changed, try new first, fall back to old.
@@ -963,20 +988,52 @@ def test_pr_mode(pr_ref: str, repo_path: str):
         cwd=repo_path, check=True,
     )
 
+    # Rebase on latest main so we test against the current codebase
+    subprocess.run(["git", "fetch", "origin", "main"], cwd=repo_path, check=True)
+    subprocess.run(["git", "rebase", "origin/main"], cwd=repo_path, check=True)
+
     # Boot emulator
     if not boot_emulator(repo_path):
         log.error("Failed to boot emulator")
         sys.exit(1)
 
     try:
+        # Check if the test is a real end-to-end test (not a placeholder)
+        test_file = os.path.join(repo_path, "autofix_tests", "test_autofix_verification.py")
+        # Parse dump_reason from PR title to check test relevance
+        pr_view_quick = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "title"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        pr_title_quick = json.loads(pr_view_quick.stdout).get("title", "") if pr_view_quick.returncode == 0 else ""
+        title_match = re.match(r"autofix:\s*(.+)", pr_title_quick)
+        pr_dump_reason = title_match.group(1).strip() if title_match else ""
+
+        needs_real_test = True
+        if os.path.exists(test_file):
+            with open(test_file) as f:
+                test_content = f.read()
+            test_line_count = len([l for l in test_content.splitlines() if l.strip()])
+            # A real test should send voice commands, be substantial, AND match this PR's fix
+            has_voice_command = "send_voice_command" in test_content or "TEST_TRANSCRIPTION" in test_content
+            matches_pr = pr_dump_reason and pr_dump_reason in test_content
+            if has_voice_command and test_line_count >= 30 and matches_pr:
+                needs_real_test = False
+
         # Run the verification test
         test_passed, test_output = run_verification_test(repo_path)
 
-        if test_passed:
+        if test_passed and not needs_real_test:
             log.info(f"PR #{pr_number} verification test PASSED")
             return
 
-        log.warning(f"PR #{pr_number} verification test FAILED, invoking Claude to fix...")
+        if test_passed and needs_real_test:
+            log.warning(
+                f"PR #{pr_number} test passed but is not an end-to-end test. "
+                f"Invoking Claude to write a proper verification test..."
+            )
+        else:
+            log.warning(f"PR #{pr_number} verification test FAILED, invoking Claude to fix...")
 
         # Get PR context
         pr_view = subprocess.run(
@@ -986,6 +1043,18 @@ def test_pr_mode(pr_ref: str, repo_path: str):
         pr_info = json.loads(pr_view.stdout) if pr_view.returncode == 0 else {}
         pr_title = pr_info.get("title", f"PR #{pr_number}")
         pr_body = pr_info.get("body", "(no body)")
+
+        # Parse dump_reason from PR title (format: "autofix: {dump_reason}")
+        dump_reason = "unknown"
+        title_match = re.match(r"autofix:\s*(.+)", pr_title)
+        if title_match:
+            dump_reason = title_match.group(1).strip()
+
+        # Parse error_message from PR body (format: "**Error message**: {msg}")
+        error_message = "unknown"
+        error_match = re.search(r"\*\*Error message\*\*:\s*(.+)", pr_body)
+        if error_match:
+            error_message = error_match.group(1).strip()
 
         # Read test file contents
         test_file_path = os.path.join(repo_path, "autofix_tests", "test_autofix_verification.py")
@@ -998,6 +1067,8 @@ def test_pr_mode(pr_ref: str, repo_path: str):
         prompt = CLAUDE_RETEST_PROMPT_TEMPLATE.format(
             pr_title=pr_title,
             pr_body=pr_body,
+            dump_reason=dump_reason,
+            error_message=error_message,
             test_file_contents=test_file_contents,
             test_failure_output=test_output[-3000:],  # Last 3000 chars
         )
@@ -1077,7 +1148,10 @@ def main():
 
     # Handle --test-pr mode (skips normal pipeline)
     if args.test_pr:
-        repo_path = ensure_whizvoiceapp(args.whizvoiceapp_path)
+        if args.whizvoiceapp_path:
+            repo_path = args.whizvoiceapp_path
+        else:
+            repo_path = ensure_whizvoiceapp(None)
         test_pr_mode(args.test_pr, repo_path)
         return
 
