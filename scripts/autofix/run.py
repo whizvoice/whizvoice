@@ -585,6 +585,8 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
      elements after the action completes — not just that the app opened, but that the
      **specific action** described by the dump_reason completed successfully.
    - Use `save_failed_screenshot(tester, "test_name", "step_name")` on failures.
+   - When the test needs to send a message to a contact (e.g. WhatsApp, SMS), always
+     use the contact name "Ruth Grace Wong". This contact exists on the test emulator.
    - Keep the test focused on just this one fix. Name the test function
      `test_autofix_{{dump_reason}}` (replacing non-alphanumeric chars with underscores).
 
@@ -686,6 +688,8 @@ The `autofix_tests/` directory has `conftest.py` and `helpers.py` that provide:
   other shallow checks. These are NOT verification tests.
 - The test should be 30+ lines with proper setup, voice command, wait time (20-30 seconds for
   screen agent completion), and detailed validation of the end state.
+- When the test needs to send a message to a contact (e.g. WhatsApp, SMS), always
+  use the contact name "Ruth Grace Wong". This contact exists on the test emulator.
 
 Example test structure:
 ```python
