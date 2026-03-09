@@ -982,14 +982,31 @@ def test_pr_mode(pr_ref: str, repo_path: str):
     pr_number = parse_pr_number(pr_ref)
     log.info(f"Testing PR #{pr_number}")
 
-    # Check out the PR branch
+    # Fetch latest and get PR branch name
+    subprocess.run(["git", "fetch", "origin", "main"], cwd=repo_path, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo_path, check=True, capture_output=True)
+
+    # Get the PR branch name so we can delete stale local copy
+    pr_view = subprocess.run(
+        ["gh", "pr", "view", str(pr_number), "--json", "headRefName"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if pr_view.returncode == 0:
+        branch_name = json.loads(pr_view.stdout).get("headRefName", "")
+        if branch_name:
+            # Delete stale local branch if it exists (ignore errors if it doesn't)
+            subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                cwd=repo_path, capture_output=True,
+            )
+
+    # Check out the PR branch fresh
     subprocess.run(
         ["gh", "pr", "checkout", str(pr_number)],
         cwd=repo_path, check=True,
     )
 
     # Rebase on latest main so we test against the current codebase
-    subprocess.run(["git", "fetch", "origin", "main"], cwd=repo_path, check=True)
     subprocess.run(["git", "rebase", "origin/main"], cwd=repo_path, check=True)
 
     # Boot emulator
@@ -1101,7 +1118,7 @@ def test_pr_mode(pr_ref: str, repo_path: str):
                  f"Verification test: {test_result}"],
                 cwd=repo_path, check=True,
             )
-            subprocess.run(["git", "push"], cwd=repo_path, check=True)
+            subprocess.run(["git", "push", "--force-with-lease"], cwd=repo_path, check=True)
             log.info(f"Pushed fix commits to PR #{pr_number}")
 
         # Update PR body with test result
