@@ -572,6 +572,8 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
      `save_failed_screenshot(tester, test_name, step_name)`,
      `navigate_to_my_chats(tester, test_name)` -> (success, error_msg),
      `send_voice_command(text)` - sends a test voice transcription to the Whiz app,
+     `wait_for_websocket_connected(timeout=20)` - polls logcat until the WebSocket is connected
+       (call AFTER opening a new chat but BEFORE sending a voice command),
      `EMULATOR_SERIAL` (the adb serial for the emulator).
    - IMPORTANT: The test MUST exercise the actual screen agent feature on the emulator
      by sending a voice command that triggers the screen agent, then validating the result
@@ -595,15 +597,17 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
    def test_autofix_{{dump_reason_sanitized}}(tester):
        \"\"\"Verify fix for {{dump_reason}}.\"\"\"
        import time
-       from helpers import navigate_to_my_chats, send_voice_command, save_failed_screenshot
+       from helpers import (navigate_to_my_chats, send_voice_command,
+                            save_failed_screenshot, wait_for_websocket_connected)
 
        # Navigate to My Chats page first
        success, error = navigate_to_my_chats(tester, "autofix_verification")
        assert success, f"Could not reach My Chats: {{error}}"
 
-       # Open new chat
+       # Open new chat and wait for WebSocket to connect
        tester.tap(950, 2225)
        time.sleep(2)
+       assert wait_for_websocket_connected(), "WebSocket did not connect in time"
 
        # Send a voice command that exercises the screen agent feature
        send_voice_command("what are the trader joes near me?")
@@ -674,12 +678,15 @@ The `autofix_tests/` directory has `conftest.py` and `helpers.py` that provide:
       save_failed_screenshot,       # save_failed_screenshot(tester, test_name, step_name)
       navigate_to_my_chats,         # navigate_to_my_chats(tester, test_name) -> (success, error_msg)
       send_voice_command,            # send_voice_command("text") - sends test voice transcription
+      wait_for_websocket_connected,  # wait_for_websocket_connected(timeout=20) - poll until WS connected
       EMULATOR_SERIAL,
   )
   ```
 
 ## CRITICAL REQUIREMENTS FOR THE TEST
 
+- The test MUST call `wait_for_websocket_connected()` after opening a new chat and BEFORE calling
+  `send_voice_command()`. This ensures the server can reach the device's accessibility service.
 - The test MUST call `send_voice_command()` to send a voice command that triggers the screen agent
   feature that was fixed. This is NON-NEGOTIABLE.
 - The test MUST validate that the screen agent completed the **specific action** described by the
@@ -694,15 +701,17 @@ The `autofix_tests/` directory has `conftest.py` and `helpers.py` that provide:
 Example test structure:
 ```python
 def test_autofix_example(tester):
-    from helpers import navigate_to_my_chats, send_voice_command, save_failed_screenshot
+    from helpers import (navigate_to_my_chats, send_voice_command,
+                         save_failed_screenshot, wait_for_websocket_connected)
 
     # Navigate to My Chats page
     success, error = navigate_to_my_chats(tester, "autofix_example")
     assert success, f"Could not reach My Chats: {{error}}"
 
-    # Open new chat
+    # Open new chat and wait for WebSocket to connect
     tester.tap(950, 2225)
     time.sleep(2)
+    assert wait_for_websocket_connected(), "WebSocket did not connect in time"
 
     # Send a voice command that exercises the screen agent feature
     send_voice_command("what are the trader joes near me?")
