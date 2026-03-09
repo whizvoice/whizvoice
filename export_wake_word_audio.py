@@ -30,7 +30,7 @@ DEFAULT_OUTPUT_DIR = os.path.expanduser("~/wake_word_training_data")
 CSV_FIELDS = [
     "id", "created_at", "user_id", "phrase", "confidence", "accepted",
     "detection_timestamp", "raw_vosk_json", "storage_path", "file_size_bytes",
-    "local_filename"
+    "classifier_score", "local_filename"
 ]
 
 
