@@ -168,6 +168,7 @@ async def startup_event():
     logger.info("Started abandoned tool execution cleanup task")
     # Initialize screen agent queue with execute_tool function
     screen_agent_queue.set_execute_tool_func(execute_tool)
+    screen_agent_queue.set_redis_managers(redis_managers)
     logger.info("Initialized screen agent queue")
 
 # Clean up on app shutdown
@@ -604,7 +605,13 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 1000,
         "messages": messages,
-        "system": CLAUDE_SYSTEM_PROMPT,
+        "system": [
+            {
+                "type": "text",
+                "text": CLAUDE_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"}
+            }
+        ],
         "stream": stream
     }
 
@@ -612,7 +619,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     if tools_to_send:
         # Web search is a server-side tool with a different schema than custom tools
         web_search_tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
-        api_params["tools"] = tools_to_send + [web_search_tool]
+        all_tools = tools_to_send + [web_search_tool]
+        # Cache the entire tools prefix for prompt caching
+        all_tools[-1] = {**all_tools[-1], "cache_control": {"type": "ephemeral"}}
+        api_params["tools"] = all_tools
         api_params["tool_choice"] = {"type": "auto"}
 
     return client.messages.create(**api_params)
