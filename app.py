@@ -6309,15 +6309,24 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # If disconnected and no more active tasks for this session, clean up chat history
             if not websocket_connected:
-                active_reqs = await get_active_requests(session_id)
-                session_has_active_requests = bool(active_reqs)
-                
-                if not session_has_active_requests:
-                    # Check if session has messages before clearing
-                    messages = await get_chat_messages(session_id)
-                    if messages:
-                        await clear_chat_session(session_id)
-                        logger.info(f"Cleaned up chat session {session_id} after task completion (WebSocket disconnected)")
+                # IMPORTANT: Check if a newer WebSocket has replaced ours before cleaning up.
+                # If a new connection re-registered this session while we were processing,
+                # cleaning up would destroy the new connection's Redis subscriptions.
+                current_ws = None
+                if redis_managers and "local_objects" in redis_managers:
+                    current_ws = await redis_managers["local_objects"].get_session_websocket(session_id)
+
+                if current_ws is not None and current_ws is not websocket:
+                    logger.info(f"Skipping cleanup for session {session_id}: a newer WebSocket has taken over")
+                else:
+                    active_reqs = await get_active_requests(session_id)
+                    session_has_active_requests = bool(active_reqs)
+
+                    if not session_has_active_requests:
+                        messages = await get_chat_messages(session_id)
+                        if messages:
+                            await clear_chat_session(session_id)
+                            logger.info(f"Cleaned up chat session {session_id} after task completion (WebSocket disconnected)")
         except Exception as e:
             logger.warning(f"Error during post-task cleanup for session {session_id}: {str(e)}")
 
