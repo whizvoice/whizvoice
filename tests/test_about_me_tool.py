@@ -104,23 +104,23 @@ WhizVoice is an AI-powered chatbot with Asana integration.
     def test_about_me_tools_structure(self):
         """Test that about_me_tools has the correct structure"""
         self.assertIsInstance(about_me_tools, list)
-        self.assertEqual(len(about_me_tools), 2)
-        
+        self.assertEqual(len(about_me_tools), 1)
+
         tool = about_me_tools[0]
         self.assertIsInstance(tool, dict)
-        
+
         # Check required fields
         self.assertEqual(tool["type"], "custom")
-        self.assertEqual(tool["name"], "get_app_info")
+        self.assertEqual(tool["name"], "get_info")
         self.assertIn("description", tool)
         self.assertIn("input_schema", tool)
-        
+
         # Check input schema structure
         schema = tool["input_schema"]
         self.assertEqual(schema["type"], "object")
         self.assertIn("properties", schema)
         self.assertIn("required", schema)
-        self.assertEqual(schema["required"], [])
+        self.assertEqual(schema["required"], ["type"])
 
     def test_about_me_tools_description(self):
         """Test that the tool description is appropriate"""
@@ -130,7 +130,6 @@ WhizVoice is an AI-powered chatbot with Asana integration.
         self.assertIn("Whiz Voice", description)
         self.assertIn("features", description)
         self.assertIn("functionality", description)
-        self.assertIn("how to use", description)
 
     @patch('about_me_tool.get_preference')
     def test_get_user_data_with_all_preferences(self, mock_get_preference):
@@ -189,25 +188,24 @@ WhizVoice is an AI-powered chatbot with Asana integration.
         self.assertIn("Error retrieving user data", result)
         self.assertIn("Database error", result)
 
-    def test_get_user_data_tool_in_tools_list(self):
-        """Test that get_user_data tool is properly defined in about_me_tools"""
-        # Find the get_user_data tool
-        user_data_tool = None
+    def test_get_info_tool_in_tools_list(self):
+        """Test that get_info tool is properly defined in about_me_tools"""
+        # Find the get_info tool
+        info_tool = None
         for tool in about_me_tools:
-            if tool["name"] == "get_user_data":
-                user_data_tool = tool
+            if tool["name"] == "get_info":
+                info_tool = tool
                 break
 
-        self.assertIsNotNone(user_data_tool)
-        self.assertEqual(user_data_tool["type"], "custom")
-        self.assertIn("description", user_data_tool)
-        self.assertIn("what data we have stored", user_data_tool["description"])
-        self.assertIn("preferences", user_data_tool["description"])
+        self.assertIsNotNone(info_tool)
+        self.assertEqual(info_tool["type"], "custom")
+        self.assertIn("description", info_tool)
+        self.assertIn("preferences", info_tool["description"])
 
         # Check input schema
-        schema = user_data_tool["input_schema"]
+        schema = info_tool["input_schema"]
         self.assertEqual(schema["type"], "object")
-        self.assertEqual(schema["required"], [])
+        self.assertEqual(schema["required"], ["type"])
 
 if __name__ == '__main__':
     unittest.main() 

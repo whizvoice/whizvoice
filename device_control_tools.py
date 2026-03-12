@@ -304,38 +304,8 @@ device_control_tools = [
     },
     {
         "type": "custom",
-        "name": "agent_dismiss_alarm",
-        "description": "Dismiss the currently ringing alarm on the user's Android device. Use this when the user asks to stop, dismiss, or turn off a ringing alarm. If you're unsure whether it's an alarm or timer, use agent_stop_ringing instead.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "type": "custom",
-        "name": "agent_dismiss_amdroid_alarm",
-        "description": "Dismiss a currently ringing AMdroid alarm. Use when the user's alarm is from the AMdroid app. This uses UI automation to find and click AMdroid's dismiss button. If you're unsure of the alarm source, use agent_stop_ringing instead.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "type": "custom",
-        "name": "agent_dismiss_timer",
-        "description": "Dismiss the currently ringing timer on the user's Android device. Use this when the user asks to stop, dismiss, cancel, or turn off a ringing timer. If you're unsure whether it's an alarm or timer, use agent_stop_ringing instead.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "type": "custom",
         "name": "agent_stop_ringing",
-        "description": "Stop any currently ringing alarm or timer. Automatically tries all dismiss methods (standard alarm, timer, and AMdroid). Use when the user says 'stop', 'turn it off', 'stop ringing', etc. and you don't know the source. Prefer this over individual dismiss tools when the source is unknown.",
+        "description": "Stop any currently ringing alarm or timer. Automatically tries all dismiss methods (standard alarm, timer, and AMdroid). Use this whenever the user asks to stop, dismiss, turn off, or cancel a ringing alarm or timer, regardless of the source.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -355,7 +325,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_delete_alarm",
-        "description": "Delete a scheduled alarm on the user's Android device. This opens the Clock app's alarm list and finds the matching active alarm. Unlike agent_dismiss_alarm (which silences a currently ringing alarm), this tool is for removing a future scheduled alarm.",
+        "description": "Delete a scheduled alarm on the user's Android device. This opens the Clock app's alarm list and finds the matching active alarm. Unlike agent_stop_ringing (which silences a currently ringing alarm), this tool is for removing a future scheduled alarm.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -392,11 +362,16 @@ device_control_tools = [
     },
     {
         "type": "custom",
-        "name": "agent_draft_calendar_event",
-        "description": "Draft a calendar event. Opens the calendar app pre-filled with event details. After calling this, ask the user to confirm the event looks good, and then call agent_save_calendar_event. Use when user asks to add a meeting, event, or appointmentto their calendar.",
+        "name": "agent_calendar_event",
+        "description": "Draft or save a calendar event. Use action 'draft' to open the calendar app pre-filled with event details — after drafting, ask the user to confirm, then call again with action 'save'. Use action 'save' to save the event directly to the device calendar and dismiss the draft UI. Pass the same event params for both calls.",
         "input_schema": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["draft", "save"],
+                    "description": "Whether to draft (preview) or save the calendar event"
+                },
                 "title": {
                     "type": "string",
                     "description": "The title/name of the calendar event."
@@ -423,7 +398,7 @@ device_control_tools = [
                 },
                 "attendees": {
                     "type": "string",
-                    "description": "Comma-separated email addresses of attendees (e.g., 'alice@example.com,bob@example.com')."
+                    "description": "Comma-separated email addresses of attendees (e.g., 'alice@example.com,bob@example.com'). Only used for 'draft' action."
                 },
                 "recurrence": {
                     "type": "string",
@@ -442,62 +417,9 @@ device_control_tools = [
                 "timezone": {
                     "type": "string",
                     "description": "Timezone for the event (e.g., 'America/Los_Angeles', 'Europe/London'). Defaults to device timezone."
-                },
-            },
-            "required": ["title", "begin_time"]
-        }
-    },
-    {
-        "type": "custom",
-        "name": "agent_save_calendar_event",
-        "description": "Save a calendar event directly to the device calendar and dismiss the draft UI. Must call agent_draft_calendar_event first. Pass the same event params (title, begin_time, etc.) that were used in the draft call.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "The title/name of the calendar event (same as used in agent_draft_calendar_event)."
-                },
-                "begin_time": {
-                    "type": "string",
-                    "description": "The start time in ISO 8601 format (e.g., '2025-01-15T14:00:00'). Same as used in agent_draft_calendar_event."
-                },
-                "end_time": {
-                    "type": "string",
-                    "description": "The end time in ISO 8601 format. If not provided, defaults to 1 hour after begin_time."
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Optional description/notes for the event."
-                },
-                "location": {
-                    "type": "string",
-                    "description": "Optional location for the event."
-                },
-                "all_day": {
-                    "type": "boolean",
-                    "description": "Whether this is an all-day event. Defaults to false."
-                },
-                "recurrence": {
-                    "type": "string",
-                    "description": "Recurrence rule in RFC 5545 RRULE format (e.g., 'FREQ=WEEKLY;COUNT=10')."
-                },
-                "availability": {
-                    "type": "string",
-                    "description": "Availability during the event: 'busy' or 'free'.",
-                    "enum": ["busy", "free"]
-                },
-                "access_level": {
-                    "type": "string",
-                    "description": "Access level/visibility of the event.",
-                    "enum": ["default", "private", "public"]
-                },
-                "timezone": {
-                    "type": "string",
-                    "description": "Timezone for the event (e.g., 'America/Los_Angeles'). Defaults to device timezone."
                 }
             },
-            "required": ["title", "begin_time"]
+            "required": ["action", "title", "begin_time"]
         }
     },
     {

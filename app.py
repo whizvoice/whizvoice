@@ -924,6 +924,125 @@ async def set_parent_task_preference_with_cache_clear(user_id, require_parent):
     result = await set_parent_task_preference(user_id, require_parent)
     return result
 
+
+# ========== Routing functions for consolidated tools ==========
+
+def _route_manage_workspace_preference(args, user_id):
+    """Route manage_workspace_preference to get or set based on action."""
+    if args.get('action') == 'get':
+        return get_workspace_preference(user_id)
+    else:
+        return set_workspace_preference_with_cache_clear(user_id, 'asana_workspace_preference', args.get('workspace_gid'))
+
+
+async def _route_manage_parent_task_preference(args, user_id):
+    """Route manage_parent_task_preference to get or set based on action."""
+    if args.get('action') == 'get':
+        return await get_parent_task_preference(user_id)
+    else:
+        return await set_parent_task_preference_with_cache_clear(user_id, args.get('require_parent'))
+
+
+def _route_manage_music_app_preference(args, user_id):
+    """Route manage_music_app_preference to get or set based on action."""
+    if args.get('action') == 'get':
+        return get_music_app_preference(user_id)
+    else:
+        return set_music_app_preference(user_id, args.get('music_app'))
+
+
+def _route_get_info(args, user_id):
+    """Route get_info to get_app_info or get_user_data based on type."""
+    if args.get('type') == 'app':
+        return get_app_info(user_id)
+    else:
+        return get_user_data(user_id)
+
+
+async def _route_agent_app_control(args, user_id, kwargs):
+    """Route agent_app_control to launch or close based on action."""
+    if args.get('action') == 'launch':
+        return await agent_launch_app(
+            args.get('app_name'), user_id,
+            kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
+        )
+    else:
+        return await agent_close_other_app(
+            args.get('app_name'), user_id,
+            kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
+        )
+
+
+async def _route_agent_calendar_event(args, user_id, kwargs):
+    """Route agent_calendar_event to draft or save based on action."""
+    if args.get('action') == 'draft':
+        return await agent_draft_calendar_event(
+            args.get('title'), args.get('begin_time'), args.get('end_time'),
+            args.get('description'), args.get('location'), args.get('all_day', False),
+            args.get('attendees'), args.get('recurrence'), args.get('availability'),
+            args.get('access_level'), args.get('timezone'),
+            user_id, kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
+        )
+    else:
+        return await agent_save_calendar_event(
+            args.get('title'), args.get('begin_time'), args.get('end_time'),
+            args.get('description'), args.get('location'), args.get('all_day', False),
+            args.get('recurrence'), args.get('availability'), args.get('access_level'),
+            args.get('timezone'),
+            user_id, kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
+        )
+
+
+async def _route_agent_select_chat(args, user_id, kwargs):
+    """Route agent_select_chat to WhatsApp or SMS based on app."""
+    ws = kwargs.get('websocket')
+    trh = kwargs.get('tool_result_handler')
+    cid = kwargs.get('conversation_id')
+    if args.get('app') == 'whatsapp':
+        return await agent_whatsapp_select_chat(args.get('contact_name'), user_id, ws, trh, cid)
+    else:
+        return await agent_sms_select_chat(args.get('contact_name'), user_id, ws, trh, cid)
+
+
+async def _route_agent_draft_message(args, user_id, kwargs):
+    """Route agent_draft_message to WhatsApp or SMS based on app."""
+    ws = kwargs.get('websocket')
+    trh = kwargs.get('tool_result_handler')
+    cid = kwargs.get('conversation_id')
+    if args.get('app') == 'whatsapp':
+        return await agent_whatsapp_draft_message(
+            args.get('message'), args.get('contact_name'), user_id, ws, trh, cid, args.get('previous_text')
+        )
+    else:
+        return await agent_sms_draft_message(
+            args.get('message'), args.get('contact_name'), user_id, ws, trh, cid, args.get('previous_text')
+        )
+
+
+async def _route_agent_send_message(args, user_id, kwargs):
+    """Route agent_send_message to WhatsApp or SMS based on app."""
+    ws = kwargs.get('websocket')
+    trh = kwargs.get('tool_result_handler')
+    cid = kwargs.get('conversation_id')
+    if args.get('app') == 'whatsapp':
+        return await agent_whatsapp_send_message(args.get('message'), user_id, ws, trh, cid)
+    else:
+        return await agent_sms_send_message(args.get('message'), user_id, ws, trh, cid)
+
+
+async def _route_agent_youtube_music(args, user_id, kwargs):
+    """Route agent_youtube_music to play or queue based on action."""
+    ws = kwargs.get('websocket')
+    trh = kwargs.get('tool_result_handler')
+    cid = kwargs.get('conversation_id')
+    if args.get('action') == 'play':
+        return await agent_play_youtube_music(
+            args.get('query'), args.get('content_type', 'song'), user_id, ws, trh, cid
+        )
+    else:
+        return await agent_queue_youtube_music(args.get('query'), user_id, ws, trh, cid)
+
+
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
     "get_asana_workspaces": {
@@ -971,6 +1090,18 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Task name is required."} if not args.get('name') else None
     },
+    # Consolidated preference tools (route to existing functions based on action)
+    "manage_workspace_preference": {
+        "function_name": "_route_manage_workspace_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (args, user_id),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "workspace_gid is required for 'set' action."} if args.get('action') == 'set' and not args.get('workspace_gid') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility (not sent to Claude, but Android may reference them)
     "set_workspace_preference": {
         "function_name": "set_workspace_preference_with_cache_clear",
         "requires_auth": True,
@@ -982,6 +1113,17 @@ TOOL_REGISTRY = {
         "requires_auth": True,
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
+    },
+    "manage_parent_task_preference": {
+        "function_name": "_route_manage_parent_task_preference",
+        "requires_auth": True,
+        "is_async": True,
+        "args_mapping": lambda args, user_id: (args, user_id),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "require_parent is required for 'set' action."} if args.get('action') == 'set' and args.get('require_parent') is None else
+            None
+        )
     },
     "get_parent_task_preference": {
         "function_name": "get_parent_task_preference",
@@ -1019,6 +1161,13 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id, args.get('task_gid')),
         "validation": lambda args: {"error": "Task GID is required."} if not args.get('task_gid') else None
     },
+    "get_info": {
+        "function_name": "_route_get_info",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (args, user_id),
+        "validation": lambda args: {"error": "type is required."} if not args.get('type') else None
+    },
+    # Keep old entries for backward compatibility
     "get_app_info": {
         "function_name": "get_app_info",
         "requires_auth": False,
@@ -1031,13 +1180,26 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
     },
+    "agent_app_control": {
+        "function_name": "_route_agent_app_control",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "app_name is required."} if not args.get('app_name') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "agent_launch_app": {
         "function_name": "agent_launch_app",
         "requires_auth": False,
-        "is_async": True,  # Mark this as an async tool
-        "needs_websocket": True,  # This tool needs WebSocket context
+        "is_async": True,
+        "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
-            args.get('app_name'), 
+            args.get('app_name'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
@@ -1045,6 +1207,45 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "App name is required."} if not args.get('app_name') else None
     },
+    # Unified messaging tools (route to WA or SMS based on app param)
+    "agent_select_chat": {
+        "function_name": "_route_agent_select_chat",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "app is required."} if not args.get('app') else
+            {"error": "contact_name is required."} if not args.get('contact_name') else
+            None
+        )
+    },
+    "agent_draft_message": {
+        "function_name": "_route_agent_draft_message",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "app is required."} if not args.get('app') else
+            {"error": "message is required."} if not args.get('message') else
+            {"error": "contact_name is required."} if not args.get('contact_name') else
+            None
+        )
+    },
+    "agent_send_message": {
+        "function_name": "_route_agent_send_message",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "app is required."} if not args.get('app') else
+            {"error": "message is required."} if not args.get('message') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "agent_whatsapp_select_chat": {
         "function_name": "agent_whatsapp_select_chat",
         "requires_auth": False,
@@ -1327,6 +1528,20 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "turn_on is required."} if args.get('turn_on') is None else None
     },
+    "agent_calendar_event": {
+        "function_name": "_route_agent_calendar_event",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "title is required."} if not args.get('title') else
+            {"error": "begin_time is required."} if not args.get('begin_time') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "agent_draft_calendar_event": {
         "function_name": "agent_draft_calendar_event",
         "requires_auth": False,
@@ -1431,6 +1646,19 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     },
+    "agent_youtube_music": {
+        "function_name": "_route_agent_youtube_music",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "query is required."} if not args.get('query') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "agent_play_youtube_music": {
         "function_name": "agent_play_youtube_music",
         "requires_auth": False,
@@ -1473,6 +1701,17 @@ TOOL_REGISTRY = {
         ),
         "validation": None
     },
+    "manage_music_app_preference": {
+        "function_name": "_route_manage_music_app_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (args, user_id),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "music_app is required for 'set' action."} if args.get('action') == 'set' and not args.get('music_app') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "get_music_app_preference": {
         "function_name": "get_music_app_preference",
         "requires_auth": True,

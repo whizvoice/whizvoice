@@ -310,7 +310,7 @@ weather_tools = [
     {
         "type": "custom",
         "name": "get_weather",
-        "description": "Get weather forecast for a specific number of days ahead (0-6 days). Uses the Weather.gov API.",
+        "description": "Get weather forecast for a specific number of days ahead (0-6 days). Uses the Weather.gov API. Also saves the user's temperature unit preference if provided.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -324,27 +324,11 @@ weather_tools = [
                 },
                 "temperature_units": {
                     "type": "string",
-                    "description": "Temperature units: 'us' for Fahrenheit or 'si' for Celsius. Do not submit this parameter unless user asked for Fahrenheit or Celsius specifically as their temperature_units preference will be used by default.",
+                    "description": "Temperature units: 'us' for Fahrenheit or 'si' for Celsius. When provided, this also saves as the user's preference for future requests. Do not submit this parameter unless user asked for Fahrenheit or Celsius specifically as their temperature_units preference will be used by default.",
                     "enum": ["us", "si"]
                 }
             },
             "required": ["days_ahead"]
-        }
-    },
-    {
-        "type": "custom",
-        "name": "set_temperature_units",
-        "description": "Set the user's preferred temperature unit. Use 'us' for Fahrenheit or 'si' for Celsius. Use this when the user asks you to remember their preference for Fahrenheit or Celsius.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "unit": {
-                    "type": "string",
-                    "description": "Temperature unit: 'us' for Fahrenheit or 'si' for Celsius",
-                    "enum": ["us", "si"]
-                }
-            },
-            "required": ["unit"]
         }
     }
 ]

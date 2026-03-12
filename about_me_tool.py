@@ -89,22 +89,18 @@ def get_user_data(user_id: str) -> str:
 about_me_tools = [
     {
         "type": "custom",
-        "name": "get_app_info",
-        "description": "Get information about the Whiz Voice app, including its features, functionality, and how to use it. Use this tool when users ask questions about what the app can do, how it works, or need general information about Whiz Voice.",
+        "name": "get_info",
+        "description": "Get information about the app or the user's stored data. Use type 'app' when users ask about Whiz Voice features, functionality, or how to use the app. Use type 'user_data' when the user asks what information/data you have stored about them, or wants to see their preferences (timezone, music app, Asana workspace, etc.). NOTE: user_data only returns non-encrypted preferences.",
         "input_schema": {
             "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "type": "custom",
-        "name": "get_user_data",
-        "description": "Get information about what data we have stored about the user. This includes their preferences like timezone, music app preference, Asana workspace preference, and Asana parent task preference. Use this tool when the user asks what information you know about them, what data you have stored, or wants to see their preferences. NOTE: This only returns non-encrypted preferences and does not include sensitive data like API keys.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["app", "user_data"],
+                    "description": "What information to retrieve: 'app' for app features/functionality, 'user_data' for stored user preferences"
+                }
+            },
+            "required": ["type"]
         }
     }
 ] 

@@ -579,17 +579,22 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
 screen_agent_tools = [
     {
         "type": "custom",
-        "name": "agent_launch_app",
-        "description": "Launch an application on the user's Android device. This will also show a bubble overlay for easy return to WhizVoice. Use this when the user asks to open or launch an app like YouTube, Chrome, Maps, Gmail, Camera, Settings, WhatsApp, etc. For WhatsApp messaging, always launch WhatsApp first before using WhatsApp-specific tools.",
+        "name": "agent_app_control",
+        "description": "Launch or close an application on the user's Android device. Use action 'launch' to open an app (also shows a bubble overlay for easy return to WhizVoice). Use action 'close' to close another app by dismissing it from recent apps. Note: to close WhizVoice itself, use agent_close_app instead.",
         "input_schema": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["launch", "close"],
+                    "description": "Whether to launch or close the app"
+                },
                 "app_name": {
                     "type": "string",
-                    "description": "The name of the app to launch (e.g., 'YouTube', 'Chrome', 'Maps', 'Gmail', 'Camera', 'Photos', 'Calendar', 'Calculator', 'Clock', 'Messages', 'WhatsApp', 'Instagram', 'Facebook', 'Twitter', 'Spotify', 'Netflix', 'Settings')"
+                    "description": "The name of the app (e.g., 'YouTube', 'Chrome', 'Maps', 'Gmail', 'WhatsApp', 'Spotify', 'Settings')"
                 }
             },
-            "required": ["app_name"]
+            "required": ["action", "app_name"]
         }
     },
     {
@@ -625,21 +630,6 @@ screen_agent_tools = [
             "type": "object",
             "properties": {},
             "required": []
-        }
-    },
-    {
-        "type": "custom",
-        "name": "agent_close_other_app",
-        "description": "Close another app running on the device by dismissing it from recent apps. Use this when the user wants to close, exit, or quit an app other than WhizVoice (e.g., 'close YouTube', 'exit Chrome'). This does NOT close WhizVoice itself - use agent_close_app for that.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "app_name": {
-                    "type": "string",
-                    "description": "The name of the app to close (e.g., 'YouTube', 'Chrome', 'Maps', 'WhatsApp', 'Spotify')"
-                }
-            },
-            "required": ["app_name"]
         }
     },
     {
