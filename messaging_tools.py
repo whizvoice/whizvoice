@@ -179,7 +179,7 @@ async def agent_whatsapp_draft_message(message: str, chat_name: str, user_id: st
             try:
                 # Wait for tool result with timeout
                 # Use longer timeout if chat_name provided (may need to navigate first)
-                timeout = 15.0 if chat_name else 5.0
+                timeout = 25.0 if chat_name else 5.0
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
                     timeout=timeout
@@ -468,7 +468,7 @@ async def agent_sms_draft_message(message: str, contact_name: str, user_id: str 
             try:
                 # Wait for tool result with timeout
                 # Use longer timeout if contact_name provided (may need to navigate first)
-                timeout = 15.0 if contact_name else 5.0
+                timeout = 25.0 if contact_name else 5.0
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
                     timeout=timeout
