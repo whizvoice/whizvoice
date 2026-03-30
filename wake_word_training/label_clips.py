@@ -35,10 +35,15 @@ def load_existing_labels(csv_path: Path) -> dict:
     return labels
 
 
+SKIP_DIRS = {"manual_recordings", "audio_augmented", "model"}
+
+
 def find_wav_files(input_dir: Path) -> list:
-    """Find all WAV files recursively, sorted by name."""
-    wavs = sorted(input_dir.rglob("*.wav"))
-    return wavs
+    """Find all WAV files recursively, sorted by name. Skips non-clip directories."""
+    wavs = sorted(
+        w for w in input_dir.rglob("*.wav")
+        if not any(part in SKIP_DIRS for part in w.relative_to(input_dir).parts)
+    )
 
 
 def play_audio(wav_path: Path):
