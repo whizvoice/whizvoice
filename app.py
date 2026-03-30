@@ -5258,6 +5258,48 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Don't raise - let the client handle the error gracefully
                 return session_conversation_id
 
+            # Handle overloaded errors (529) from Claude API
+            if (hasattr(api_error, 'status_code') and api_error.status_code == 529) or 'overloaded_error' in str(api_error).lower():
+                logger.warning(f"Claude API overloaded for request {request_id}: {str(api_error)}")
+                await set_request_state(request_id, "overloaded", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "error": str(api_error)
+                })
+
+                error_message = "Claude is currently overloaded with requests. Please try again in a moment."
+                error_payload = {
+                    "type": "error",
+                    "code": "CLAUDE_OVERLOADED",
+                    "message": error_message,
+                    "request_id": request_id,
+                    "conversation_id": session_conversation_id,
+                    "client_conversation_id": client_conversation_id,
+                    "client_message_id": client_message_id
+                }
+
+                logger.info(f"Saving overloaded error as ASSISTANT message for conversation {session_conversation_id}")
+                error_json_content = json.dumps(error_payload)
+                local_objects = redis_managers.get("local_objects") if redis_managers else None
+                try:
+                    save_result = save_message_to_db(
+                        user_id=user_id,
+                        conversation_id=session_conversation_id,
+                        content=error_json_content,
+                        message_sender="ASSISTANT",
+                        request_id=request_id,
+                        content_type="text",
+                        local_objects=local_objects
+                    )
+                    if save_result:
+                        saved_conversation_id, error_message_id, cancelled_ids = save_result
+                        logger.info(f"Overloaded error saved as message {error_message_id} in conversation {saved_conversation_id}")
+                except Exception as save_error:
+                    logger.error(f"Failed to save overloaded error message to database: {save_error}")
+
+                await safe_websocket_send(error_payload)
+                return session_conversation_id
+
             # Handle other API errors
             logger.error(f"Claude API error for request {request_id}: {str(api_error)}")
             logger.error(f"Error type: {type(api_error).__name__}")
