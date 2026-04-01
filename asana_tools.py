@@ -390,7 +390,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "get_current_datetime",
-        "description": "Get the current date and time in the user's timezone. Also use this when you only need today's date.",
+        "description": "Get the current date and time in the user's timezone. Also use this when you only need today's date. Never guess the date, always use this.",
         "input_schema": {
             "type": "object",
             "properties": {},
