@@ -117,6 +117,15 @@ async def agent_stop_ringing(user_id: str = None, websocket=None,
     )
 
 
+async def agent_snooze_rage_shake(user_id: str = None, websocket=None,
+                                  tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Snooze the rage shake detector for 10 minutes."""
+    return await _send_device_tool(
+        "agent_snooze_rage_shake", {}, user_id, websocket, tool_result_handler, conversation_id,
+        timeout=10.0
+    )
+
+
 async def agent_get_next_alarm(user_id: str = None, websocket=None,
                                tool_result_handler=None, conversation_id: str = None) -> dict:
     """Get the time of the next scheduled alarm."""
@@ -306,6 +315,16 @@ device_control_tools = [
         "type": "custom",
         "name": "agent_stop_ringing",
         "description": "Stop any currently ringing alarm or timer. Automatically tries all dismiss methods (standard alarm, timer, and AMdroid). Use this whenever the user asks to stop, dismiss, turn off, or cancel a ringing alarm or timer, regardless of the source.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_snooze_rage_shake",
+        "description": "Snooze the rage shake detector for 10 minutes. Use when the user wants to disable or turn off the shake-to-report-bug feature.",
         "input_schema": {
             "type": "object",
             "properties": {},
