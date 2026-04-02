@@ -62,11 +62,18 @@ class ScreenAgentQueueManager:
         self._locks: Dict[str, asyncio.Lock] = {}
         # Function to execute tools (set by app.py on startup)
         self._execute_tool_func: Optional[Callable] = None
+        # Redis managers (set by app.py on startup)
+        self._redis_managers: Optional[Dict] = None
 
     def set_execute_tool_func(self, func: Callable):
         """Set the function to use for executing tools."""
         self._execute_tool_func = func
         logger.info("Screen agent queue: execute_tool function registered")
+
+    def set_redis_managers(self, managers: Dict):
+        """Set the redis managers dict for WebSocket refresh lookups."""
+        self._redis_managers = managers
+        logger.info("Screen agent queue: redis_managers registered")
 
     def _get_lock(self, device_id: str) -> asyncio.Lock:
         """Get or create a lock for a device. Thread-safe via setdefault."""
@@ -154,12 +161,17 @@ class ScreenAgentQueueManager:
         )
 
         # Strategy 1: Resolve session redirect and look up new WebSocket
+        if not self._redis_managers:
+            logger.warning("No redis_managers available for WebSocket refresh")
+            return
+        chat_session_mgr = self._redis_managers["chat_sessions"]
+        local_mgr = self._redis_managers["local_objects"]
+
         if session_id:
             try:
-                from redis_managers import chat_session_manager, local_manager
-                resolved_id = await chat_session_manager.resolve_session_id(session_id)
+                resolved_id = await chat_session_mgr.resolve_session_id(session_id)
                 if resolved_id != session_id:
-                    fresh_ws = await local_manager.get_session_websocket(resolved_id)
+                    fresh_ws = await local_mgr.get_session_websocket(resolved_id)
                     if fresh_ws and fresh_ws.client_state == WebSocketState.CONNECTED:
                         context["websocket"] = fresh_ws
                         logger.info(f"Refreshed WebSocket via session redirect: {session_id} -> {resolved_id}")
@@ -170,13 +182,12 @@ class ScreenAgentQueueManager:
         # Strategy 2: Look up by conversation_id
         if conversation_id is not None:
             try:
-                from redis_managers import local_manager
                 real_id = conversation_id
                 if isinstance(conversation_id, int) and conversation_id < 0:
-                    cached_real = await local_manager.get_real_id_cached(conversation_id)
+                    cached_real = await local_mgr.get_real_id_cached(conversation_id)
                     if cached_real:
                         real_id = cached_real
-                registrations = await local_manager.get_conversation_websockets(real_id)
+                registrations = await local_mgr.get_conversation_websockets(real_id)
                 for sid, ws in registrations:
                     if ws.client_state == WebSocketState.CONNECTED:
                         context["websocket"] = ws

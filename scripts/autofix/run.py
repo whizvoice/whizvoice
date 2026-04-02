@@ -572,6 +572,8 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
      `save_failed_screenshot(tester, test_name, step_name)`,
      `navigate_to_my_chats(tester, test_name)` -> (success, error_msg),
      `send_voice_command(text)` - sends a test voice transcription to the Whiz app,
+     `wait_for_websocket_connected(timeout=20)` - polls logcat until the WebSocket is connected
+       (call AFTER opening a new chat but BEFORE sending a voice command),
      `EMULATOR_SERIAL` (the adb serial for the emulator).
    - IMPORTANT: The test MUST exercise the actual screen agent feature on the emulator
      by sending a voice command that triggers the screen agent, then validating the result
@@ -585,6 +587,8 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
      elements after the action completes — not just that the app opened, but that the
      **specific action** described by the dump_reason completed successfully.
    - Use `save_failed_screenshot(tester, "test_name", "step_name")` on failures.
+   - When the test needs to send a message to a contact (e.g. WhatsApp, SMS), always
+     use the contact name "Ruth Grace Wong". This contact exists on the test emulator.
    - Keep the test focused on just this one fix. Name the test function
      `test_autofix_{{dump_reason}}` (replacing non-alphanumeric chars with underscores).
 
@@ -593,15 +597,17 @@ Each line shows: [ClassName] id=resourceId text="..." desc="..." bounds=... clic
    def test_autofix_{{dump_reason_sanitized}}(tester):
        \"\"\"Verify fix for {{dump_reason}}.\"\"\"
        import time
-       from helpers import navigate_to_my_chats, send_voice_command, save_failed_screenshot
+       from helpers import (navigate_to_my_chats, send_voice_command,
+                            save_failed_screenshot, wait_for_websocket_connected)
 
        # Navigate to My Chats page first
        success, error = navigate_to_my_chats(tester, "autofix_verification")
        assert success, f"Could not reach My Chats: {{error}}"
 
-       # Open new chat
+       # Open new chat and wait for WebSocket to connect
        tester.tap(950, 2225)
        time.sleep(2)
+       assert wait_for_websocket_connected(), "WebSocket did not connect in time"
 
        # Send a voice command that exercises the screen agent feature
        send_voice_command("what are the trader joes near me?")
@@ -672,12 +678,15 @@ The `autofix_tests/` directory has `conftest.py` and `helpers.py` that provide:
       save_failed_screenshot,       # save_failed_screenshot(tester, test_name, step_name)
       navigate_to_my_chats,         # navigate_to_my_chats(tester, test_name) -> (success, error_msg)
       send_voice_command,            # send_voice_command("text") - sends test voice transcription
+      wait_for_websocket_connected,  # wait_for_websocket_connected(timeout=20) - poll until WS connected
       EMULATOR_SERIAL,
   )
   ```
 
 ## CRITICAL REQUIREMENTS FOR THE TEST
 
+- The test MUST call `wait_for_websocket_connected()` after opening a new chat and BEFORE calling
+  `send_voice_command()`. This ensures the server can reach the device's accessibility service.
 - The test MUST call `send_voice_command()` to send a voice command that triggers the screen agent
   feature that was fixed. This is NON-NEGOTIABLE.
 - The test MUST validate that the screen agent completed the **specific action** described by the
@@ -686,19 +695,23 @@ The `autofix_tests/` directory has `conftest.py` and `helpers.py` that provide:
   other shallow checks. These are NOT verification tests.
 - The test should be 30+ lines with proper setup, voice command, wait time (20-30 seconds for
   screen agent completion), and detailed validation of the end state.
+- When the test needs to send a message to a contact (e.g. WhatsApp, SMS), always
+  use the contact name "Ruth Grace Wong". This contact exists on the test emulator.
 
 Example test structure:
 ```python
 def test_autofix_example(tester):
-    from helpers import navigate_to_my_chats, send_voice_command, save_failed_screenshot
+    from helpers import (navigate_to_my_chats, send_voice_command,
+                         save_failed_screenshot, wait_for_websocket_connected)
 
     # Navigate to My Chats page
     success, error = navigate_to_my_chats(tester, "autofix_example")
     assert success, f"Could not reach My Chats: {{error}}"
 
-    # Open new chat
+    # Open new chat and wait for WebSocket to connect
     tester.tap(950, 2225)
     time.sleep(2)
+    assert wait_for_websocket_connected(), "WebSocket did not connect in time"
 
     # Send a voice command that exercises the screen agent feature
     send_voice_command("what are the trader joes near me?")
@@ -982,14 +995,31 @@ def test_pr_mode(pr_ref: str, repo_path: str):
     pr_number = parse_pr_number(pr_ref)
     log.info(f"Testing PR #{pr_number}")
 
-    # Check out the PR branch
+    # Fetch latest and get PR branch name
+    subprocess.run(["git", "fetch", "origin", "main"], cwd=repo_path, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo_path, check=True, capture_output=True)
+
+    # Get the PR branch name so we can delete stale local copy
+    pr_view = subprocess.run(
+        ["gh", "pr", "view", str(pr_number), "--json", "headRefName"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if pr_view.returncode == 0:
+        branch_name = json.loads(pr_view.stdout).get("headRefName", "")
+        if branch_name:
+            # Delete stale local branch if it exists (ignore errors if it doesn't)
+            subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                cwd=repo_path, capture_output=True,
+            )
+
+    # Check out the PR branch fresh
     subprocess.run(
         ["gh", "pr", "checkout", str(pr_number)],
         cwd=repo_path, check=True,
     )
 
     # Rebase on latest main so we test against the current codebase
-    subprocess.run(["git", "fetch", "origin", "main"], cwd=repo_path, check=True)
     subprocess.run(["git", "rebase", "origin/main"], cwd=repo_path, check=True)
 
     # Boot emulator
@@ -1101,7 +1131,7 @@ def test_pr_mode(pr_ref: str, repo_path: str):
                  f"Verification test: {test_result}"],
                 cwd=repo_path, check=True,
             )
-            subprocess.run(["git", "push"], cwd=repo_path, check=True)
+            subprocess.run(["git", "push", "--force-with-lease"], cwd=repo_path, check=True)
             log.info(f"Pushed fix commits to PR #{pr_number}")
 
         # Update PR body with test result

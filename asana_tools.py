@@ -21,9 +21,9 @@ def init_redis_client(client):
     global _redis_client
     _redis_client = client
 
-_CREATE_TASK_DESC_PARENT_REQUIRED = "Create a new task in Asana. This task MUST be a subtask of a parent task — never create a standalone task unless the user explicitly asks you to create a new parent task (use is_parent_task=true for that). Before using this tool, determine the appropriate parent task based on the task name and existing parent tasks. If there's one likely candidate, use it. Otherwise guess and make the task right away but tell the user the candidate parent tasks so the can correct you if they need to. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person, first use get_contact_preference to look up their email, then pass it as assignee_email."
+_CREATE_TASK_DESC_PARENT_REQUIRED = "Create a new task in Asana. This task MUST be a subtask of a parent task — never create a standalone task unless the user explicitly asks you to create a new parent task (use is_parent_task=true for that). Before using this tool, determine the appropriate parent task based on the task name and existing parent tasks. If there's one likely candidate, use it. Otherwise guess and make the task right away but tell the user the candidate parent tasks so the can correct you if they need to. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_datetime tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person, first use get_contact_preference to look up their email, then pass it as assignee_email."
 
-_CREATE_TASK_DESC_DEFAULT = "Create a new task in Asana. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_date tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person, first use get_contact_preference to look up their email, then pass it as assignee_email."
+_CREATE_TASK_DESC_DEFAULT = "Create a new task in Asana. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_datetime tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person, first use get_contact_preference to look up their email, then pass it as assignee_email."
 
 def get_asana_client(user_id):
     """Get an Asana client configured with the user's access token. Cached per user."""
@@ -131,7 +131,7 @@ def get_asana_workspaces(user_id):
 def get_asana_tasks(user_id: str, start_date=None, end_date=None):
     workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
-        return "Error identifying user's preferred workspace to get tasks from. Please set a preferred workspace using the set_workspace_preference tool."
+        return "Error identifying user's preferred workspace to get tasks from. Please set a preferred workspace using the manage_workspace_preference tool."
     try:
         api_client = get_asana_client(user_id)
         user_gid = get_asana_user_gid(user_id, api_client)
@@ -204,7 +204,7 @@ def get_current_datetime(user_id: str = None) -> str:
 def get_parent_tasks(user_id: str):
     workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
-        return "Error identifying user's preferred workspace to get parent tasks from. Please set a preferred workspace using the set_workspace_preference tool."
+        return "Error identifying user's preferred workspace to get parent tasks from. Please set a preferred workspace using the manage_workspace_preference tool."
     try:
         api_client = get_asana_client(user_id)
         user_gid = get_asana_user_gid(user_id, api_client)
@@ -238,7 +238,7 @@ def get_parent_tasks(user_id: str):
 async def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None, assignee_email=None, is_parent_task=False):
     workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
-        return "Error identifying user's preferred workspace that the new Asana task should be created in. Please set a preferred workspace using the set_workspace_preference tool."
+        return "Error identifying user's preferred workspace that the new Asana task should be created in. Please set a preferred workspace using the manage_workspace_preference tool."
 
     # Enforce parent task preference
     parent_pref = await get_parent_task_preference(user_id)
@@ -369,43 +369,28 @@ def delete_asana_task(user_id: str, task_gid):
 asana_tools = [
     {
         "type": "custom",
-        "name": "set_workspace_preference",
-        "description": "Set your preferred Asana workspace. This is only necessary if the user hasn't set one yet, or if they want to change the preferred workspace that's set.",
+        "name": "manage_workspace_preference",
+        "description": "Get or set your preferred Asana workspace. Use action 'get' to retrieve the current preference, or 'set' with a workspace_gid to change it.",
         "input_schema": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["get", "set"],
+                    "description": "Whether to get or set the workspace preference"
+                },
                 "workspace_gid": {
                     "type": "string",
-                    "description": "The GID of your preferred workspace"
+                    "description": "The GID of your preferred workspace (required for 'set' action)"
                 }
             },
-            "required": ["workspace_gid"]
-        }
-    },
-    {
-        "type": "custom",
-        "name": "get_workspace_preference",
-        "description": "Get your currently preferred Asana workspace GID.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "type": "custom",
-        "name": "get_current_date",
-        "description": "Get today's date in YYYY-MM-DD format.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
+            "required": ["action"]
         }
     },
     {
         "type": "custom",
         "name": "get_current_datetime",
-        "description": "Get the current date and time in the user's timezone.",
+        "description": "Get the current date and time in the user's timezone. Also use this when you only need today's date. Never guess the date, always use this.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -490,7 +475,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "update_asana_task",
-        "description": "Update an existing Asana task. You can update the task name, due date, notes, completion status, and/or parent in a single call. Only provide the fields you want to change - all parameters are optional. If the user specifies a specific due date (e.g. two weeks from now), you MUST use the get_current_date tool to calculate the due date in YYYY-MM-DD format. To mark a task as complete, set completed to true. To remove a parent (make it a standalone task), set parent_gid to null.",
+        "description": "Update an existing Asana task. You can update the task name, due date, notes, completion status, and/or parent in a single call. Only provide the fields you want to change - all parameters are optional. If the user specifies a specific due date (e.g. two weeks from now), you MUST use the get_current_datetime tool to calculate the due date in YYYY-MM-DD format. To mark a task as complete, set completed to true. To remove a parent (make it a standalone task), set parent_gid to null.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -539,27 +524,22 @@ asana_tools = [
     },
     {
         "type": "custom",
-        "name": "get_parent_task_preference",
-        "description": "Get the user's parent task preference. Returns 'true' if tasks must always have a parent, 'false' if not required, or null if not set.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "type": "custom",
-        "name": "set_parent_task_preference",
-        "description": "Set the user's parent task preference. When enabled (true), all new Asana tasks must have a parent task.",
+        "name": "manage_parent_task_preference",
+        "description": "Get or set the user's parent task preference. Use action 'get' to check the current setting (returns 'true', 'false', or null). Use action 'set' with require_parent to change it. When enabled (true), all new Asana tasks must have a parent task.",
         "input_schema": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["get", "set"],
+                    "description": "Whether to get or set the parent task preference"
+                },
                 "require_parent": {
                     "type": "boolean",
-                    "description": "If true, all new tasks must have a parent task. If false, tasks can be standalone."
+                    "description": "If true, all new tasks must have a parent task. If false, tasks can be standalone. (required for 'set' action)"
                 }
             },
-            "required": ["require_parent"]
+            "required": ["action"]
         }
     }
 ] 

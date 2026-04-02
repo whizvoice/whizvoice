@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_close_other_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories
-from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
+from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
@@ -121,6 +121,7 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
    - If the user explicitly specifies an app in their request (e.g., "play on YouTube Music"), use that app and optionally save it as their preference
 7. For deciding on a random color when a list of colors isn't specified, ALWAYS use the pick_random_color tool
 8. For weather, use the get_weather tool with the appropriate days_ahead parameter (0 = today, 1 = tomorrow, etc.)
+9. Whenever you need to reason about dates or times (including "today", "tomorrow", "this week", scheduling, deadlines, etc.), you MUST call get_current_datetime first. Never guess the date.
 
 IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather than just describing what you would do.
 
@@ -168,6 +169,7 @@ async def startup_event():
     logger.info("Started abandoned tool execution cleanup task")
     # Initialize screen agent queue with execute_tool function
     screen_agent_queue.set_execute_tool_func(execute_tool)
+    screen_agent_queue.set_redis_managers(redis_managers)
     logger.info("Initialized screen agent queue")
 
 # Clean up on app shutdown
@@ -604,7 +606,13 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 1000,
         "messages": messages,
-        "system": CLAUDE_SYSTEM_PROMPT,
+        "system": [
+            {
+                "type": "text",
+                "text": CLAUDE_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"}
+            }
+        ],
         "stream": stream
     }
 
@@ -612,7 +620,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     if tools_to_send:
         # Web search is a server-side tool with a different schema than custom tools
         web_search_tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
-        api_params["tools"] = tools_to_send + [web_search_tool]
+        all_tools = tools_to_send + [web_search_tool]
+        # Cache the entire tools prefix for prompt caching
+        all_tools[-1] = {**all_tools[-1], "cache_control": {"type": "ephemeral"}}
+        api_params["tools"] = all_tools
         api_params["tool_choice"] = {"type": "auto"}
 
     return client.messages.create(**api_params)
@@ -914,6 +925,125 @@ async def set_parent_task_preference_with_cache_clear(user_id, require_parent):
     result = await set_parent_task_preference(user_id, require_parent)
     return result
 
+
+# ========== Routing functions for consolidated tools ==========
+
+def _route_manage_workspace_preference(args, user_id):
+    """Route manage_workspace_preference to get or set based on action."""
+    if args.get('action') == 'get':
+        return get_workspace_preference(user_id)
+    else:
+        return set_workspace_preference_with_cache_clear(user_id, 'asana_workspace_preference', args.get('workspace_gid'))
+
+
+async def _route_manage_parent_task_preference(args, user_id):
+    """Route manage_parent_task_preference to get or set based on action."""
+    if args.get('action') == 'get':
+        return await get_parent_task_preference(user_id)
+    else:
+        return await set_parent_task_preference_with_cache_clear(user_id, args.get('require_parent'))
+
+
+def _route_manage_music_app_preference(args, user_id):
+    """Route manage_music_app_preference to get or set based on action."""
+    if args.get('action') == 'get':
+        return get_music_app_preference(user_id)
+    else:
+        return set_music_app_preference(user_id, args.get('music_app'))
+
+
+def _route_get_info(args, user_id):
+    """Route get_info to get_app_info or get_user_data based on type."""
+    if args.get('type') == 'app':
+        return get_app_info(user_id)
+    else:
+        return get_user_data(user_id)
+
+
+async def _route_agent_app_control(args, user_id, kwargs):
+    """Route agent_app_control to launch or close based on action."""
+    if args.get('action') == 'launch':
+        return await agent_launch_app(
+            args.get('app_name'), user_id,
+            kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
+        )
+    else:
+        return await agent_close_other_app(
+            args.get('app_name'), user_id,
+            kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
+        )
+
+
+async def _route_agent_calendar_event(args, user_id, kwargs):
+    """Route agent_calendar_event to draft or save based on action."""
+    if args.get('action') == 'draft':
+        return await agent_draft_calendar_event(
+            args.get('title'), args.get('begin_time'), args.get('end_time'),
+            args.get('description'), args.get('location'), args.get('all_day', False),
+            args.get('attendees'), args.get('recurrence'), args.get('availability'),
+            args.get('access_level'), args.get('timezone'),
+            user_id, kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
+        )
+    else:
+        return await agent_save_calendar_event(
+            args.get('title'), args.get('begin_time'), args.get('end_time'),
+            args.get('description'), args.get('location'), args.get('all_day', False),
+            args.get('recurrence'), args.get('availability'), args.get('access_level'),
+            args.get('timezone'),
+            user_id, kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
+        )
+
+
+async def _route_agent_select_chat(args, user_id, kwargs):
+    """Route agent_select_chat to WhatsApp or SMS based on app."""
+    ws = kwargs.get('websocket')
+    trh = kwargs.get('tool_result_handler')
+    cid = kwargs.get('conversation_id')
+    if args.get('app') == 'whatsapp':
+        return await agent_whatsapp_select_chat(args.get('contact_name'), user_id, ws, trh, cid)
+    else:
+        return await agent_sms_select_chat(args.get('contact_name'), user_id, ws, trh, cid)
+
+
+async def _route_agent_draft_message(args, user_id, kwargs):
+    """Route agent_draft_message to WhatsApp or SMS based on app."""
+    ws = kwargs.get('websocket')
+    trh = kwargs.get('tool_result_handler')
+    cid = kwargs.get('conversation_id')
+    if args.get('app') == 'whatsapp':
+        return await agent_whatsapp_draft_message(
+            args.get('message'), args.get('contact_name'), user_id, ws, trh, cid, args.get('previous_text')
+        )
+    else:
+        return await agent_sms_draft_message(
+            args.get('message'), args.get('contact_name'), user_id, ws, trh, cid, args.get('previous_text')
+        )
+
+
+async def _route_agent_send_message(args, user_id, kwargs):
+    """Route agent_send_message to WhatsApp or SMS based on app."""
+    ws = kwargs.get('websocket')
+    trh = kwargs.get('tool_result_handler')
+    cid = kwargs.get('conversation_id')
+    if args.get('app') == 'whatsapp':
+        return await agent_whatsapp_send_message(args.get('message'), user_id, ws, trh, cid)
+    else:
+        return await agent_sms_send_message(args.get('message'), user_id, ws, trh, cid)
+
+
+async def _route_agent_youtube_music(args, user_id, kwargs):
+    """Route agent_youtube_music to play or queue based on action."""
+    ws = kwargs.get('websocket')
+    trh = kwargs.get('tool_result_handler')
+    cid = kwargs.get('conversation_id')
+    if args.get('action') == 'play':
+        return await agent_play_youtube_music(
+            args.get('query'), args.get('content_type', 'song'), user_id, ws, trh, cid
+        )
+    else:
+        return await agent_queue_youtube_music(args.get('query'), user_id, ws, trh, cid)
+
+
 # Tool registry that maps tool names to their configuration
 TOOL_REGISTRY = {
     "get_asana_workspaces": {
@@ -961,6 +1091,18 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "Task name is required."} if not args.get('name') else None
     },
+    # Consolidated preference tools (route to existing functions based on action)
+    "manage_workspace_preference": {
+        "function_name": "_route_manage_workspace_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (args, user_id),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "workspace_gid is required for 'set' action."} if args.get('action') == 'set' and not args.get('workspace_gid') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility (not sent to Claude, but Android may reference them)
     "set_workspace_preference": {
         "function_name": "set_workspace_preference_with_cache_clear",
         "requires_auth": True,
@@ -972,6 +1114,17 @@ TOOL_REGISTRY = {
         "requires_auth": True,
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
+    },
+    "manage_parent_task_preference": {
+        "function_name": "_route_manage_parent_task_preference",
+        "requires_auth": True,
+        "is_async": True,
+        "args_mapping": lambda args, user_id: (args, user_id),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "require_parent is required for 'set' action."} if args.get('action') == 'set' and args.get('require_parent') is None else
+            None
+        )
     },
     "get_parent_task_preference": {
         "function_name": "get_parent_task_preference",
@@ -1009,6 +1162,13 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id, args.get('task_gid')),
         "validation": lambda args: {"error": "Task GID is required."} if not args.get('task_gid') else None
     },
+    "get_info": {
+        "function_name": "_route_get_info",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (args, user_id),
+        "validation": lambda args: {"error": "type is required."} if not args.get('type') else None
+    },
+    # Keep old entries for backward compatibility
     "get_app_info": {
         "function_name": "get_app_info",
         "requires_auth": False,
@@ -1021,13 +1181,26 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id,),
         "validation": None
     },
+    "agent_app_control": {
+        "function_name": "_route_agent_app_control",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "app_name is required."} if not args.get('app_name') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "agent_launch_app": {
         "function_name": "agent_launch_app",
         "requires_auth": False,
-        "is_async": True,  # Mark this as an async tool
-        "needs_websocket": True,  # This tool needs WebSocket context
+        "is_async": True,
+        "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
-            args.get('app_name'), 
+            args.get('app_name'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
@@ -1035,6 +1208,45 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "App name is required."} if not args.get('app_name') else None
     },
+    # Unified messaging tools (route to WA or SMS based on app param)
+    "agent_select_chat": {
+        "function_name": "_route_agent_select_chat",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "app is required."} if not args.get('app') else
+            {"error": "contact_name is required."} if not args.get('contact_name') else
+            None
+        )
+    },
+    "agent_draft_message": {
+        "function_name": "_route_agent_draft_message",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "app is required."} if not args.get('app') else
+            {"error": "message is required."} if not args.get('message') else
+            {"error": "contact_name is required."} if not args.get('contact_name') else
+            None
+        )
+    },
+    "agent_send_message": {
+        "function_name": "_route_agent_send_message",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "app is required."} if not args.get('app') else
+            {"error": "message is required."} if not args.get('message') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "agent_whatsapp_select_chat": {
         "function_name": "agent_whatsapp_select_chat",
         "requires_auth": False,
@@ -1274,6 +1486,19 @@ TOOL_REGISTRY = {
         ),
         "validation": None
     },
+    "agent_snooze_rage_shake": {
+        "function_name": "agent_snooze_rage_shake",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
     "agent_get_next_alarm": {
         "function_name": "agent_get_next_alarm",
         "requires_auth": False,
@@ -1317,6 +1542,20 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "turn_on is required."} if args.get('turn_on') is None else None
     },
+    "agent_calendar_event": {
+        "function_name": "_route_agent_calendar_event",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "title is required."} if not args.get('title') else
+            {"error": "begin_time is required."} if not args.get('begin_time') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "agent_draft_calendar_event": {
         "function_name": "agent_draft_calendar_event",
         "requires_auth": False,
@@ -1421,6 +1660,19 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     },
+    "agent_youtube_music": {
+        "function_name": "_route_agent_youtube_music",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "query is required."} if not args.get('query') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "agent_play_youtube_music": {
         "function_name": "agent_play_youtube_music",
         "requires_auth": False,
@@ -1463,6 +1715,17 @@ TOOL_REGISTRY = {
         ),
         "validation": None
     },
+    "manage_music_app_preference": {
+        "function_name": "_route_manage_music_app_preference",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (args, user_id),
+        "validation": lambda args: (
+            {"error": "action is required."} if not args.get('action') else
+            {"error": "music_app is required for 'set' action."} if args.get('action') == 'set' and not args.get('music_app') else
+            None
+        )
+    },
+    # Keep old entries for backward compatibility
     "get_music_app_preference": {
         "function_name": "get_music_app_preference",
         "requires_auth": True,
@@ -4306,6 +4569,7 @@ async def upload_wake_word_audio(
     accepted: str = Form(...),
     timestamp: str = Form(...),
     raw_vosk_json: str = Form(...),
+    classifier_score: str = Form(default="-1.0"),
     current_user: Dict = Depends(get_current_user)
 ):
     """
@@ -4331,6 +4595,7 @@ async def upload_wake_word_audio(
         confidence_val = float(confidence)
         accepted_val = accepted.lower() == "true"
         timestamp_val = int(timestamp)
+        classifier_score_val = float(classifier_score)
 
         insert_data = {
             "user_id": user_id,
@@ -4341,6 +4606,7 @@ async def upload_wake_word_audio(
             "raw_vosk_json": raw_vosk_json,
             "storage_path": storage_path,
             "file_size_bytes": file_size,
+            "classifier_score": classifier_score_val,
         }
 
         result = supabase.table("wake_word_audio_clips").insert(insert_data).execute()
@@ -4349,7 +4615,7 @@ async def upload_wake_word_audio(
             raise HTTPException(status_code=500, detail="Failed to save audio clip metadata")
 
         row = result.data[0]
-        logger.info(f"Saved wake word audio for user {user_id}: phrase={phrase}, confidence={confidence_val}, accepted={accepted_val}, id={row['id']}")
+        logger.info(f"Saved wake word audio for user {user_id}: phrase={phrase}, confidence={confidence_val}, classifier_score={classifier_score_val}, accepted={accepted_val}, id={row['id']}")
 
         return WakeWordAudioResponse(
             id=row["id"],
@@ -5004,6 +5270,48 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 await safe_websocket_send(error_payload)
 
                 # Don't raise - let the client handle the error gracefully
+                return session_conversation_id
+
+            # Handle overloaded errors (529) from Claude API
+            if (hasattr(api_error, 'status_code') and api_error.status_code == 529) or 'overloaded_error' in str(api_error).lower():
+                logger.warning(f"Claude API overloaded for request {request_id}: {str(api_error)}")
+                await set_request_state(request_id, "overloaded", {
+                    "session_id": session_id,
+                    "conversation_id": session_conversation_id,
+                    "error": str(api_error)
+                })
+
+                error_message = "Claude is currently overloaded with requests. Please try again in a moment."
+                error_payload = {
+                    "type": "error",
+                    "code": "CLAUDE_OVERLOADED",
+                    "message": error_message,
+                    "request_id": request_id,
+                    "conversation_id": session_conversation_id,
+                    "client_conversation_id": client_conversation_id,
+                    "client_message_id": client_message_id
+                }
+
+                logger.info(f"Saving overloaded error as ASSISTANT message for conversation {session_conversation_id}")
+                error_json_content = json.dumps(error_payload)
+                local_objects = redis_managers.get("local_objects") if redis_managers else None
+                try:
+                    save_result = save_message_to_db(
+                        user_id=user_id,
+                        conversation_id=session_conversation_id,
+                        content=error_json_content,
+                        message_sender="ASSISTANT",
+                        request_id=request_id,
+                        content_type="text",
+                        local_objects=local_objects
+                    )
+                    if save_result:
+                        saved_conversation_id, error_message_id, cancelled_ids = save_result
+                        logger.info(f"Overloaded error saved as message {error_message_id} in conversation {saved_conversation_id}")
+                except Exception as save_error:
+                    logger.error(f"Failed to save overloaded error message to database: {save_error}")
+
+                await safe_websocket_send(error_payload)
                 return session_conversation_id
 
             # Handle other API errors
@@ -6057,15 +6365,24 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # If disconnected and no more active tasks for this session, clean up chat history
             if not websocket_connected:
-                active_reqs = await get_active_requests(session_id)
-                session_has_active_requests = bool(active_reqs)
-                
-                if not session_has_active_requests:
-                    # Check if session has messages before clearing
-                    messages = await get_chat_messages(session_id)
-                    if messages:
-                        await clear_chat_session(session_id)
-                        logger.info(f"Cleaned up chat session {session_id} after task completion (WebSocket disconnected)")
+                # IMPORTANT: Check if a newer WebSocket has replaced ours before cleaning up.
+                # If a new connection re-registered this session while we were processing,
+                # cleaning up would destroy the new connection's Redis subscriptions.
+                current_ws = None
+                if redis_managers and "local_objects" in redis_managers:
+                    current_ws = await redis_managers["local_objects"].get_session_websocket(session_id)
+
+                if current_ws is not None and current_ws is not websocket:
+                    logger.info(f"Skipping cleanup for session {session_id}: a newer WebSocket has taken over")
+                else:
+                    active_reqs = await get_active_requests(session_id)
+                    session_has_active_requests = bool(active_reqs)
+
+                    if not session_has_active_requests:
+                        messages = await get_chat_messages(session_id)
+                        if messages:
+                            await clear_chat_session(session_id)
+                            logger.info(f"Cleaned up chat session {session_id} after task completion (WebSocket disconnected)")
         except Exception as e:
             logger.warning(f"Error during post-task cleanup for session {session_id}: {str(e)}")
 

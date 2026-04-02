@@ -179,7 +179,7 @@ async def agent_whatsapp_draft_message(message: str, chat_name: str, user_id: st
             try:
                 # Wait for tool result with timeout
                 # Use longer timeout if chat_name provided (may need to navigate first)
-                timeout = 15.0 if chat_name else 5.0
+                timeout = 25.0 if chat_name else 5.0
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
                     timeout=timeout
@@ -468,7 +468,7 @@ async def agent_sms_draft_message(message: str, contact_name: str, user_id: str 
             try:
                 # Wait for tool result with timeout
                 # Use longer timeout if contact_name provided (may need to navigate first)
-                timeout = 15.0 if contact_name else 5.0
+                timeout = 25.0 if contact_name else 5.0
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
                     timeout=timeout
@@ -671,108 +671,70 @@ async def agent_dismiss_draft(user_id: str = None, websocket = None,
 messaging_tools = [
     {
         "type": "custom",
-        "name": "agent_whatsapp_select_chat",
-        "description": "Select a specific chat in WhatsApp by contact or group name. This tool automatically opens WhatsApp if not already open. Use this when the user wants to open a conversation with a specific person or group in WhatsApp.",
+        "name": "agent_select_chat",
+        "description": "Select a specific chat/conversation by contact or group name. Works with both WhatsApp and SMS (Google Messages). The app will be opened automatically if not already open. Use this when the user wants to open a conversation with a specific person or group. Look up get_contact_preference for the name you're given simultaneously with this tool to see if there's a nickname or common mispelling.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "chat_name": {
+                "app": {
                     "type": "string",
-                    "description": "The name of the contact or group chat to select in WhatsApp"
+                    "enum": ["whatsapp", "sms"],
+                    "description": "Which messaging app to use"
+                },
+                "contact_name": {
+                    "type": "string",
+                    "description": "The name, phone number, or group chat to select"
                 }
             },
-            "required": ["chat_name"]
+            "required": ["app", "contact_name"]
         }
     },
     {
         "type": "custom",
-        "name": "agent_whatsapp_draft_message",
-        "description": "Draft a message for WhatsApp and show it in an overlay for user review. This tool automatically opens WhatsApp and navigates to the specified chat. You MUST use this BEFORE sending any WhatsApp message, so that the user can review and confirm the message text before it's sent. The message will appear in a yellow overlay. If you are editing/correcting a previously drafted message, you MUST provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "name": "agent_draft_message",
+        "description": "Draft a message and show it in an overlay for user review. Works with both WhatsApp and SMS (Google Messages). The app will be opened and navigated to the specified chat automatically. You MUST use this BEFORE sending any message, so the user can review and confirm. The message appears in a yellow overlay. If editing a previously drafted message, you MUST provide previous_text to show tracked changes (deletions in red strikethrough, additions in blue).",
         "input_schema": {
             "type": "object",
             "properties": {
+                "app": {
+                    "type": "string",
+                    "enum": ["whatsapp", "sms"],
+                    "description": "Which messaging app to use"
+                },
                 "message": {
                     "type": "string",
                     "description": "The message text to draft for user review before sending"
                 },
-                "chat_name": {
+                "contact_name": {
                     "type": "string",
-                    "description": "The name, phone number, or contact of the recipient to send the message to. The tool will automatically navigate to this chat if not already open."
+                    "description": "The name, phone number, or contact of the recipient. The tool will automatically navigate to this chat if not already open."
                 },
                 "previous_text": {
                     "type": "string",
-                    "description": "The previous version of the message text. You MUST provide this when modifying a previously drafted message to show tracked changes (deletions in red strikethrough, additions in blue). If there isn't a previously drafted version, don't use this parameter."
+                    "description": "The previous version of the message text. You MUST provide this when modifying a previously drafted message to show tracked changes. If there isn't a previously drafted version, don't use this parameter."
                 }
             },
-            "required": ["message", "chat_name"]
+            "required": ["app", "message", "contact_name"]
         }
     },
     {
         "type": "custom",
-        "name": "agent_whatsapp_send_message",
-        "description": "Send a message in WhatsApp. This tool automatically opens WhatsApp if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (whatsapp_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will fill out the text input field and then click the send button in WhatsApp.",
+        "name": "agent_send_message",
+        "description": "Send a message via WhatsApp or SMS (Google Messages). The app will be opened automatically if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (agent_draft_message), 2) Received explicit user confirmation that they are ready to send. This tool fills out the text input field and clicks the send button.",
         "input_schema": {
             "type": "object",
             "properties": {
+                "app": {
+                    "type": "string",
+                    "enum": ["whatsapp", "sms"],
+                    "description": "Which messaging app to use"
+                },
                 "message": {
                     "type": "string",
                     "description": "The exact message text that was drafted and confirmed by the user"
                 }
             },
-            "required": ["message"]
-        }
-    },
-    {
-        "type": "custom",
-        "name": "agent_sms_select_chat",
-        "description": "Select a specific SMS conversation by name or phone number in Google Messages. This tool automatically opens Google Messages if not already open. Use this when the user wants to open an SMS/text message conversation with a specific name or phone number.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "contact_name": {
-                    "type": "string",
-                    "description": "The name or phone number to select in Google Messages app. Does NOT have to be a saved contact in contact preferences."
-                }
-            },
-            "required": ["contact_name"]
-        }
-    },
-    {
-        "type": "custom",
-        "name": "agent_sms_draft_message",
-        "description": "Draft an SMS/text message in Google Messages and show it in an overlay for user review. This tool automatically opens Google Messages and navigates to the specified conversation. You MUST use this BEFORE sending any SMS/text message, so that the user can review and confirm the message text before it's sent. The message will appear in a yellow overlay. If you are editing/correcting a previously drafted message, you MUST provide the previous_text parameter to show tracked changes (deletions in red strikethrough, additions in blue).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "The SMS/text message text to draft for user review before sending"
-                },
-                "contact_name": {
-                    "type": "string",
-                    "description": "The name or phone number of the contact to send the message to. The tool will automatically navigate to this conversation if not already open."
-                },
-                "previous_text": {
-                    "type": "string",
-                    "description": "The previous version of the message text. You MUST provide this when modifying a previously drafted message to show tracked changes (deletions in red strikethrough, additions in blue). If there isn't a previously drafted version, don't use this parameter."
-                }
-            },
-            "required": ["message", "contact_name"]
-        }
-    },
-    {
-        "type": "custom",
-        "name": "agent_sms_send_message",
-        "description": "Send an SMS/text message in Google Messages. This tool automatically opens Google Messages if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (sms_draft_message), 2) Received explicit user confirmation that they are ready to send the message - you can ask for confirmation you don't have it yet. This tool will fill out the text input field and then click the send button in Google Messages.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "The exact SMS/text message text that was drafted and confirmed by the user"
-                }
-            },
-            "required": ["message"]
+            "required": ["app", "message"]
         }
     },
     {

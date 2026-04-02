@@ -339,62 +339,47 @@ async def agent_pause_youtube_music(user_id: str = None, websocket = None,
 music_tools = [
     {
         "type": "custom",
-        "name": "get_music_app_preference",
-        "description": "Get the user's preferred music app from preferences. Use this before playing music to determine which app to use if the user hasn't specified in their request.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "type": "custom",
-        "name": "set_music_app_preference",
-        "description": "Set the user's preferred music app (YouTube Music or Spotify). Use this when the user specifies which music app they want to use for playing music. Valid options: 'youtube_music' or 'spotify'.",
+        "name": "manage_music_app_preference",
+        "description": "Get or set the user's preferred music app. Use action 'get' to check which app is preferred before playing music. Use action 'set' with music_app to change it. Valid music_app options: 'youtube_music' or 'spotify'.",
         "input_schema": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["get", "set"],
+                    "description": "Whether to get or set the music app preference"
+                },
                 "music_app": {
                     "type": "string",
-                    "description": "The music app to use. Valid options: 'youtube_music' or 'spotify'"
+                    "description": "The music app to use. Valid options: 'youtube_music' or 'spotify' (required for 'set' action)"
                 }
             },
-            "required": ["music_app"]
+            "required": ["action"]
         }
     },
     {
         "type": "custom",
-        "name": "agent_play_youtube_music",
-        "description": "Play music on YouTube Music. This tool automatically opens YouTube Music, searches for the query, and plays the first matching result. You MUST specify the content_type to filter results appropriately. If the user hasn't specified a music app, please check their music app preference first.",
+        "name": "agent_youtube_music",
+        "description": "Play or queue music on YouTube Music. This tool automatically opens YouTube Music, searches for the query, and plays or queues the first matching result. Use action 'play' to play immediately, or 'queue' to add to the queue. You MUST specify content_type when using 'play' action. If the user hasn't specified a music app, please check their music app preference first.",
         "input_schema": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["play", "queue"],
+                    "description": "Whether to play immediately or add to queue"
+                },
                 "query": {
                     "type": "string",
-                    "description": "The song name, artist, album, or playlist to play on YouTube Music. Examples: 'Bohemian Rhapsody', 'Taylor Swift', 'Abbey Road', 'Chill vibes'"
+                    "description": "The song name, artist, album, or playlist. Examples: 'Bohemian Rhapsody', 'Taylor Swift', 'Abbey Road', 'Chill vibes'"
                 },
                 "content_type": {
                     "type": "string",
                     "enum": ["song", "album", "artist", "video", "episode", "community_playlist"],
-                    "description": "The type of content to play. Use 'song' for specific songs (default). Use 'album' for albums or soundtracks. Use 'artist' for artist pages/radio. Use 'video' for music videos. Use 'episode' for podcasts. Use 'community_playlist' for user-created playlists or genre-based requests like 'play some 90s pop'."
+                    "description": "The type of content. Use 'song' for specific songs (default). Use 'album' for albums. Use 'artist' for artist pages/radio. Use 'video' for music videos. Use 'episode' for podcasts. Use 'community_playlist' for playlists or genre-based requests. Required for 'play' action."
                 }
             },
-            "required": ["query", "content_type"]
-        }
-    },
-    {
-        "type": "custom",
-        "name": "agent_queue_youtube_music",
-        "description": "Add a song, album, artist, or playlist to the queue in YouTube Music. This tool automatically opens YouTube Music. It will search for the query and add the first result to the queue. Use this when the user wants to add music to their queue without immediately playing it. If the user hasn't specified a music app, please check their music app preference first. They may prefer an app other than YouTube Music.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The song name, artist, album, or playlist to add to the queue. Examples: 'Stairway to Heaven', 'The Beatles', 'Thriller album', 'Rock classics playlist'"
-                }
-            },
-            "required": ["query"]
+            "required": ["action", "query"]
         }
     },
     {

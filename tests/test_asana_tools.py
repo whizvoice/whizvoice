@@ -127,7 +127,7 @@ class TestAsanaTools(unittest.TestCase):
         result = get_asana_tasks(self.test_user_id)
         
         # Assert
-        expected_error = "Error identifying user's preferred workspace to get tasks from. Please set a preferred workspace using the set_workspace_preference tool."
+        expected_error = "Error identifying user's preferred workspace to get tasks from. Please set a preferred workspace using the manage_workspace_preference tool."
         self.assertEqual(result, expected_error)
 
     @patch('asana_tools.get_decrypted_preference_key')
