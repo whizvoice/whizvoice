@@ -98,20 +98,18 @@ def verify_google_token(token: str) -> Dict:
     Verify a Google ID token and return the claims
     """
     try:
-        print(f"Attempting to verify Google token with client IDs: {GOOGLE_CLIENT_IDS}")
+        logger.debug("Attempting to verify Google token")
         # Specify the CLIENT_ID of the app that accesses the backend
         for client_id in GOOGLE_CLIENT_IDS:
             try:
-                print(f"Trying to verify with client ID: {client_id}")
                 idinfo = id_token.verify_oauth2_token(token, requests.Request(), client_id)
-                print(f"Token verification successful with client ID: {client_id}")
-                print(f"Token info: {idinfo}")
-                
+                logger.debug("Token verification successful")
+
                 # ID token is valid. Get the user's Google Account ID
                 if idinfo.get('iss') not in ['accounts.google.com', 'https://accounts.google.com']:
-                    print(f"Invalid issuer: {idinfo.get('iss')}")
+                    logger.debug(f"Invalid issuer: {idinfo.get('iss')}")
                     continue  # Try the next client ID if issuer is wrong
-                
+
                 return {
                     "sub": idinfo.get("sub"),
                     "email": idinfo.get("email"),
@@ -120,11 +118,11 @@ def verify_google_token(token: str) -> Dict:
                     "email_verified": idinfo.get("email_verified", False)
                 }
             except ValueError as e:
-                print(f"Token verification failed with client ID {client_id}: {str(e)}")
+                logger.debug(f"Token verification failed: {str(e)}")
                 continue
-        
+
         # If we get here, token was not verified with any client ID
-        print("Token verification failed with all client IDs")
+        logger.warning("Token verification failed with all client IDs")
         raise AuthError("Invalid Google token")
     
     except Exception as e:

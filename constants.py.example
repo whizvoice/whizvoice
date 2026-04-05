@@ -1,0 +1,14 @@
+# Copy this file to constants.py and fill in your values.
+# constants.py is gitignored and will not be committed.
+
+GOOGLE_WEB_CLIENT_SECRET = "your-google-oauth-client-secret"
+SUPABASE_PASSWORD = "your-supabase-password"
+SUPABASE_KEY = "your-supabase-anon-key"
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_SERVICE_ROLE = "your-supabase-service-role-key"
+PGCRYPTO_KEY = "your-pgcrypto-encryption-key"
+
+# Stripe configuration
+STRIPE_SECRET_KEY = "sk_test_your-stripe-secret-key"
+STRIPE_PUBLISHABLE_KEY = "pk_test_your-stripe-publishable-key"
+STRIPE_PRICE_ID = "price_your-stripe-price-id"
