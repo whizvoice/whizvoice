@@ -1,6 +1,6 @@
 # whizvoice
 
-A simple command-line chatbot powered by Claude AI with Asana integration.
+A simple command-line chatbot powered by Claude AI with Asana integration. This repository is for the webserver, and whizvoiceapp repo is for the Android app.
 
 ## Setup Instructions
 
