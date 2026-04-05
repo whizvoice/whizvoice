@@ -4492,6 +4492,36 @@ async def get_request_state_endpoint(
     
     return state
 
+@app.get("/api/conversations/{conversation_id}/pending-requests")
+async def get_conversation_pending_requests(
+    conversation_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Check if there are any in-flight requests for a conversation.
+    Used by the Android client to restore the thinking indicator after navigation."""
+    user_id = current_user.get("sub")
+    session_id = f"ws_{user_id}_conv_{conversation_id}"
+
+    try:
+        active_request_ids = await get_active_requests(session_id)
+
+        # Filter to only truly pending/processing requests
+        pending_ids = []
+        for request_id in active_request_ids:
+            state = await get_request_state(request_id)
+            # Include if no state record (still active) or state is not terminal
+            if state is None or state.get("state") not in ("completed", "failed", "timeout"):
+                pending_ids.append(request_id)
+
+        return {
+            "has_pending": len(pending_ids) > 0,
+            "request_ids": pending_ids
+        }
+    except Exception as e:
+        logger.error(f"Error checking pending requests for conversation {conversation_id}: {str(e)}")
+        return {"has_pending": False, "request_ids": []}
+
+
 @app.post("/ui-dumps", response_model=UiDumpResponse)
 async def create_ui_dump(
     ui_dump: UiDumpCreate,
