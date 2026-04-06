@@ -2259,12 +2259,8 @@ async def get_api_token_status(current_user: Dict = Depends(get_current_user)):
         claude_key = get_decrypted_preference_key(user_id, CLAUDE_API_KEY_PREF_NAME)
         asana_key = get_decrypted_preference_key(user_id, ASANA_ACCESS_TOKEN_PREF_NAME)
         
-        # Log raw values for debugging
-        logger.info(f"  Claude key raw check:")
-        logger.info(f"    Type: {type(claude_key)}, Is None: {claude_key is None}")
-        logger.info(f"    Repr: {repr(claude_key)}")
-        if claude_key is not None:
-            logger.info(f"    Length: {len(claude_key)}, Empty string: {claude_key == ''}")
+        # Log token presence (not values)
+        logger.info(f"  Claude key: present={claude_key is not None and claude_key != ''}")
 
         # Updated logic to handle both None and string "None"
         has_claude = bool(claude_key) and claude_key != "None"
@@ -2366,20 +2362,13 @@ async def set_user_api_key(
     else:
         # Normal SET operation for non-null values
         logger.info(f"🔑 Setting key '{request.key_name}' for user {user_id}")
-        logger.info(f"  Value type: {type(request.key_value)}")
-        logger.info(f"  Value repr: {repr(request.key_value)}")
         
         if set_encrypted_preference_key(user_id, request.key_name, request.key_value):
             logger.info(f"✅ Successfully set preference key '{request.key_name}' for user {user_id}.")
             
-            # Immediately check what was stored
+            # Verify the value was stored
             retrieved_value = get_decrypted_preference_key(user_id, request.key_name)
-            logger.info(f"🔍 Verification - Retrieved value after setting:")
-            logger.info(f"  Retrieved type: {type(retrieved_value)}")
-            logger.info(f"  Retrieved is None: {retrieved_value is None}")
-            logger.info(f"  Retrieved repr: {repr(retrieved_value)}")
-            logger.info(f"  Retrieved length: {len(retrieved_value) if retrieved_value is not None else 'N/A'}")
-            logger.info(f"  Bool evaluation: {bool(retrieved_value)}")
+            logger.info(f"🔍 Verification - key '{request.key_name}' stored successfully: {retrieved_value is not None and retrieved_value != ''}")
             
             # Return the updated token status immediately
             # get_decrypted_preference_key is already imported at the top
@@ -2410,7 +2399,7 @@ async def refresh_access_token(request_data: RefreshTokenRequest):
     try:
         from jose import jwt, JWTError # Ensure JWTError is available
 
-        logger.info(f"Refresh token attempt. Token (first 15): {request_data.refresh_token[:15]}...")
+        logger.info("Refresh token attempt")
         
         payload = jwt.decode(
             request_data.refresh_token,
@@ -3533,21 +3522,8 @@ async def get_api_tokens(current_user: Dict = Depends(get_current_user)):
         claude_token = get_decrypted_preference_key(user_id, 'claude_api_key')
         asana_token = get_decrypted_preference_key(user_id, 'asana_access_token')
         
-        # Detailed logging for Claude token
-        logger.info(f"  Claude token check:")
-        logger.info(f"    Raw value type: {type(claude_token)}")
-        logger.info(f"    Raw value is None: {claude_token is None}")
-        logger.info(f"    Raw value repr: {repr(claude_token)}")
-        if claude_token is not None:
-            logger.info(f"    Raw value length: {len(claude_token)}")
-            logger.info(f"    Is empty string: {claude_token == ''}")
-            logger.info(f"    Is whitespace only: {claude_token.strip() == '' if isinstance(claude_token, str) else 'N/A'}")
-        
-        # Detailed logging for Asana token
-        logger.info(f"  Asana token check:")
-        logger.info(f"    Raw value type: {type(asana_token)}")
-        logger.info(f"    Raw value is None: {asana_token is None}")
-        logger.info(f"    Raw value repr: {repr(asana_token)[:50] + '...' if asana_token and len(repr(asana_token)) > 50 else repr(asana_token)}")
+        logger.info(f"  Claude token present: {claude_token is not None and claude_token != '' and claude_token != 'None'}")
+        logger.info(f"  Asana token present: {asana_token is not None and asana_token != '' and asana_token != 'None'}")
         
         # Updated logic to handle both None and string "None"
         has_claude = claude_token is not None and claude_token != "None" and claude_token != ""
@@ -4491,6 +4467,36 @@ async def get_request_state_endpoint(
         raise HTTPException(status_code=403, detail="Access denied")
     
     return state
+
+@app.get("/api/conversations/{conversation_id}/pending-requests")
+async def get_conversation_pending_requests(
+    conversation_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Check if there are any in-flight requests for a conversation.
+    Used by the Android client to restore the thinking indicator after navigation."""
+    user_id = current_user.get("sub")
+    session_id = f"ws_{user_id}_conv_{conversation_id}"
+
+    try:
+        active_request_ids = await get_active_requests(session_id)
+
+        # Filter to only truly pending/processing requests
+        pending_ids = []
+        for request_id in active_request_ids:
+            state = await get_request_state(request_id)
+            # Include if no state record (still active) or state is not terminal
+            if state is None or state.get("state") not in ("completed", "failed", "timeout"):
+                pending_ids.append(request_id)
+
+        return {
+            "has_pending": len(pending_ids) > 0,
+            "request_ids": pending_ids
+        }
+    except Exception as e:
+        logger.error(f"Error checking pending requests for conversation {conversation_id}: {str(e)}")
+        return {"has_pending": False, "request_ids": []}
+
 
 @app.post("/ui-dumps", response_model=UiDumpResponse)
 async def create_ui_dump(
