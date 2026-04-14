@@ -177,16 +177,20 @@ def boot_emulator(whizvoiceapp_path: str | None = None) -> bool:
     )
     time.sleep(3)
 
-    # Boot from snapshot
+    # Boot from snapshot. Memory and cores must match the values used when the
+    # snapshot was saved (see whizvoiceapp/scripts/setup-snapshot-droplet.sh),
+    # otherwise loadvm fails.
+    emulator_log = open("/tmp/autofix-emulator.log", "w")
     subprocess.Popen(
         [EMULATOR_BIN, "-avd", AVD_NAME, "-snapshot", SNAPSHOT_NAME,
-         "-port", "5556", "-no-audio", "-gpu", "swiftshader_indirect"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+         "-port", "5556", "-no-audio", "-gpu", "swiftshader_indirect",
+         "-memory", "4096", "-cores", "2"],
+        stdout=emulator_log, stderr=emulator_log,
     )
     _we_booted_emulator = True
 
-    # Wait for boot (120s timeout)
-    max_wait = 120
+    # Wait for boot (300s timeout — snapshot load can be slow on cold CI)
+    max_wait = 300
     elapsed = 0
     while elapsed < max_wait:
         try:
