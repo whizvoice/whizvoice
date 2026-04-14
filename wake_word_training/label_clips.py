@@ -44,6 +44,7 @@ def find_wav_files(input_dir: Path) -> list:
         w for w in input_dir.rglob("*.wav")
         if not any(part in SKIP_DIRS for part in w.relative_to(input_dir).parts)
     )
+    return wavs
 
 
 def play_audio(wav_path: Path):
@@ -93,8 +94,7 @@ def label_clips(input_dir: str, output_csv: str):
     try:
         for i, wav_path in enumerate(unlabeled):
             rel_path = str(wav_path.relative_to(input_path))
-            labeled_count = len(existing)
-            print(f"[{labeled_count + 1}/{total}] {rel_path}")
+            print(f"[{i + 1}/{len(unlabeled)}] {rel_path}")
             print(f"  Progress: {positive_count} positive, {negative_count} negative")
 
             # Play audio
