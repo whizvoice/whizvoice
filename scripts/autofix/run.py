@@ -183,7 +183,8 @@ def boot_emulator(whizvoiceapp_path: str | None = None) -> bool:
     emulator_log = open("/tmp/autofix-emulator.log", "w")
     subprocess.Popen(
         [EMULATOR_BIN, "-avd", AVD_NAME, "-snapshot", SNAPSHOT_NAME,
-         "-port", "5556", "-no-audio", "-gpu", "swiftshader_indirect",
+         "-port", "5556", "-no-audio", "-no-window", "-no-boot-anim",
+         "-gpu", "swiftshader_indirect",
          "-memory", "4096", "-cores", "2"],
         stdout=emulator_log, stderr=emulator_log,
     )
