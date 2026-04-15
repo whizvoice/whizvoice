@@ -34,6 +34,12 @@ jobs:
           token: ${{ secrets.WHIZVOICEAPP_PAT }}
           path: whizvoiceapp
 
+      - name: Checkout android_accessibility_tester
+        uses: actions/checkout@v4
+        with:
+          repository: ruthgrace/android_accessibility_tester
+          path: android_accessibility_tester
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -66,7 +72,8 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install supabase
+          pip install supabase pytest
+          pip install -e android_accessibility_tester
 
       - name: Install Claude Code CLI
         run: |
@@ -105,6 +112,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ secrets.WHIZVOICEAPP_PAT }}
           SNAPSHOT_ENCRYPTION_KEY: ${{ secrets.SNAPSHOT_ENCRYPTION_KEY }}
+          ANDROID_ACCESSIBILITY_TESTER_PATH: ${{ github.workspace }}/android_accessibility_tester
         run: |
           ARGS="--whizvoiceapp-path ./whizvoiceapp"
           if [ -n "${{ inputs.dump_reason }}" ]; then
@@ -120,4 +128,5 @@ jobs:
           path: |
             autofix.log
             /tmp/autofix-emulator.log
+            /tmp/claude-*.log
           retention-days: 30

@@ -807,39 +807,48 @@ def save_screenshot(dump: dict, repo_path: str) -> bool:
         return False
 
 
-def invoke_claude_code(repo_path: str, prompt: str) -> bool:
-    """Run Claude Code CLI with the given prompt. Returns True if it succeeded."""
+def invoke_claude_code(repo_path: str, prompt: str, log_tag: str = "default") -> bool:
+    """Run Claude Code CLI with the given prompt. Returns True if it succeeded.
+
+    Streams Claude's output to /tmp/claude-<log_tag>.log so that partial output
+    is preserved even if Claude times out or gets killed.
+    """
     log.info("Invoking Claude Code CLI...")
     env = os.environ.copy()
     env["ANDROID_SERIAL"] = EMULATOR_SERIAL
-    result = subprocess.run(
-        [
-            "claude",
-            "--print",
-            "--max-turns",
-            "100",
-            "--dangerously-skip-permissions",
-            prompt,
-        ],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        timeout=1800,  # 30 minute timeout (test execution adds time)
-        env=env,
-    )
+
+    claude_log_path = f"/tmp/claude-{log_tag}.log"
+    log.info(f"Claude Code output streaming to {claude_log_path}")
+    with open(claude_log_path, "w") as logf:
+        logf.write(f"=== Prompt ===\n{prompt}\n\n=== Claude output ===\n")
+        logf.flush()
+        try:
+            result = subprocess.run(
+                [
+                    "claude",
+                    "--print",
+                    "--verbose",
+                    "--max-turns",
+                    "100",
+                    "--dangerously-skip-permissions",
+                    prompt,
+                ],
+                cwd=repo_path,
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                timeout=1800,  # 30 minute timeout (test execution adds time)
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            # Partial output already flushed to claude_log_path by the subprocess
+            log.error(f"Claude Code timed out — partial output in {claude_log_path}")
+            raise
 
     if result.returncode != 0:
-        log.error(f"Claude Code failed (exit {result.returncode})")
-        if result.stderr:
-            log.error(f"stderr: {result.stderr[:2000]}")
-        if result.stdout:
-            log.error(f"stdout: {result.stdout[:2000]}")
+        log.error(f"Claude Code failed (exit {result.returncode}); log: {claude_log_path}")
         return False
 
-    log.info("Claude Code completed successfully")
-    if result.stdout:
-        # Log last 500 chars of output for debugging
-        log.info(f"Claude output (tail): ...{result.stdout[-500:]}")
+    log.info(f"Claude Code completed successfully; log: {claude_log_path}")
     return True
 
 
@@ -924,7 +933,7 @@ def process_dump(supabase, dump: dict, repo_path: str) -> dict:
     prompt = build_prompt(dump)
 
     try:
-        success = invoke_claude_code(repo_path, prompt)
+        success = invoke_claude_code(repo_path, prompt, log_tag=f"fix-{dump_reason}")
     except subprocess.TimeoutExpired:
         log.error(f"Claude Code timed out for '{dump_reason}'")
         result["status"] = "timeout"
@@ -1109,7 +1118,7 @@ def test_pr_mode(pr_ref: str, repo_path: str):
         )
 
         try:
-            success = invoke_claude_code(repo_path, prompt)
+            success = invoke_claude_code(repo_path, prompt, log_tag="retest-fix")
         except subprocess.TimeoutExpired:
             log.error("Claude Code timed out during retest fix")
             return
