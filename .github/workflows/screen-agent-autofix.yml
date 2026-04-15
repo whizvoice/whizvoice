@@ -81,5 +81,7 @@ jobs:
         if: always()
         with:
           name: autofix-logs
-          path: autofix.log
+          path: |
+            autofix.log
+            /tmp/autofix-emulator.log
           retention-days: 30
