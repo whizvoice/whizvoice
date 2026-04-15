@@ -47,6 +47,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-autofix-
 
+      - name: Install emulator runtime deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libpulse0
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
