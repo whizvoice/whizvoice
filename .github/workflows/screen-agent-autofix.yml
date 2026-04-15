@@ -56,6 +56,13 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - name: Setup ADB key
+        run: |
+          mkdir -p ~/.android
+          echo '${{ secrets.ADB_PRIVATE_KEY }}' > ~/.android/adbkey
+          chmod 600 ~/.android/adbkey
+          ssh-keygen -y -f ~/.android/adbkey > ~/.android/adbkey.pub 2>/dev/null || true
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
