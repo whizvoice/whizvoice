@@ -825,6 +825,10 @@ def invoke_claude_code(repo_path: str, prompt: str, log_tag: str = "default") ->
         try:
             result = subprocess.run(
                 [
+                    # stdbuf forces line buffering so per-tool-use progress is
+                    # flushed to disk as Claude emits it — crucial for debugging
+                    # timeouts, where SIGKILL would otherwise lose buffered output.
+                    "stdbuf", "-oL", "-eL",
                     "claude",
                     "--print",
                     "--verbose",
