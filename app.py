@@ -55,7 +55,8 @@ from database import (
     get_user_message_ids_since_last_bot,
     get_non_cancelled_bot_message_ids,
     save_message_to_db,
-    update_tool_result_in_db
+    update_tool_result_in_db,
+    resolve_conversation_id,
 )
 from cleanup_tasks import (
     cleanup_session,
@@ -435,6 +436,11 @@ def _fix_orphaned_tool_uses(messages: List[Dict]) -> None:
         i += 1
 
 
+class _SafetyNetSkip(Exception):
+    """Raised when the empty-context safety-net can't resolve a conversation and should skip silently."""
+    pass
+
+
 async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool = None, conversation_id: Optional[int] = None, with_tools: bool = True, user_id: str = None):
     """
     Standard method to call Claude API with consistent parameters.
@@ -457,10 +463,24 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     if len(messages) == 0 and conversation_id:
         logger.warning(f"[CLAUDE_CONTEXT] Empty context for conversation {conversation_id}, attempting to reload from database")
         try:
-            from supabase_client import supabase
+            # Resolve optimistic (negative) IDs to the real DB ID before querying the messages table.
+            # This handles races where session_conversation_id still holds the client's optimistic
+            # ID but the conversation has already been persisted under a positive id.
+            resolved_conversation_id = resolve_conversation_id(conversation_id, user_id)
+            if resolved_conversation_id is None:
+                logger.warning(
+                    f"[CLAUDE_CONTEXT] Could not resolve conversation_id={conversation_id} for user {user_id}; "
+                    f"skipping DB reload"
+                )
+                raise _SafetyNetSkip()
+            if resolved_conversation_id != conversation_id:
+                logger.info(
+                    f"[CLAUDE_CONTEXT] Resolved optimistic conversation_id {conversation_id} "
+                    f"-> real id {resolved_conversation_id}"
+                )
             query = supabase.table("messages")\
                 .select("id, content, message_sender, timestamp, cancelled, content_type, tool_content, request_id")\
-                .eq("conversation_id", conversation_id)\
+                .eq("conversation_id", resolved_conversation_id)\
                 .order("timestamp", desc=False)
 
             response = query.execute()
@@ -497,6 +517,8 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 # Re-fetch with stripping to ensure _timestamp is removed before sending to Claude
                 messages = await get_chat_messages_for_claude(session_id)
                 logger.info(f"[CLAUDE_CONTEXT] Reloaded {len(redis_messages)} messages from database")
+        except _SafetyNetSkip:
+            pass  # Already logged above; fall through with messages = []
         except Exception as e:
             logger.error(f"[CLAUDE_CONTEXT] Failed to reload context from database: {e}")
 
@@ -3721,40 +3743,7 @@ async def update_sync_metadata(
         raise HTTPException(status_code=500, detail="Failed to update sync metadata")
 
 # ================== CONVERSATION HELPER FUNCTIONS ==================
-
-def resolve_conversation_id(conversation_id: int, user_id: str) -> Optional[int]:
-    """
-    Resolve a conversation ID, handling optimistic (negative) IDs by looking them up.
-    Returns the actual conversation ID or None if not found.
-    """
-    try:
-        if conversation_id < 0:
-            # Look up the real conversation using the optimistic_chat_id
-            result = supabase.table("conversations")\
-                .select("id")\
-                .eq("optimistic_chat_id", str(conversation_id))\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
-            
-            if result.data:
-                return result.data[0]["id"]
-            return None
-        else:
-            # For positive IDs, verify it exists and user owns it
-            result = supabase.table("conversations")\
-                .select("id")\
-                .eq("id", conversation_id)\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
-            
-            if result.data:
-                return conversation_id
-            return None
-    except Exception as e:
-        logger.error(f"Error resolving conversation ID {conversation_id}: {str(e)}")
-        return None
+# resolve_conversation_id now lives in database.py (imported above).
 
 # ================== CONVERSATION ENDPOINTS ==================
 
