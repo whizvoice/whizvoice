@@ -164,6 +164,7 @@ class UiDumpCreate(BaseModel):
     conversation_id: Optional[int] = None
     recent_actions: Optional[List[str]] = None
     screen_agent_context: Optional[Dict[str, Any]] = None
+    is_emulator: Optional[bool] = None
 
 
 class UiDumpResponse(BaseModel):
