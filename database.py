@@ -139,6 +139,47 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
         return []
 
 
+def resolve_conversation_id(conversation_id: Optional[int], user_id: str) -> Optional[int]:
+    """
+    Resolve a conversation ID, handling optimistic (negative) IDs by looking them up
+    via `conversations.optimistic_chat_id` (stored as string). For positive IDs,
+    verifies the conversation exists and is owned by the user. Soft-deleted rows
+    (`deleted_at IS NOT NULL`) are excluded.
+
+    Returns the real DB ID, or None if not found / not owned / input was None.
+    """
+    if conversation_id is None:
+        return None
+    try:
+        if conversation_id < 0:
+            # Optimistic ID - look up the real conversation via optimistic_chat_id
+            result = supabase.table("conversations")\
+                .select("id")\
+                .eq("optimistic_chat_id", str(conversation_id))\
+                .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
+                .execute()
+
+            if result.data:
+                return result.data[0]["id"]
+            return None
+        else:
+            # Positive ID - verify it exists and user owns it
+            result = supabase.table("conversations")\
+                .select("id")\
+                .eq("id", conversation_id)\
+                .eq("user_id", user_id)\
+                .is_("deleted_at", "null")\
+                .execute()
+
+            if result.data:
+                return conversation_id
+            return None
+    except Exception as e:
+        logger.error(f"Error resolving conversation ID {conversation_id}: {str(e)}")
+        return None
+
+
 def get_user_message_ids_since_last_bot(conversation_id: int) -> List[int]:
     """Get all user message IDs since the last bot message in a conversation"""
     try:
