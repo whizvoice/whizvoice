@@ -4531,6 +4531,8 @@ async def create_ui_dump(
             insert_data["recent_actions"] = ui_dump.recent_actions
         if ui_dump.screen_agent_context:
             insert_data["screen_agent_context"] = ui_dump.screen_agent_context
+        if ui_dump.is_emulator is not None:
+            insert_data["is_emulator"] = ui_dump.is_emulator
 
         # Insert into Supabase
         result = supabase.table("screen_agent_ui_dumps").insert(insert_data).execute()
@@ -4541,9 +4543,15 @@ async def create_ui_dump(
         row = result.data[0]
         logger.info(f"Saved UI dump for user {user_id}: reason={ui_dump.dump_reason}, id={row['id']}")
 
-        # Trigger auto-fix pipeline for screen agent errors (not rage shakes)
-        if ui_dump.dump_reason != "rage_shake":
+        # Trigger auto-fix pipeline for screen agent errors.
+        # Skip for rage shakes and emulator dumps (dev/CI noise).
+        if ui_dump.dump_reason != "rage_shake" and not ui_dump.is_emulator:
             asyncio.create_task(schedule_autofix_trigger())
+        else:
+            logger.info(
+                f"Skipping autofix trigger for UI dump id={row['id']} "
+                f"(reason={ui_dump.dump_reason}, is_emulator={ui_dump.is_emulator})"
+            )
 
         return UiDumpResponse(
             id=row["id"],
