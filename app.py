@@ -4533,6 +4533,8 @@ async def create_ui_dump(
             insert_data["screen_agent_context"] = ui_dump.screen_agent_context
         if ui_dump.is_emulator is not None:
             insert_data["is_emulator"] = ui_dump.is_emulator
+        if ui_dump.expected_failure:
+            insert_data["expected_failure"] = True
 
         # Insert into Supabase
         result = supabase.table("screen_agent_ui_dumps").insert(insert_data).execute()
@@ -4545,12 +4547,13 @@ async def create_ui_dump(
 
         # Trigger auto-fix pipeline for screen agent errors.
         # Skip for rage shakes and emulator dumps (dev/CI noise).
-        if ui_dump.dump_reason != "rage_shake" and not ui_dump.is_emulator:
+        if ui_dump.dump_reason != "rage_shake" and not ui_dump.is_emulator and not ui_dump.expected_failure:
             asyncio.create_task(schedule_autofix_trigger())
         else:
             logger.info(
                 f"Skipping autofix trigger for UI dump id={row['id']} "
-                f"(reason={ui_dump.dump_reason}, is_emulator={ui_dump.is_emulator})"
+                f"(reason={ui_dump.dump_reason}, is_emulator={ui_dump.is_emulator}, "
+                f"expected_failure={ui_dump.expected_failure})"
             )
 
         return UiDumpResponse(

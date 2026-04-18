@@ -281,6 +281,7 @@ def get_unprocessed_errors(supabase, app_version: str, dump_reason: str | None =
         .eq("app_version", app_version)
         .is_("processed_at", "null")
         .not_.is_("ui_hierarchy", "null")
+        .neq("expected_failure", True)
     )
 
     if dump_reason:
