@@ -28,7 +28,7 @@ from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtu
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
-from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference
+from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference, add_contact_nickname, remove_contact_nickname
 from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
@@ -1977,6 +1977,22 @@ TOOL_REGISTRY = {
         "requires_auth": True,
         "args_mapping": lambda args, user_id: (user_id, args.get('name')),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
+    },
+    "add_contact_nickname": {
+        "function_name": "add_contact_nickname",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('name'), args.get('new_nickname')),
+        "validation": lambda args: (
+            {"error": "name is required."} if not args.get('name') else
+            {"error": "new_nickname is required."} if not args.get('new_nickname') else
+            None
+        )
+    },
+    "remove_contact_nickname": {
+        "function_name": "remove_contact_nickname",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('nickname')),
+        "validation": lambda args: {"error": "nickname is required."} if not args.get('nickname') else None
     }
 }
 
