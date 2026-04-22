@@ -718,7 +718,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_open_app",
-        "description": "Bring the WhizVoice app from bubble/background mode to the full foreground chat view. Use this when the user wants to see the full chat interface, or when you need to show the user something that requires the full screen. This is the reverse of closing or minimizing the app. No-op if the app is already in the foreground.",
+        "description": "Bring the WhizVoice app from bubble mode to the full foreground chat view. Use this when the user asks to open the app or make it bigger. No-op if the app is already in the foreground.",
         "input_schema": {
             "type": "object",
             "properties": {},
