@@ -658,6 +658,86 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
         }
 
 
+async def _send_tool_and_wait(tool_name: str, params: dict, user_id, websocket,
+                              tool_result_handler, conversation_id, timeout: float = 5.0) -> dict:
+    """Shared helper: send a tool_execution message over the WebSocket and await the result."""
+    tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+    logger.info(f"{tool_name} invoked (user: {user_id}, request: {tool_request_id}, params: {params})")
+
+    if not websocket:
+        logger.error(f"{tool_name}: No WebSocket connection available")
+        return {"error": "No connection to device available", "success": False}
+
+    tool_execution_message = {
+        "type": "tool_execution",
+        "tool": tool_name,
+        "request_id": tool_request_id,
+        "params": params,
+        "conversation_id": conversation_id,
+    }
+
+    try:
+        await websocket.send_text(json.dumps(tool_execution_message))
+        logger.info(f"Sent {tool_name} to device (request: {tool_request_id})")
+    except Exception as e:
+        logger.error(f"{tool_name}: Failed to send WebSocket message: {e}")
+        return {"status": "error", "error": f"Failed to send command to device: {e}", "success": False}
+
+    if not tool_result_handler:
+        return {"status": "sent", "message": f"{tool_name} sent to device", "request_id": tool_request_id}
+
+    try:
+        result = await tool_result_handler.wait_for_tool_result(
+            request_id=tool_request_id, timeout=timeout
+        )
+        logger.info(f"{tool_name} result for {tool_request_id}: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"{tool_name}: Error waiting for tool result: {e}")
+        return {"status": "error", "error": f"Error waiting for device response: {e}", "success": False}
+
+
+async def agent_press_back(user_id: str = None, websocket=None,
+                           tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Press the system back button on the user's Android device."""
+    return await _send_tool_and_wait(
+        "agent_press_back", {}, user_id, websocket, tool_result_handler, conversation_id
+    )
+
+
+async def agent_get_ui(scope: str = "interactable", user_id: str = None, websocket=None,
+                       tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Dump the current on-screen accessibility tree so the LLM can pick element_ids."""
+    params = {"scope": scope} if scope else {}
+    return await _send_tool_and_wait(
+        "agent_get_ui", params, user_id, websocket, tool_result_handler, conversation_id,
+        timeout=8.0,
+    )
+
+
+async def agent_click(element_id: int, user_id: str = None, websocket=None,
+                      tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Click the element identified by element_id from the last agent_get_ui call."""
+    return await _send_tool_and_wait(
+        "agent_click", {"element_id": element_id},
+        user_id, websocket, tool_result_handler, conversation_id,
+    )
+
+
+async def agent_insert_text(text: str, element_id: int = None, user_id: str = None,
+                            websocket=None, tool_result_handler=None,
+                            conversation_id: str = None) -> dict:
+    """Insert text into an input field. If element_id is omitted, targets the focused
+    editable, or the sole editable on screen."""
+    params: dict = {"text": text}
+    if element_id is not None:
+        params["element_id"] = element_id
+    return await _send_tool_and_wait(
+        "agent_insert_text", params,
+        user_id, websocket, tool_result_handler, conversation_id,
+    )
+
+
 # Define the Screen Agent tools for Claude
 screen_agent_tools = [
     {
@@ -748,6 +828,66 @@ screen_agent_tools = [
                 }
             },
             "required": ["calories"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_press_back",
+        "description": "Press the system back button on the user's Android device. Use this to dismiss a screen, close a keyboard, or go back to the previous screen.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_get_ui",
+        "description": "Dump the current on-screen UI so you can pick an element to click or type into. Returns a list where each interactable node has a stable element_id prefix like [3]. Call this before agent_click or agent_insert_text. Re-call it if the UI has changed since your last dump (e.g. after navigating, typing, or dismissing something).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "enum": ["interactable", "full"],
+                    "description": "\"interactable\" (default) returns only clickable/editable nodes; \"full\" returns the complete tree with non-interactable labels for more context if necessary, otherwise use interactable to only get what you need."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_click",
+        "description": "Click an on-screen element by its element_id. You MUST call agent_get_ui first to obtain valid element_ids. If the element is not itself clickable, the closest clickable ancestor is used. Fails with an error asking you to re-dump if the UI has changed since the last agent_get_ui.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "integer",
+                    "description": "The integer id shown in square brackets in the most recent agent_get_ui output, e.g. the 3 in [3]."
+                }
+            },
+            "required": ["element_id"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_insert_text",
+        "description": "Type text into an input field on the current screen. If element_id is provided, it must come from the most recent agent_get_ui call. If omitted, the focused input is used, falling back to the sole editable field on screen. The field is cleared before the new text is inserted.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to insert into the input field."
+                },
+                "element_id": {
+                    "type": "integer",
+                    "description": "Optional. The element_id from the most recent agent_get_ui call. Omit to target the focused input or the only editable field on screen."
+                }
+            },
+            "required": ["text"]
         }
     }
 ]
