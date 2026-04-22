@@ -406,6 +406,89 @@ async def agent_close_app(user_id: str = None, websocket = None,
             "success": False
         }
 
+async def agent_open_app(user_id: str = None, websocket = None,
+                         tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Bring the WhizVoice app from bubble/background mode to the full foreground chat view.
+
+    Args:
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the operation
+    """
+    try:
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Opening app to foreground (user: {user_id}, request: {tool_request_id})")
+
+        if not websocket:
+            logger.error("No WebSocket connection available for open_app")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "agent_open_app",
+            "request_id": tool_request_id,
+            "params": {},
+            "conversation_id": conversation_id
+        }
+
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending open_app message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent open_app command")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        # Wait for result - unlike close_app, the app stays alive
+        if tool_result_handler:
+            logger.info(f"Waiting for open_app result from Android device (request_id: {tool_request_id})")
+
+            try:
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=5.0
+                )
+
+                logger.info(f"Open app result for {tool_request_id}: {result}")
+                return result
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout waiting for open_app result (request_id: {tool_request_id})")
+                return {
+                    "status": "sent",
+                    "message": "Open app command sent but timed out waiting for confirmation",
+                    "request_id": tool_request_id,
+                    "success": True
+                }
+
+        return {
+            "status": "sent",
+            "message": "Open app command sent to device",
+            "request_id": tool_request_id,
+            "success": True
+        }
+
+    except Exception as e:
+        logger.error(f"Error in open_app for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to open app: {str(e)}",
+            "success": False
+        }
+
 async def agent_close_other_app(app_name: str, user_id: str = None, websocket = None,
                                 tool_result_handler = None, conversation_id: str = None) -> dict:
     """
@@ -626,6 +709,16 @@ screen_agent_tools = [
         "type": "custom",
         "name": "agent_close_app",
         "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away. IMPORTANT: If you used agent_get_google_maps_directions earlier in this conversation, you MUST call launch_app to bring Google Maps to the foreground BEFORE calling this tool, so the user can still see their navigation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_open_app",
+        "description": "Bring the WhizVoice app from bubble/background mode to the full foreground chat view. Use this when the user wants to see the full chat interface, or when you need to show the user something that requires the full screen. This is the reverse of closing or minimizing the app. No-op if the app is already in the foreground.",
         "input_schema": {
             "type": "object",
             "properties": {},
