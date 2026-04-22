@@ -19,7 +19,7 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
-from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_close_other_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories
+from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories, agent_press_back, agent_get_ui, agent_click, agent_insert_text
 from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
@@ -28,7 +28,7 @@ from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtu
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
-from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference
+from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference, add_contact_nickname, remove_contact_nickname
 from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
@@ -128,7 +128,7 @@ IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather th
 
 You are a voice app. Please keep your responses BRIEF AND CONCISE so that they don't take too long to be read out loud. DO NOT comment or explain beyond the direct answer unless asked explicitly.
 
-User messages sent to you are transcribed from audio. If it doesn't make sense, the transcription was probably inaccurate. Take your best guess of what the user meant to say.
+User messages sent to you are transcribed from audio. If it doesn't make sense, the transcription was probably inaccurate. Take your best guess of what the user meant to say. But don't hallucinate names.
 
 The user may contradict themselves while thinking aloud. Remember: the most recent messages are the most true to their intent. 
 
@@ -1410,6 +1410,19 @@ TOOL_REGISTRY = {
         ),
         "validation": None
     },
+    "agent_open_app": {
+        "function_name": "agent_open_app",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
     "agent_close_other_app": {
         "function_name": "agent_close_other_app",
         "requires_auth": False,
@@ -1977,6 +1990,82 @@ TOOL_REGISTRY = {
         "requires_auth": True,
         "args_mapping": lambda args, user_id: (user_id, args.get('name')),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
+    },
+    "add_contact_nickname": {
+        "function_name": "add_contact_nickname",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('name'), args.get('new_nickname')),
+        "validation": lambda args: (
+            {"error": "name is required."} if not args.get('name') else
+            {"error": "new_nickname is required."} if not args.get('new_nickname') else
+            None
+        )
+    },
+    "remove_contact_nickname": {
+        "function_name": "remove_contact_nickname",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id, args.get('nickname')),
+        "validation": lambda args: {"error": "nickname is required."} if not args.get('nickname') else None
+    },
+    "agent_press_back": {
+        "function_name": "agent_press_back",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "agent_get_ui": {
+        "function_name": "agent_get_ui",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('scope', 'interactable'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": None
+    },
+    "agent_click": {
+        "function_name": "agent_click",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('element_id'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: (
+            {"error": "element_id is required."} if args.get('element_id') is None else None
+        )
+    },
+    "agent_insert_text": {
+        "function_name": "agent_insert_text",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('text'),
+            args.get('element_id'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: (
+            {"error": "text is required."} if args.get('text') is None else None
+        )
     }
 }
 
@@ -4533,6 +4622,8 @@ async def create_ui_dump(
             insert_data["screen_agent_context"] = ui_dump.screen_agent_context
         if ui_dump.is_emulator is not None:
             insert_data["is_emulator"] = ui_dump.is_emulator
+        if ui_dump.expected_failure:
+            insert_data["expected_failure"] = True
 
         # Insert into Supabase
         result = supabase.table("screen_agent_ui_dumps").insert(insert_data).execute()
@@ -4545,12 +4636,13 @@ async def create_ui_dump(
 
         # Trigger auto-fix pipeline for screen agent errors.
         # Skip for rage shakes and emulator dumps (dev/CI noise).
-        if ui_dump.dump_reason != "rage_shake" and not ui_dump.is_emulator:
+        if ui_dump.dump_reason != "rage_shake" and not ui_dump.is_emulator and not ui_dump.expected_failure:
             asyncio.create_task(schedule_autofix_trigger())
         else:
             logger.info(
                 f"Skipping autofix trigger for UI dump id={row['id']} "
-                f"(reason={ui_dump.dump_reason}, is_emulator={ui_dump.is_emulator})"
+                f"(reason={ui_dump.dump_reason}, is_emulator={ui_dump.is_emulator}, "
+                f"expected_failure={ui_dump.expected_failure})"
             )
 
         return UiDumpResponse(

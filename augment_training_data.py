@@ -57,6 +57,11 @@ TOOL_SCHEMAS = {
         "close yourself", "bye", "go away", "close the app",
         "exit", "quit", "shut down", "you can close now",
     ]},
+    "agent_open_app": {"params": {}, "examples": [
+        "open the app", "show the full chat", "come back to foreground",
+        "expand from bubble", "show the full app", "bring up the chat",
+        "switch to full mode", "open up",
+    ]},
     "agent_disable_continuous_listening": {"params": {}, "examples": [
         "stop listening", "turn off the mic", "mute the microphone",
         "disable listening", "stop the mic",

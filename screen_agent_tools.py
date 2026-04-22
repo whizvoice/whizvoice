@@ -406,6 +406,89 @@ async def agent_close_app(user_id: str = None, websocket = None,
             "success": False
         }
 
+async def agent_open_app(user_id: str = None, websocket = None,
+                         tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Bring the WhizVoice app from bubble/background mode to the full foreground chat view.
+
+    Args:
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the operation
+    """
+    try:
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Opening app to foreground (user: {user_id}, request: {tool_request_id})")
+
+        if not websocket:
+            logger.error("No WebSocket connection available for open_app")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "agent_open_app",
+            "request_id": tool_request_id,
+            "params": {},
+            "conversation_id": conversation_id
+        }
+
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending open_app message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent open_app command")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        # Wait for result - unlike close_app, the app stays alive
+        if tool_result_handler:
+            logger.info(f"Waiting for open_app result from Android device (request_id: {tool_request_id})")
+
+            try:
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=5.0
+                )
+
+                logger.info(f"Open app result for {tool_request_id}: {result}")
+                return result
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout waiting for open_app result (request_id: {tool_request_id})")
+                return {
+                    "status": "sent",
+                    "message": "Open app command sent but timed out waiting for confirmation",
+                    "request_id": tool_request_id,
+                    "success": True
+                }
+
+        return {
+            "status": "sent",
+            "message": "Open app command sent to device",
+            "request_id": tool_request_id,
+            "success": True
+        }
+
+    except Exception as e:
+        logger.error(f"Error in open_app for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to open app: {str(e)}",
+            "success": False
+        }
+
 async def agent_close_other_app(app_name: str, user_id: str = None, websocket = None,
                                 tool_result_handler = None, conversation_id: str = None) -> dict:
     """
@@ -575,6 +658,86 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
         }
 
 
+async def _send_tool_and_wait(tool_name: str, params: dict, user_id, websocket,
+                              tool_result_handler, conversation_id, timeout: float = 5.0) -> dict:
+    """Shared helper: send a tool_execution message over the WebSocket and await the result."""
+    tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+    logger.info(f"{tool_name} invoked (user: {user_id}, request: {tool_request_id}, params: {params})")
+
+    if not websocket:
+        logger.error(f"{tool_name}: No WebSocket connection available")
+        return {"error": "No connection to device available", "success": False}
+
+    tool_execution_message = {
+        "type": "tool_execution",
+        "tool": tool_name,
+        "request_id": tool_request_id,
+        "params": params,
+        "conversation_id": conversation_id,
+    }
+
+    try:
+        await websocket.send_text(json.dumps(tool_execution_message))
+        logger.info(f"Sent {tool_name} to device (request: {tool_request_id})")
+    except Exception as e:
+        logger.error(f"{tool_name}: Failed to send WebSocket message: {e}")
+        return {"status": "error", "error": f"Failed to send command to device: {e}", "success": False}
+
+    if not tool_result_handler:
+        return {"status": "sent", "message": f"{tool_name} sent to device", "request_id": tool_request_id}
+
+    try:
+        result = await tool_result_handler.wait_for_tool_result(
+            request_id=tool_request_id, timeout=timeout
+        )
+        logger.info(f"{tool_name} result for {tool_request_id}: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"{tool_name}: Error waiting for tool result: {e}")
+        return {"status": "error", "error": f"Error waiting for device response: {e}", "success": False}
+
+
+async def agent_press_back(user_id: str = None, websocket=None,
+                           tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Press the system back button on the user's Android device."""
+    return await _send_tool_and_wait(
+        "agent_press_back", {}, user_id, websocket, tool_result_handler, conversation_id
+    )
+
+
+async def agent_get_ui(scope: str = "interactable", user_id: str = None, websocket=None,
+                       tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Dump the current on-screen accessibility tree so the LLM can pick element_ids."""
+    params = {"scope": scope} if scope else {}
+    return await _send_tool_and_wait(
+        "agent_get_ui", params, user_id, websocket, tool_result_handler, conversation_id,
+        timeout=8.0,
+    )
+
+
+async def agent_click(element_id: int, user_id: str = None, websocket=None,
+                      tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Click the element identified by element_id from the last agent_get_ui call."""
+    return await _send_tool_and_wait(
+        "agent_click", {"element_id": element_id},
+        user_id, websocket, tool_result_handler, conversation_id,
+    )
+
+
+async def agent_insert_text(text: str, element_id: int = None, user_id: str = None,
+                            websocket=None, tool_result_handler=None,
+                            conversation_id: str = None) -> dict:
+    """Insert text into an input field. If element_id is omitted, targets the focused
+    editable, or the sole editable on screen."""
+    params: dict = {"text": text}
+    if element_id is not None:
+        params["element_id"] = element_id
+    return await _send_tool_and_wait(
+        "agent_insert_text", params,
+        user_id, websocket, tool_result_handler, conversation_id,
+    )
+
+
 # Define the Screen Agent tools for Claude
 screen_agent_tools = [
     {
@@ -625,7 +788,17 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_close_app",
-        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away. IMPORTANT: If you used agent_get_google_maps_directions earlier in this conversation, you MUST call launch_app to bring Google Maps to the foreground BEFORE calling this tool, so the user can still see their navigation.",
+        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away. This function automatically full screens Google Maps if there is an active Google Maps navigation in overlay mode, so the user can continue their navigation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_open_app",
+        "description": "Bring the WhizVoice app from bubble mode to the full foreground chat view. Use this when the user asks to open the app or make it bigger. No-op if the app is already in the foreground.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -655,6 +828,66 @@ screen_agent_tools = [
                 }
             },
             "required": ["calories"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_press_back",
+        "description": "Press the system back button on the user's Android device. Use this to dismiss a screen, close a keyboard, or go back to the previous screen.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_get_ui",
+        "description": "Dump the current on-screen UI so you can pick an element to click or type into. Returns a list where each interactable node has a stable element_id prefix like [3]. Call this before agent_click or agent_insert_text. Re-call it if the UI has changed since your last dump (e.g. after navigating, typing, or dismissing something).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "enum": ["interactable", "full"],
+                    "description": "\"interactable\" (default) returns only clickable/editable nodes; \"full\" returns the complete tree with non-interactable labels for more context if necessary, otherwise use interactable to only get what you need."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_click",
+        "description": "Click an on-screen element by its element_id. You MUST call agent_get_ui first to obtain valid element_ids. If the element is not itself clickable, the closest clickable ancestor is used. Fails with an error asking you to re-dump if the UI has changed since the last agent_get_ui.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "integer",
+                    "description": "The integer id shown in square brackets in the most recent agent_get_ui output, e.g. the 3 in [3]."
+                }
+            },
+            "required": ["element_id"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_insert_text",
+        "description": "Type text into an input field on the current screen. If element_id is provided, it must come from the most recent agent_get_ui call. If omitted, the focused input is used, falling back to the sole editable field on screen. The field is cleared before the new text is inserted.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to insert into the input field."
+                },
+                "element_id": {
+                    "type": "integer",
+                    "description": "Optional. The element_id from the most recent agent_get_ui call. Omit to target the focused input or the only editable field on screen."
+                }
+            },
+            "required": ["text"]
         }
     }
 ]

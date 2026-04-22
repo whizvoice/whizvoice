@@ -35,7 +35,7 @@ ALL_TOOLS = {
     "agent_get_next_alarm", "agent_delete_alarm", "agent_toggle_flashlight",
     "agent_calendar_event", "agent_dial_phone_number", "agent_press_call_button",
     "agent_set_volume", "agent_lookup_phone_contacts",
-    "agent_app_control", "agent_launch_app", "agent_close_app", "agent_close_other_app",
+    "agent_app_control", "agent_launch_app", "agent_close_app", "agent_open_app", "agent_close_other_app",
     "agent_disable_continuous_listening", "agent_set_tts_enabled",
     "cancel_pending_screen_tools", "agent_fitbit_add_quick_calories",
     "agent_select_chat", "agent_draft_message", "agent_send_message", "agent_dismiss_draft",
