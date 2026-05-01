@@ -50,19 +50,19 @@ It also overwrites `~/wake_word_training_data/model/wake_word_classifier.{onnx,p
 
 ## Per-round notes
 
-| Date | Total labels | Pos / Neg | Real pos | Augmented pos | F1† | P / R† | Notes |
-|------|--------------|-----------|----------|---------------|-----|--------|-------|
-| 2026-03-11 | — | — | — | 880 generated | — | — | First augmentation round |
-| 2026-04-08 | ~1549 | 1008 / 541 | 128 | 880 | 0.743 | 0.648 / 0.871 | Original metrics not recorded; numbers above are retro-eval on 2026-04-25 seed-42 split via `eval_compare.py`. Commit `a9ab4c3d`. |
-| 2026-04-25 | 2828 | 1086 / 1742 | 206 | 880 | 0.787 | 0.952 / 0.670 | Loss climbed after epoch 20, F1 oscillated — investigate lr/scheduler next round. **ONNX lost** (overwritten by Apr-30 retrain before commit). |
-| 2026-04-30 (no-aug ablation) | 1948 | 206 / 1742 | 206 | 0 | 0.382 | 0.481 / 0.317 | Ablation: trained without augmented clips. F1 collapsed; pos_weight=8.46 didn't compensate for too-few real positives. Confirmed augmented clips are load-bearing. |
-| 2026-04-30 (final) | 2828 | 1086 / 1742 | 206 | 880 | 0.836 | 0.870 / 0.804 | Same dataset as Apr-25 except 8 sleepy labels were re-labeled & flipped. F1 +0.049 vs Apr-25; recent-only F1 doubled (0.103 → 0.207). Best model to date. |
+| Date | Commit | Total labels | Pos / Neg | Real pos | Augmented pos | F1† | P / R† | Notes |
+|------|--------|--------------|-----------|----------|---------------|-----|--------|-------|
+| 2026-03-11 | `dc80e3f8` | — | — | — | 880 generated | — | — | First classifier introduction + first augmentation round. Commit message: "add classifier to wake word detection to prevent false detects". Metrics not recorded; could be retro-eval'd via `git show dc80e3f8:app/src/main/assets/wake_word_classifier.onnx > /tmp/mar11.onnx && eval_compare.py`. |
+| 2026-04-08 | `a9ab4c3d` | ~1549 | 1008 / 541 | 128 | 880 | 0.743 | 0.648 / 0.871 | Original metrics not recorded; numbers above are retro-eval on 2026-04-25 seed-42 split via `eval_compare.py`. |
+| 2026-04-25 | **lost** | 2828 | 1086 / 1742 | 206 | 880 | 0.787 | 0.952 / 0.670 | Loss climbed after epoch 20, F1 oscillated. ONNX lost (overwritten by Apr-30 retrain before commit). |
+| 2026-04-26 (no-aug ablation) | not committed | 1948 | 206 / 1742 | 206 | 0 | 0.382 | 0.481 / 0.317 | Ablation (trained 2026-04-30): no augmented clips. F1 collapsed; pos_weight=8.46 didn't compensate for too-few real positives. Confirmed augmented clips are load-bearing. |
+| 2026-04-26 | `97a3a21b` | 2828 | 1086 / 1742 | 206 | 880 | 0.836 | 0.870 / 0.804 | Trained 2026-04-30. Same dataset as Apr-25 except 8 sleepy labels were re-labeled & flipped. F1 +0.049 vs Apr-25; recent-only F1 doubled (0.103 → 0.207). Best model to date. |
 
-†Metrics on train.py's seed-42 group-stratified test split of that round's labels.csv. Append a row each retrain after reading train.py's "Final Test Results" block.
+†Metrics on train.py's seed-42 group-stratified test split of that round's labels.csv. Append a row each retrain after reading train.py's "Final Test Results" block. **Always commit `whizvoiceapp/app/src/main/assets/wake_word_classifier.onnx` and record the short hash in the Commit column** so the model can be recovered for `eval_compare.py` regression checks. If you don't commit, future-you can't roll back or compare — see Apr-25.
 
-### Latest comparison: Apr-08 vs Apr-30 (via `eval_compare.py` 2026-04-30)
+### Latest comparison: Apr-08 vs Apr-26 (via `eval_compare.py` 2026-04-30)
 
-Apr-25 ONNX is unrecoverable (overwritten before commit), so the head-to-head is Apr-08 vs Apr-30. Apr-25 numbers shown for context from the per-round table.
+Apr-25 ONNX is unrecoverable (overwritten before commit), so the head-to-head is Apr-08 vs Apr-26. Apr-25 numbers shown for context from the per-round table.
 
 **seed-42 test split (557 clips, 209 positive):**
 
@@ -70,7 +70,7 @@ Apr-25 ONNX is unrecoverable (overwritten before commit), so the head-to-head is
 |-------|---|---|----|----------|----------|
 | Apr-08 | 0.652 | 0.880 | 0.749 | 0.883 | 0.315 |
 | Apr-25 (lost) | 0.952 | 0.670 | 0.787 | 0.661 | 0.023 |
-| **Apr-30** | **0.870** | **0.804** | **0.836** | 0.804 | 0.124 |
+| **Apr-26** | **0.870** | **0.804** | **0.836** | 0.804 | 0.124 |
 
 **recent-only (1279 clips Apr 9+, 78 positive):**
 
@@ -78,17 +78,17 @@ Apr-25 ONNX is unrecoverable (overwritten before commit), so the head-to-head is
 |-------|---|---|----|
 | Apr-08 | 0.063 | 0.346 | 0.107 |
 | Apr-25 (lost) | 0.154 | 0.077 | 0.103 |
-| **Apr-30** | **0.168** | **0.269** | **0.207** |
+| **Apr-26** | **0.168** | **0.269** | **0.207** |
 
-**today's-307 clean labels (23 positive):**
+**Apr-25-pull 307 clean labels (23 positive):**
 
 | Model | P | R | F1 |
 |-------|---|---|----|
 | Apr-08 | 0.109 | 0.304 | 0.161 |
 | Apr-25 (lost) | 0.000 | 0.000 | 0.000 |
-| **Apr-30** | **0.167** | **0.217** | **0.189** |
+| **Apr-26** | **0.167** | **0.217** | **0.189** |
 
-Headline: Apr-30 is the best model in every view. Recent-only F1 doubled vs Apr-25 (0.103 → 0.207) despite only 8 labels actually changing — likely random-init variance in the 56K-param CNN (training script doesn't seed `torch.manual_seed`). Recent-only F1 is still bad in absolute terms (0.207), so generalization to new acoustic conditions remains the next thing to chip at.
+Headline: Apr-26 is the best model in every view. Recent-only F1 doubled vs Apr-25 (0.103 → 0.207) despite only 8 labels actually changing — likely random-init variance in the 56K-param CNN (training script doesn't seed `torch.manual_seed`). Recent-only F1 is still bad in absolute terms (0.207), so generalization to new acoustic conditions remains the next thing to chip at.
 
 Action items for next round:
 1. Set `torch.manual_seed(42)` in `train.py` so retrains are reproducible. Random variance is currently masking real signal.
