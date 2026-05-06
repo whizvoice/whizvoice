@@ -239,7 +239,8 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         request_id: Optional request ID for tracking
         client_conversation_id: Optional optimistic conversation ID from client
         client_timestamp: Optional timestamp from client
-        content_type: Type of content - 'text', 'tool_use', 'tool_result', or 'mixed'
+        content_type: Type of content - 'text', 'tool_use', 'tool_result', 'mixed', or 'hidden_text'
+                      ('hidden_text' is for system-generated user messages that should not appear in the chat UI)
         tool_content: Optional JSONB content for tool-related messages
         mark_cancelled: If True, mark the message as cancelled (for error messages from cancelled requests)
         local_objects: Optional LocalObjectManager for caching optimistic ID mappings

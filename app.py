@@ -3032,6 +3032,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         await websocket.send_text(json.dumps(cancel_response))
                         continue
 
+                    # Hidden user messages (e.g. "[System: screen unlocked]" from Android client)
+                    # are processed normally by the LLM but persisted with a content_type that
+                    # is filtered out of the REST history sync, so they never appear in the chat UI.
+                    is_hidden = bool(message_data.get("hidden", False))
+
                     # Handle regular messages
                     if message_type == "message" and message:
                         # Before creating the new task, detect and cancel subset requests
@@ -3096,7 +3101,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 client_conversation_id=client_conversation_id,
                                 client_message_id=client_message_id,
                                 client_timestamp=client_timestamp,
-                                device_id=device_id
+                                device_id=device_id,
+                                is_hidden=is_hidden,
                             )
                         )
                         
@@ -4156,12 +4162,13 @@ async def get_messages(
         
         # Build the messages query - explicitly select fields including cancelled
         # Include ALL messages (including cancelled ones) so client can handle them appropriately
-        # Filter out tool messages (tool_use, tool_result) - only send text messages to Android client
+        # Filter out tool messages and hidden system messages - only send user-visible text to the Android client
         query = supabase.table("messages")\
             .select("id, conversation_id, content, message_sender, content_type, timestamp, updated_at, request_id, cancelled")\
             .eq("conversation_id", actual_conversation_id)\
             .neq("content_type", "tool_use")\
             .neq("content_type", "tool_result")\
+            .neq("content_type", "hidden_text")\
             .order("timestamp", desc=False)
         
         # Add incremental sync filter if provided
@@ -4728,7 +4735,7 @@ async def catch_all(path: str, request: Request):
     print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None, device_id=None):
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None, device_id=None, is_hidden=False):
     """Process a single message in a cancellable task"""
     # Helper function to safely send to WebSocket
     async def safe_websocket_send(payload):
@@ -4807,7 +4814,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Save user message to database and update session_conversation_id
         logger.info(f"About to save user message. Current session_conversation_id: {session_conversation_id}")
         local_objects = redis_managers.get("local_objects") if redis_managers else None
-        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp, content_type="text", local_objects=local_objects)
+        # Hidden user messages get a distinct content_type so the REST history sync excludes them.
+        user_content_type = "hidden_text" if is_hidden else "text"
+        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp, content_type=user_content_type, local_objects=local_objects)
         if save_result is None:
             logger.error("Failed to save user message to database")
             error_payload = {
