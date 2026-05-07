@@ -275,13 +275,27 @@ def get_unprocessed_errors(supabase, app_version: str, dump_reason: str | None =
     Fetch unprocessed error dumps for the given app version.
     Groups by dump_reason and picks the representative with the longest ui_hierarchy.
     """
+    # Skip screen_agent_context in the initial fetch — it can be ~1MB per row
+    # (base64 screenshot blob). With many rows queued, the response payload
+    # exceeds supabase-py's pydantic validator limits and the call throws.
+    # We backfill screen_agent_context for the chosen representatives below.
+    columns = (
+        "id,created_at,user_id,dump_reason,error_message,ui_hierarchy,"
+        "package_name,device_model,device_manufacturer,android_version,"
+        "screen_width,screen_height,app_version,conversation_id,recent_actions,"
+        "is_emulator,expected_failure,processed_at,autofix_pr_url"
+    )
     query = (
         supabase.table("screen_agent_ui_dumps")
-        .select("*")
+        .select(columns)
         .eq("app_version", app_version)
         .is_("processed_at", "null")
         .not_.is_("ui_hierarchy", "null")
         .neq("expected_failure", True)
+        # rage_shake / bug_button are user-triggered bug reports, not screen-agent
+        # navigation failures. They carry full screenshot payloads but autofix
+        # can't act on free-text user complaints.
+        .not_.in_("dump_reason", ("rage_shake", "bug_button"))
     )
 
     if dump_reason:
@@ -303,6 +317,21 @@ def get_unprocessed_errors(supabase, app_version: str, dump_reason: str | None =
             current_len = len(row.get("ui_hierarchy") or "")
             if current_len > existing_len:
                 by_reason[reason] = row
+
+    # Backfill screen_agent_context for the chosen representatives only — at
+    # most one fetch per dump_reason, so the per-row payload size doesn't
+    # matter at scale.
+    chosen_ids = [row["id"] for row in by_reason.values()]
+    if chosen_ids:
+        ctx_resp = (
+            supabase.table("screen_agent_ui_dumps")
+            .select("id,screen_agent_context")
+            .in_("id", chosen_ids)
+            .execute()
+        )
+        ctx_by_id = {r["id"]: r.get("screen_agent_context") for r in (ctx_resp.data or [])}
+        for row in by_reason.values():
+            row["screen_agent_context"] = ctx_by_id.get(row["id"])
 
     return list(by_reason.values())
 
