@@ -692,7 +692,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_draft_message",
-        "description": "Draft a message and show it in an overlay for user review. Works with both WhatsApp and SMS (Google Messages). The app will be opened and navigated to the specified chat automatically. You MUST use this BEFORE sending any message, so the user can review and confirm. The message appears in a yellow overlay. If editing a previously drafted message, you MUST provide previous_text to show tracked changes (deletions in red strikethrough, additions in blue).",
+        "description": "Draft a message and show it in an overlay for user review. Works with both WhatsApp and SMS (Google Messages). The app will be opened and navigated to the specified chat automatically. You MUST use this BEFORE sending any message, so the user can review and confirm. The message appears in a yellow overlay. If editing a previously drafted message, you MUST provide previous_text to show tracked changes (deletions in red strikethrough, additions in blue). If user gave you some instruction but you're not sure what the user wants to say exactly, just show the draft message with your best guess, so the user can see it and copy edit.",
         "input_schema": {
             "type": "object",
             "properties": {
