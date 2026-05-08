@@ -166,6 +166,53 @@ class ChatSessionManager:
         """Alias for get() method - for backward compatibility"""
         return await self.get(session_id)
 
+    @staticmethod
+    def _is_invalid_head(msg: Dict) -> bool:
+        """True iff this message would be invalid as messages[0] in the Claude payload.
+
+        Invalid if role != "user" (Claude requires user-first), or role == "user" with
+        content whose first block is a tool_result (orphaned — no preceding tool_use).
+        """
+        if msg.get("role") != "user":
+            return True
+        content = msg.get("content")
+        if isinstance(content, list) and content:
+            first = content[0]
+            if isinstance(first, dict) and first.get("type") == "tool_result":
+                return True
+        return False
+
+    async def _trim_to_max(self, key: str, max_count: int = 100):
+        """Trim ZSET to ~max_count without splitting a tool_use/tool_result pair.
+
+        Cap is a soft target. If the naive cut point would orphan a tool_result (or leave
+        an invalid head), back the cut up to a position where the new head is valid; the
+        cache may temporarily exceed max_count and a future trim will retry.
+        """
+        count = await self.redis.zcard(key)
+        if count <= max_count:
+            return
+
+        naive_cut = count - max_count
+        members = await self.redis.zrange(key, 0, naive_cut)
+        if not members:
+            return
+
+        actual_cut = naive_cut
+        while actual_cut >= 0:
+            msg = json.loads(members[actual_cut])
+            if not self._is_invalid_head(msg):
+                break
+            actual_cut -= 1
+
+        if actual_cut <= 0:
+            logger.warning(
+                f"Pair-aware trim skipped {key} — no clean boundary in oldest {naive_cut + 1} messages"
+            )
+            return
+
+        await self.redis.zremrangebyrank(key, 0, actual_cut - 1)
+
     async def add_message(self, session_id: str, message: Union[Dict, List[Dict]], timestamp: Union[str, List[str]] = None, request_id: str = None):
         """Add message(s) to the session using ZSET for automatic ordering.
 
@@ -247,11 +294,7 @@ class ChatSessionManager:
                     await self.redis.expire(new_key, self.ttl)
                     logger.info(f"Check-after-write: duplicated message to {current_redirect} (orphan at {resolved_id} will expire)")
 
-        # Trim if too long (keep messages with highest scores = most recent by timestamp)
-        count = await self.redis.zcard(key)
-        if count > 100:
-            # Remove oldest messages (lowest scores)
-            await self.redis.zremrangebyrank(key, 0, count - 101)
+        await self._trim_to_max(key)
 
     async def append(self, session_id: str, message: Dict):
         """Append a message to chat history - backward compatible, uses current time as timestamp"""
@@ -269,10 +312,7 @@ class ChatSessionManager:
 
         await self.redis.expire(key, self.ttl)
 
-        # Trim if too long
-        count = await self.redis.zcard(key)
-        if count > 100:
-            await self.redis.zremrangebyrank(key, 0, count - 101)
+        await self._trim_to_max(key)
 
     async def delete(self, session_id: str):
         """Delete a session"""
