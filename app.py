@@ -197,8 +197,10 @@ async def shutdown_event():
 # Add Request Logging Middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    logger.info(f"Incoming request: {request.method} {request.url.path}")
     response = await call_next(request)
+    matched_path = getattr(request.scope.get("route"), "path", None)
+    if matched_path != "/{path:path}":
+        logger.info(f"Incoming request: {request.method} {request.url.path}")
     return response
 
 # Configure CORS
@@ -4732,7 +4734,6 @@ async def upload_wake_word_audio(
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
-    print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
 
 async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None, device_id=None, is_hidden=False):
