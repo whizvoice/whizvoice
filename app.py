@@ -2996,9 +2996,16 @@ async def websocket_endpoint(websocket: WebSocket):
                                 logger.info(f"Successfully delivered tool result for request {tool_request_id}")
                             else:
                                 logger.warning(f"No pending execution found for tool result {tool_request_id}")
+                            # Ack regardless of handler outcome — for unknown/duplicate request_ids
+                            # the device should still stop retrying. Existing handler dedupe
+                            # (tool_result_handler.py:131-143) silently drops late deliveries.
+                            try:
+                                await websocket.send_json({"type": "tool_result_ack", "request_id": tool_request_id})
+                            except Exception as ack_err:
+                                logger.warning(f"Failed to send tool_result_ack for {tool_request_id}: {ack_err}")
                         else:
                             logger.warning("Received tool_result without request_id")
-                        
+
                         continue  # Don't process as a regular message
 
                     # Handle tool status messages (e.g., waiting for unlock)
