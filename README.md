@@ -57,7 +57,7 @@ By default journald uses volatile (tmpfs) storage capped at ~45M, which only ret
 
 ```bash
 sudo mkdir -p /etc/systemd/journald.conf.d
-sudo cp journald-whizvoice.conf /etc/systemd/journald.conf.d/
+sudo ln -s /var/www/whizvoice/journald-whizvoice.conf /etc/systemd/journald.conf.d/journald-whizvoice.conf
 sudo systemctl restart systemd-journald
 ```
 
