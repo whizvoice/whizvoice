@@ -126,6 +126,16 @@ async def agent_snooze_rage_shake(user_id: str = None, websocket=None,
     )
 
 
+async def agent_submit_bug_report(message: str, user_id: str = None, websocket=None,
+                                  tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Submit a bug report on behalf of the user with a description of the problem."""
+    return await _send_device_tool(
+        "agent_submit_bug_report", {"message": message},
+        user_id, websocket, tool_result_handler, conversation_id,
+        timeout=30.0
+    )
+
+
 async def agent_get_next_alarm(user_id: str = None, websocket=None,
                                tool_result_handler=None, conversation_id: str = None) -> dict:
     """Get the time of the next scheduled alarm."""
@@ -329,6 +339,21 @@ device_control_tools = [
             "type": "object",
             "properties": {},
             "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_submit_bug_report",
+        "description": "File a bug report on the user's behalf. Captures a snapshot of the current screen, recent logs, and a recent audio buffer, and submits it along with the user's description of the problem. Use when the user asks to file a bug, report a problem, or send feedback about something broken in Whiz. The `message` parameter MUST contain a clear description of what is wrong. If the user has not stated what the problem is, ASK them what's wrong before calling this tool — do not call it with a placeholder or guessed message. Do not call this tool just because the user mentioned bugs in passing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The user's description of the problem, in their own words. Required."
+                }
+            },
+            "required": ["message"]
         }
     },
     {

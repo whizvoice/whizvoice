@@ -382,6 +382,26 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         # Save the message
         logger.info(f"Attempting to save {message_sender} message to conversation_id={conversation_id}, request_id={request_id}, content_type={content_type}")
 
+        # Dedupe USER messages by (conversation_id, request_id). A client that retries a
+        # successfully-sent message (e.g. orphan-retry after WS disconnect) hits us with the
+        # same request_id; without this, supabase gets a second row that never gets cleaned
+        # up. Each fresh user input gets a new UUID, so this only collides on retries.
+        if message_sender == "USER" and request_id and conversation_id and conversation_id > 0:
+            try:
+                existing = supabase.table("messages") \
+                    .select("id") \
+                    .eq("conversation_id", conversation_id) \
+                    .eq("request_id", request_id) \
+                    .eq("message_sender", "USER") \
+                    .limit(1).execute()
+                if existing.data:
+                    existing_id = existing.data[0]["id"]
+                    logger.info(f"USER message dedupe: returning existing message_id={existing_id} for conversation_id={conversation_id}, request_id={request_id}")
+                    return (existing_id, conversation_id, [])
+            except Exception as e:
+                logger.error(f"Error checking for existing USER message dedupe (conversation_id={conversation_id}, request_id={request_id}): {e}")
+                # Fall through to insert — losing dedupe is preferable to losing a message
+
         # For ASSISTANT messages with request_id, collect any previous ASSISTANT messages with the same request_id to cancel
         # This handles the case where streaming responses create multiple intermediate messages
         # IMPORTANT: We never cancel tool_use or tool_result messages, as they represent actual tool executions

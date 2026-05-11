@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories, agent_press_back, agent_get_ui, agent_click, agent_insert_text
-from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
+from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
@@ -197,8 +197,10 @@ async def shutdown_event():
 # Add Request Logging Middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    logger.info(f"Incoming request: {request.method} {request.url.path}")
     response = await call_next(request)
+    matched_path = getattr(request.scope.get("route"), "path", None)
+    if matched_path != "/{path:path}":
+        logger.info(f"Incoming request: {request.method} {request.url.path}")
     return response
 
 # Configure CORS
@@ -1533,6 +1535,20 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": None
+    },
+    "agent_submit_bug_report": {
+        "function_name": "agent_submit_bug_report",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('message'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "message is required."} if not args.get('message') else None
     },
     "agent_get_next_alarm": {
         "function_name": "agent_get_next_alarm",
@@ -2980,9 +2996,16 @@ async def websocket_endpoint(websocket: WebSocket):
                                 logger.info(f"Successfully delivered tool result for request {tool_request_id}")
                             else:
                                 logger.warning(f"No pending execution found for tool result {tool_request_id}")
+                            # Ack regardless of handler outcome — for unknown/duplicate request_ids
+                            # the device should still stop retrying. Existing handler dedupe
+                            # (tool_result_handler.py:131-143) silently drops late deliveries.
+                            try:
+                                await websocket.send_json({"type": "tool_result_ack", "request_id": tool_request_id})
+                            except Exception as ack_err:
+                                logger.warning(f"Failed to send tool_result_ack for {tool_request_id}: {ack_err}")
                         else:
                             logger.warning("Received tool_result without request_id")
-                        
+
                         continue  # Don't process as a regular message
 
                     # Handle tool status messages (e.g., waiting for unlock)
@@ -4732,7 +4755,6 @@ async def upload_wake_word_audio(
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_all(path: str, request: Request):
-    print(f"Unmatched request: {request.method} /{path}")
     return JSONResponse({"error": "Not found"}, status_code=404)
 
 async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None, device_id=None, is_hidden=False):
