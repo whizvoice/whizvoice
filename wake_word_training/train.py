@@ -194,6 +194,9 @@ def load_dataset(input_dir: str):
     print(f"Loading {len(rows)} labeled clips...")
 
     for row in rows:
+        if row.get("in_training", "true").strip().lower() == "false":
+            skipped += 1
+            continue
         label_str = row.get("label", "").strip()
         if label_str == "positive":
             label = 1.0
