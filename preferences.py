@@ -11,14 +11,15 @@ import json
 import pytz
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Set httpx, httpcore, hpack, and anthropic loggers to INFO to reduce verbosity
+# Quiet noisy library loggers
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.INFO)
 logging.getLogger("hpack").setLevel(logging.INFO)
 logging.getLogger("anthropic").setLevel(logging.INFO)
+logging.getLogger("multipart.multipart").setLevel(logging.WARNING)
 
 DEFAULT_PREFERENCES = {
     'asana_workspace_preference': None,
