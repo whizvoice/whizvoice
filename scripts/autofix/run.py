@@ -292,6 +292,7 @@ def get_unprocessed_errors(supabase, app_version: str, dump_reason: str | None =
         .is_("processed_at", "null")
         .not_.is_("ui_hierarchy", "null")
         .neq("expected_failure", True)
+        .not_.is_("is_emulator", "true")
         # rage_shake / bug_button are user-triggered bug reports, not screen-agent
         # navigation failures. They carry full screenshot payloads but autofix
         # can't act on free-text user complaints.

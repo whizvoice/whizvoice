@@ -616,7 +616,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         content = msg.get('content', '')
         # Truncate content for logging
         content_preview = content[:100] + "..." if len(content) > 100 else content
-        logger.info(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
+        logger.debug(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
 
     # Pick the right pre-built tools list based on parent task preference
     tools_to_send = None
@@ -4606,6 +4606,12 @@ async def get_conversation_pending_requests(
         return {"has_pending": False, "request_ids": []}
 
 
+# Dump reasons that should NOT trigger the Android autofix pipeline.
+# Autofix targets client-side Android bugs; rage shakes are usually UX feedback,
+# and server_error_5xx reports describe server-side failures (handled separately).
+NON_AUTOFIX_DUMP_REASONS = {"rage_shake", "server_error_5xx"}
+
+
 @app.post("/ui-dumps", response_model=UiDumpResponse)
 async def create_ui_dump(
     ui_dump: UiDumpCreate,
@@ -4665,8 +4671,9 @@ async def create_ui_dump(
         logger.info(f"Saved UI dump for user {user_id}: reason={ui_dump.dump_reason}, id={row['id']}")
 
         # Trigger auto-fix pipeline for screen agent errors.
-        # Skip for rage shakes and emulator dumps (dev/CI noise).
-        if ui_dump.dump_reason != "rage_shake" and not ui_dump.is_emulator and not ui_dump.expected_failure:
+        # Skip for rage shakes, server-side error reports, and emulator dumps (dev/CI noise).
+        # Autofix targets Android client bugs; server-side 5xx reports don't belong in that loop.
+        if ui_dump.dump_reason not in NON_AUTOFIX_DUMP_REASONS and not ui_dump.is_emulator and not ui_dump.expected_failure:
             asyncio.create_task(schedule_autofix_trigger())
         else:
             logger.info(
