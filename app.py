@@ -200,7 +200,7 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     matched_path = getattr(request.scope.get("route"), "path", None)
     if matched_path != "/{path:path}":
-        logger.info(f"Incoming request: {request.method} {request.url.path}")
+        logger.debug(f"Incoming request: {request.method} {request.url.path}")
     return response
 
 # Configure CORS
@@ -3876,7 +3876,7 @@ async def get_conversations(
         if not user_id:
             raise HTTPException(status_code=401, detail="User not authenticated")
         
-        logger.info(f"Getting conversations for user {user_id}, since: {since}")
+        logger.debug(f"Getting conversations for user {user_id}, since: {since}")
         
         # Build the query
         query = supabase.table('conversations')\
@@ -3901,7 +3901,7 @@ async def get_conversations(
         else:
             # For full sync (no 'since'), exclude deleted conversations
             query = query.is_('deleted_at', 'null')
-            logger.info(f"Full sync: excluding deleted conversations")
+            logger.debug(f"Full sync: excluding deleted conversations")
         
         response = query.execute()
         conversations = response.data if response.data else []
@@ -3911,8 +3911,6 @@ async def get_conversations(
             logger.info(f"Found {len(conversations)} conversations for user {user_id}:")
             for conv in conversations[:3]:  # Log first 3 conversations
                 logger.info(f"  - ID {conv['id']}: '{conv['title'][:30]}...' updated_at: {conv['updated_at']}")
-        else:
-            logger.warning(f"No conversations found for user {user_id} with filter since={since}")
         
         # Return with server timestamp for next incremental sync
         result = {
@@ -3922,7 +3920,7 @@ async def get_conversations(
             'count': len(conversations)
         }
         
-        logger.info(f"Returning {len(conversations)} conversations (incremental: {since is not None})")
+        logger.debug(f"Returning {len(conversations)} conversations (incremental: {since is not None})")
         return result
         
     except Exception as e:
@@ -4863,13 +4861,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Note: USER messages shouldn't have cancelled_ids (only ASSISTANT messages cancel previous ones)
 
         # Debug logging for optimistic ID migration investigation
-        logger.info(f"🔧 MIGRATION_DEBUG: session_conversation_id={session_conversation_id}, real_conversation_id={real_conversation_id}")
-        logger.info(f"🔧 MIGRATION_DEBUG: client_conversation_id={client_conversation_id}")
-        logger.info(f"🔧 MIGRATION_DEBUG: Is migration? {real_conversation_id and real_conversation_id != session_conversation_id}")
-        logger.info(f"🔧 MIGRATION_DEBUG: websocket is {'present' if websocket else 'None'}")
+        logger.debug(f"🔧 MIGRATION_DEBUG: session_conversation_id={session_conversation_id}, real_conversation_id={real_conversation_id}")
+        logger.debug(f"🔧 MIGRATION_DEBUG: client_conversation_id={client_conversation_id}")
+        logger.debug(f"🔧 MIGRATION_DEBUG: Is migration? {real_conversation_id and real_conversation_id != session_conversation_id}")
+        logger.debug(f"🔧 MIGRATION_DEBUG: websocket is {'present' if websocket else 'None'}")
         if websocket:
             try:
-                logger.info(f"🔧 MIGRATION_DEBUG: websocket.client_state={websocket.client_state}")
+                logger.debug(f"🔧 MIGRATION_DEBUG: websocket.client_state={websocket.client_state}")
             except Exception as state_err:
                 logger.warning(f"🔧 MIGRATION_DEBUG: Could not get websocket.client_state: {state_err}")
 

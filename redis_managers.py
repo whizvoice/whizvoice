@@ -87,7 +87,7 @@ class ChatSessionManager:
         """
         redirect = await self.get_redirect(session_id)
         if redirect:
-            logger.info(f"Resolved session redirect: {session_id} → {redirect}")
+            logger.debug(f"Resolved session redirect: {session_id} → {redirect}")
             return redirect
         return session_id
 

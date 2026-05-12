@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Set httpx, httpcore, hpack, and anthropic loggers to INFO to reduce verbosity
-logging.getLogger("httpx").setLevel(logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.INFO)
 logging.getLogger("hpack").setLevel(logging.INFO)
 logging.getLogger("anthropic").setLevel(logging.INFO)
