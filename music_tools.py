@@ -248,6 +248,91 @@ async def agent_queue_youtube_music(query: str, user_id: str = None, websocket =
             "success": False
         }
 
+async def agent_play_next_youtube_music(query: str, user_id: str = None, websocket = None,
+                                  tool_result_handler = None, conversation_id: str = None) -> dict:
+    """
+    Insert a song to play immediately after the current song in YouTube Music.
+    If nothing is currently loaded (no song playing or paused) the device-side handler
+    falls back to playing the song immediately.
+
+    Args:
+        query: The song to search for
+        user_id: The user ID (for logging purposes)
+        websocket: The WebSocket connection to send messages through
+        tool_result_handler: Handler for tracking pending tool executions
+        conversation_id: The conversation ID for context
+
+    Returns:
+        A dictionary containing the result of the play-next operation
+    """
+    try:
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+
+        logger.info(f"Inserting to play next on YouTube Music: '{query}' (user: {user_id}, request: {tool_request_id})")
+
+        if not websocket:
+            logger.error("No WebSocket connection available for YouTube Music play next")
+            return {
+                "error": "No connection to device available",
+                "success": False
+            }
+
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "agent_play_next_youtube_music",
+            "request_id": tool_request_id,
+            "params": {
+                "query": query
+            },
+            "conversation_id": conversation_id
+        }
+
+        try:
+            message_json = json.dumps(tool_execution_message)
+            logger.debug(f"Sending YouTube Music play-next message to Android: {tool_execution_message}")
+            await websocket.send_text(message_json)
+            logger.info(f"Successfully sent agent_play_next_youtube_music command for '{query}'")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Failed to send command to device: {str(e)}",
+                "success": False
+            }
+
+        if tool_result_handler:
+            logger.info(f"Waiting for YouTube Music play-next result from Android device (request_id: {tool_request_id})")
+
+            try:
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id,
+                    timeout=15.0
+                )
+
+                logger.info(f"YouTube Music play-next result for {tool_request_id}: {result}")
+                return result
+
+            except Exception as e:
+                logger.error(f"Error waiting for YouTube Music play-next result: {str(e)}")
+                return {
+                    "status": "error",
+                    "error": f"Error waiting for device response: {str(e)}",
+                    "success": False
+                }
+        else:
+            return {
+                "status": "sent",
+                "message": f"Command to play '{query}' next sent to device",
+                "request_id": tool_request_id
+            }
+
+    except Exception as e:
+        logger.error(f"Error in play_next_youtube_music for user {user_id}: {str(e)}")
+        return {
+            "error": f"Failed to play YouTube Music song next: {str(e)}",
+            "success": False
+        }
+
 async def agent_pause_youtube_music(user_id: str = None, websocket = None,
                                     tool_result_handler = None, conversation_id: str = None) -> dict:
     """
@@ -360,14 +445,14 @@ music_tools = [
     {
         "type": "custom",
         "name": "agent_youtube_music",
-        "description": "Play or queue music on YouTube Music. This tool automatically opens YouTube Music, searches for the query, and plays or queues the first matching result. Use action 'play' to play immediately, or 'queue' to add to the queue. You MUST specify content_type when using 'play' action. If the user hasn't specified a music app, please check their music app preference first.",
+        "description": "Play, queue, or insert a song to play next on YouTube Music. This tool automatically opens YouTube Music, searches for the query, and plays/queues/plays-next the first matching result. Use action 'play' to play immediately, 'queue' to add to the END of the queue, or 'play_next' to insert the song to play IMMEDIATELY AFTER the current song. You MUST specify content_type when using 'play' action.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["play", "queue"],
-                    "description": "Whether to play immediately or add to queue"
+                    "enum": ["play", "queue", "play_next"],
+                    "description": "Whether to play immediately, add to the end of the queue, or insert to play immediately after the current song"
                 },
                 "query": {
                     "type": "string",
