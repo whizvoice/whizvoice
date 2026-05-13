@@ -1060,7 +1060,7 @@ async def _route_agent_youtube_music(args, user_id, kwargs):
     action = args.get('action')
     if action == 'play':
         return await agent_play_youtube_music(
-            args.get('query'), args.get('content_type', 'song'), user_id, ws, trh, cid
+            args.get('query'), args.get('content_type'), user_id, ws, trh, cid
         )
     elif action == 'play_next':
         return await agent_play_next_youtube_music(args.get('query'), user_id, ws, trh, cid)
@@ -1731,7 +1731,7 @@ TOOL_REGISTRY = {
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
             args.get('query'),
-            args.get('content_type', 'song'),
+            args.get('content_type'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),

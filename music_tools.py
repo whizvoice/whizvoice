@@ -65,7 +65,7 @@ def set_music_app_preference(user_id: str, music_app: str) -> tuple[bool, str]:
 
 # ================== Music Playback Functions ==================
 
-async def agent_play_youtube_music(query: str, content_type: str = "song",
+async def agent_play_youtube_music(query: str, content_type: Optional[str] = None,
                             user_id: str = None, websocket = None,
                             tool_result_handler = None, conversation_id: str = None) -> dict:
     """
@@ -96,15 +96,17 @@ async def agent_play_youtube_music(query: str, content_type: str = "song",
                 "success": False
             }
 
-        # Create the WebSocket message for the Android app
+        # Create the WebSocket message for the Android app. content_type is only
+        # included when the LLM provided it — otherwise the device runs its
+        # type-agnostic universal play flow.
+        params: Dict[str, Any] = {"query": query}
+        if content_type:
+            params["content_type"] = content_type
         tool_execution_message = {
             "type": "tool_execution",
             "tool": "agent_play_youtube_music",
             "request_id": tool_request_id,
-            "params": {
-                "query": query,
-                "content_type": content_type
-            },
+            "params": params,
             "conversation_id": conversation_id
         }
 
@@ -445,7 +447,7 @@ music_tools = [
     {
         "type": "custom",
         "name": "agent_youtube_music",
-        "description": "Play, queue, or insert a song to play next on YouTube Music. This tool automatically opens YouTube Music, searches for the query, and plays/queues/plays-next the first matching result. Use action 'play' to play immediately, 'queue' to add to the END of the queue, or 'play_next' to insert the song to play IMMEDIATELY AFTER the current song. You MUST specify content_type when using 'play' action.",
+        "description": "Play, queue, or insert a song to play next on YouTube Music. This tool automatically opens YouTube Music, searches for the query, and plays/queues/plays-next the first matching result. Use action 'play' to play immediately, 'queue' to add to the END of the queue, or 'play_next' to insert the song to play IMMEDIATELY AFTER the current song. Only set content_type when the user's request is clearly NOT a single song — e.g. an album, artist, podcast, or playlist. For ordinary song requests, omit it.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -461,7 +463,7 @@ music_tools = [
                 "content_type": {
                     "type": "string",
                     "enum": ["song", "album", "artist", "video", "episode", "community_playlist"],
-                    "description": "The type of content. Use 'song' for specific songs (default). Use 'album' for albums. Use 'artist' for artist pages/radio. Use 'video' for music videos. Use 'episode' for podcasts. Use 'community_playlist' for playlists or genre-based requests. Required for 'play' action."
+                    "description": "Optional. Only include when the user's request is clearly not a song: 'album' for albums, 'artist' for artist pages/radio, 'video' for music videos, 'episode' for podcasts, 'community_playlist' for genre-based or playlist requests. Omit for ordinary song requests."
                 }
             },
             "required": ["action", "query"]
