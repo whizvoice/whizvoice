@@ -194,6 +194,9 @@ def load_dataset(input_dir: str):
     print(f"Loading {len(rows)} labeled clips...")
 
     for row in rows:
+        if row.get("in_training", "true").strip().lower() == "false":
+            skipped += 1
+            continue
         label_str = row.get("label", "").strip()
         if label_str == "positive":
             label = 1.0
@@ -225,7 +228,13 @@ def load_dataset(input_dir: str):
     return np.array(features), np.array(labels), filenames
 
 
-def train(input_dir: str, epochs: int, output_dir: str):
+def train(input_dir: str, epochs: int, output_dir: str, seed: int = 42, copy_to_android: bool = True):
+    # Reproducibility: seed all sources of randomness up front so that retraining
+    # the same labels.csv gives the same model. Without this, random-init variance
+    # was ±0.05 F1 between runs, masking real signal from data changes.
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
     features, labels, filenames = load_dataset(input_dir)
 
     n_positive = int(labels.sum())
@@ -464,7 +473,7 @@ def train(input_dir: str, epochs: int, output_dir: str):
 
     # Copy assets to Android
     android_assets = Path(__file__).parent.parent.parent / "whizvoiceapp" / "app" / "src" / "main" / "assets"
-    if android_assets.exists():
+    if copy_to_android and android_assets.exists():
         import shutil
         for src_name in ["wake_word_classifier.onnx", "mel_filterbank.bin", "preprocessing_params.json"]:
             src = output_path / src_name
@@ -493,10 +502,21 @@ def main():
         default=None,
         help="Output directory for model (default: <input_dir>/model)",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)",
+    )
+    parser.add_argument(
+        "--no-copy-assets",
+        action="store_true",
+        help="Skip auto-copying ONNX into whizvoiceapp/app/src/main/assets/",
+    )
     args = parser.parse_args()
 
     output = args.output or os.path.join(args.input, "model")
-    train(args.input, args.epochs, output)
+    train(args.input, args.epochs, output, seed=args.seed, copy_to_android=not args.no_copy_assets)
 
 
 if __name__ == "__main__":

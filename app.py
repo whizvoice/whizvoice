@@ -24,7 +24,7 @@ from device_control_tools import device_control_tools, agent_set_alarm, agent_se
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
-from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, agent_pause_youtube_music, get_music_app_preference, set_music_app_preference
+from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtube_music, agent_play_next_youtube_music, agent_pause_youtube_music, get_music_app_preference, set_music_app_preference
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
@@ -116,10 +116,7 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
    - remember to use update_asana_task instead of get_new_asana_task_id if you are changing a task, to avoid creating duplicates.
    - Before creating a new task, check the parent task preference using get_parent_task_preference. If it returns 'true', you MUST always assign a parent task — ask the user if you're unsure which parent to use.
 5. For app information, use the get_app_info tool
-6. For music playback:
-   - When the user asks to play music WITHOUT specifying an app, check their music app preference using get_music_app_preference
-   - If no preference is set, ask the user which music app they prefer (currently we only support YouTube Music, not Spotify) and save it using set_music_app_preference
-   - If the user explicitly specifies an app in their request (e.g., "play on YouTube Music"), use that app and optionally save it as their preference
+6. For music playback, use the agent_youtube_music tool (currently we only support YouTube Music, not Spotify).
 7. For deciding on a random color when a list of colors isn't specified, ALWAYS use the pick_random_color tool
 8. For weather, use the get_weather tool with the appropriate days_ahead parameter (0 = today, 1 = tomorrow, etc.)
 9. Whenever you need to reason about dates or times (including "today", "tomorrow", "this week", scheduling, deadlines, etc.), you MUST call get_current_datetime first. Never guess the date.
@@ -200,7 +197,7 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     matched_path = getattr(request.scope.get("route"), "path", None)
     if matched_path != "/{path:path}":
-        logger.info(f"Incoming request: {request.method} {request.url.path}")
+        logger.debug(f"Incoming request: {request.method} {request.url.path}")
     return response
 
 # Configure CORS
@@ -616,7 +613,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         content = msg.get('content', '')
         # Truncate content for logging
         content_preview = content[:100] + "..." if len(content) > 100 else content
-        logger.info(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
+        logger.debug(f"[CLAUDE_CONTEXT] Message {i}: role={role}, content={content_preview}")
 
     # Pick the right pre-built tools list based on parent task preference
     tools_to_send = None
@@ -1056,14 +1053,17 @@ async def _route_agent_send_message(args, user_id, kwargs):
 
 
 async def _route_agent_youtube_music(args, user_id, kwargs):
-    """Route agent_youtube_music to play or queue based on action."""
+    """Route agent_youtube_music to play, queue, or play_next based on action."""
     ws = kwargs.get('websocket')
     trh = kwargs.get('tool_result_handler')
     cid = kwargs.get('conversation_id')
-    if args.get('action') == 'play':
+    action = args.get('action')
+    if action == 'play':
         return await agent_play_youtube_music(
-            args.get('query'), args.get('content_type', 'song'), user_id, ws, trh, cid
+            args.get('query'), args.get('content_type'), user_id, ws, trh, cid
         )
+    elif action == 'play_next':
+        return await agent_play_next_youtube_music(args.get('query'), user_id, ws, trh, cid)
     else:
         return await agent_queue_youtube_music(args.get('query'), user_id, ws, trh, cid)
 
@@ -1731,7 +1731,7 @@ TOOL_REGISTRY = {
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
             args.get('query'),
-            args.get('content_type', 'song'),
+            args.get('content_type'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
@@ -1741,6 +1741,20 @@ TOOL_REGISTRY = {
     },
     "agent_queue_youtube_music": {
         "function_name": "agent_queue_youtube_music",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('query'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: {"error": "Query is required."} if not args.get('query') else None
+    },
+    "agent_play_next_youtube_music": {
+        "function_name": "agent_play_next_youtube_music",
         "requires_auth": False,
         "is_async": True,
         "needs_websocket": True,
@@ -3876,7 +3890,7 @@ async def get_conversations(
         if not user_id:
             raise HTTPException(status_code=401, detail="User not authenticated")
         
-        logger.info(f"Getting conversations for user {user_id}, since: {since}")
+        logger.debug(f"Getting conversations for user {user_id}, since: {since}")
         
         # Build the query
         query = supabase.table('conversations')\
@@ -3901,7 +3915,7 @@ async def get_conversations(
         else:
             # For full sync (no 'since'), exclude deleted conversations
             query = query.is_('deleted_at', 'null')
-            logger.info(f"Full sync: excluding deleted conversations")
+            logger.debug(f"Full sync: excluding deleted conversations")
         
         response = query.execute()
         conversations = response.data if response.data else []
@@ -3911,8 +3925,6 @@ async def get_conversations(
             logger.info(f"Found {len(conversations)} conversations for user {user_id}:")
             for conv in conversations[:3]:  # Log first 3 conversations
                 logger.info(f"  - ID {conv['id']}: '{conv['title'][:30]}...' updated_at: {conv['updated_at']}")
-        else:
-            logger.warning(f"No conversations found for user {user_id} with filter since={since}")
         
         # Return with server timestamp for next incremental sync
         result = {
@@ -3922,7 +3934,7 @@ async def get_conversations(
             'count': len(conversations)
         }
         
-        logger.info(f"Returning {len(conversations)} conversations (incremental: {since is not None})")
+        logger.debug(f"Returning {len(conversations)} conversations (incremental: {since is not None})")
         return result
         
     except Exception as e:
@@ -4606,6 +4618,12 @@ async def get_conversation_pending_requests(
         return {"has_pending": False, "request_ids": []}
 
 
+# Dump reasons that should NOT trigger the Android autofix pipeline.
+# Autofix targets client-side Android bugs; rage shakes are usually UX feedback,
+# and server_error_5xx reports describe server-side failures (handled separately).
+NON_AUTOFIX_DUMP_REASONS = {"rage_shake", "server_error_5xx"}
+
+
 @app.post("/ui-dumps", response_model=UiDumpResponse)
 async def create_ui_dump(
     ui_dump: UiDumpCreate,
@@ -4665,8 +4683,9 @@ async def create_ui_dump(
         logger.info(f"Saved UI dump for user {user_id}: reason={ui_dump.dump_reason}, id={row['id']}")
 
         # Trigger auto-fix pipeline for screen agent errors.
-        # Skip for rage shakes and emulator dumps (dev/CI noise).
-        if ui_dump.dump_reason != "rage_shake" and not ui_dump.is_emulator and not ui_dump.expected_failure:
+        # Skip for rage shakes, server-side error reports, and emulator dumps (dev/CI noise).
+        # Autofix targets Android client bugs; server-side 5xx reports don't belong in that loop.
+        if ui_dump.dump_reason not in NON_AUTOFIX_DUMP_REASONS and not ui_dump.is_emulator and not ui_dump.expected_failure:
             asyncio.create_task(schedule_autofix_trigger())
         else:
             logger.info(
@@ -4856,13 +4875,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # Note: USER messages shouldn't have cancelled_ids (only ASSISTANT messages cancel previous ones)
 
         # Debug logging for optimistic ID migration investigation
-        logger.info(f"🔧 MIGRATION_DEBUG: session_conversation_id={session_conversation_id}, real_conversation_id={real_conversation_id}")
-        logger.info(f"🔧 MIGRATION_DEBUG: client_conversation_id={client_conversation_id}")
-        logger.info(f"🔧 MIGRATION_DEBUG: Is migration? {real_conversation_id and real_conversation_id != session_conversation_id}")
-        logger.info(f"🔧 MIGRATION_DEBUG: websocket is {'present' if websocket else 'None'}")
+        logger.debug(f"🔧 MIGRATION_DEBUG: session_conversation_id={session_conversation_id}, real_conversation_id={real_conversation_id}")
+        logger.debug(f"🔧 MIGRATION_DEBUG: client_conversation_id={client_conversation_id}")
+        logger.debug(f"🔧 MIGRATION_DEBUG: Is migration? {real_conversation_id and real_conversation_id != session_conversation_id}")
+        logger.debug(f"🔧 MIGRATION_DEBUG: websocket is {'present' if websocket else 'None'}")
         if websocket:
             try:
-                logger.info(f"🔧 MIGRATION_DEBUG: websocket.client_state={websocket.client_state}")
+                logger.debug(f"🔧 MIGRATION_DEBUG: websocket.client_state={websocket.client_state}")
             except Exception as state_err:
                 logger.warning(f"🔧 MIGRATION_DEBUG: Could not get websocket.client_state: {state_err}")
 
@@ -6047,6 +6066,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             "dump_reason": f"BadRequestError during tool use: {error_code}",
                             "error_message": str(tool_api_error),
                             "conversation_id": session_conversation_id,
+                            "ui_hierarchy": "",
                         }
                         supabase.table("screen_agent_ui_dumps").insert(error_dump_data).execute()
                         logger.info(f"Logged BadRequest error to screen_agent_ui_dumps for conversation {session_conversation_id}")

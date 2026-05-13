@@ -26,7 +26,7 @@ def load_conversation_history(user_id: str, conversation_id: Optional[int] = Non
             # Handle optimistic/negative conversation IDs
             actual_conversation_id = conversation_id
             if conversation_id < 0:
-                logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
+                logger.debug(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
                 # Look up the real conversation using the optimistic_chat_id
                 opt_result = supabase.table("conversations")\
                     .select("id")\
@@ -255,7 +255,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         # Handle optimistic conversation IDs (negative IDs)
         original_optimistic_id = None
         if conversation_id is not None and conversation_id < 0:
-            logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
+            logger.debug(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
             original_optimistic_id = conversation_id
 
             # Check cache first if available (direct dict access is safe due to Python's GIL)
@@ -365,7 +365,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             logger.warning(f"Created NEW conversation {conversation_id} for user {user_id} at {created_at} (updated_at: {updated_at})")
         else:
             # Verify the conversation exists and is not soft-deleted
-            logger.info(f"Validating conversation {conversation_id} for user {user_id}")
+            logger.debug(f"Validating conversation {conversation_id} for user {user_id}")
             conv_check = supabase.table("conversations")\
                 .select("id")\
                 .eq("id", conversation_id)\
@@ -377,22 +377,25 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 logger.error(f"Conversation {conversation_id} not found or is soft-deleted for user {user_id}")
                 return None
 
-            logger.info(f"Using existing conversation {conversation_id} for user {user_id}")
+            logger.debug(f"Using existing conversation {conversation_id} for user {user_id}")
 
         # Save the message
         logger.info(f"Attempting to save {message_sender} message to conversation_id={conversation_id}, request_id={request_id}, content_type={content_type}")
 
-        # Dedupe USER messages by (conversation_id, request_id). A client that retries a
-        # successfully-sent message (e.g. orphan-retry after WS disconnect) hits us with the
-        # same request_id; without this, supabase gets a second row that never gets cleaned
-        # up. Each fresh user input gets a new UUID, so this only collides on retries.
-        if message_sender == "USER" and request_id and conversation_id and conversation_id > 0:
+        # Dedupe USER text messages by (conversation_id, request_id). A client that retries
+        # a successfully-sent text message (e.g. orphan-retry after WS disconnect) hits us
+        # with the same request_id; without this, supabase gets a second row that never gets
+        # cleaned up. Each fresh user input gets a new UUID, so this only collides on retries.
+        # Scoped to content_type="text" so server-side PENDING tool_result writes (which
+        # share the user's request_id and message_sender=USER) are not swallowed.
+        if message_sender == "USER" and content_type == "text" and request_id and conversation_id and conversation_id > 0:
             try:
                 existing = supabase.table("messages") \
                     .select("id") \
                     .eq("conversation_id", conversation_id) \
                     .eq("request_id", request_id) \
                     .eq("message_sender", "USER") \
+                    .eq("content_type", "text") \
                     .limit(1).execute()
                 if existing.data:
                     existing_id = existing.data[0]["id"]
@@ -508,7 +511,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 f"USER messages require client_timestamp, ASSISTANT messages require request_id with existing messages."
             )
 
-        logger.info(f"Inserting message with timestamp: {message_data['timestamp']}")
+        logger.debug(f"Inserting message with timestamp: {message_data['timestamp']}")
         result = supabase.table("messages").insert(message_data).execute()
 
         if not result.data:
@@ -519,9 +522,8 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         saved_message = result.data[0]
         message_id = saved_message.get("id")
 
-        # Debug: Log what timestamp was actually saved
         actual_timestamp = saved_message.get("timestamp")
-        logger.info(f"DEBUG: Message {message_id} saved with timestamp: {actual_timestamp}")
+        logger.debug(f"Message {message_id} saved with timestamp: {actual_timestamp}")
         saved_conv_id = saved_message.get("conversation_id")
         logger.info(f"Successfully saved {message_sender} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}, content_type={content_type}")
 
@@ -617,7 +619,7 @@ def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_cont
                 logger.error(f"user_id required to resolve optimistic conversation_id {conversation_id}")
                 return False
 
-            logger.info(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
+            logger.debug(f"Received optimistic conversation ID {conversation_id}, looking up real ID")
             # Look up the real conversation using the optimistic_chat_id
             conv_result = supabase.table("conversations")\
                 .select("id")\
