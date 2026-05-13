@@ -463,7 +463,7 @@ music_tools = [
                 "content_type": {
                     "type": "string",
                     "enum": ["song", "album", "artist", "video", "episode", "community_playlist"],
-                    "description": "Optional. Only include when the user's request is clearly not a song: 'album' for albums, 'artist' for artist pages/radio, 'video' for music videos, 'episode' for podcasts, 'community_playlist' for genre-based or playlist requests. Omit for ordinary song requests."
+                    "description": "Optional. Only include when the user's request is clearly not a song: 'album' for albums, 'artist' for artist pages/radio (e.g. 'music by Taylor Swift' or 'play some Bjork'), 'video' for music videos, 'episode' for podcasts, 'community_playlist' for types of music or playlist requests (e.g. 'play some indie rock'). Omit for ordinary song requests."
                 }
             },
             "required": ["action", "query"]

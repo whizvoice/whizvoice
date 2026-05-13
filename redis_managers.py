@@ -153,7 +153,7 @@ class ChatSessionManager:
                 score = self._timestamp_to_score(timestamp)
                 role = msg.get("role", "unknown")
                 content_preview = str(msg.get("content", ""))[:50]
-                logger.info(f"📝 set() msg[{i}]: role={role}, _timestamp={timestamp}, score={score}, content={content_preview}...")
+                logger.debug(f"📝 set() msg[{i}]: role={role}, _timestamp={timestamp}, score={score}, content={content_preview}...")
                 await self.redis.zadd(key, {json.dumps(msg): score})
 
             await self.redis.expire(key, self.ttl)
