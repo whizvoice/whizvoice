@@ -6066,6 +6066,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                             "dump_reason": f"BadRequestError during tool use: {error_code}",
                             "error_message": str(tool_api_error),
                             "conversation_id": session_conversation_id,
+                            "ui_hierarchy": "",
                         }
                         supabase.table("screen_agent_ui_dumps").insert(error_dump_data).execute()
                         logger.info(f"Logged BadRequest error to screen_agent_ui_dumps for conversation {session_conversation_id}")
