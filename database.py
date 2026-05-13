@@ -382,17 +382,20 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         # Save the message
         logger.info(f"Attempting to save {message_sender} message to conversation_id={conversation_id}, request_id={request_id}, content_type={content_type}")
 
-        # Dedupe USER messages by (conversation_id, request_id). A client that retries a
-        # successfully-sent message (e.g. orphan-retry after WS disconnect) hits us with the
-        # same request_id; without this, supabase gets a second row that never gets cleaned
-        # up. Each fresh user input gets a new UUID, so this only collides on retries.
-        if message_sender == "USER" and request_id and conversation_id and conversation_id > 0:
+        # Dedupe USER text messages by (conversation_id, request_id). A client that retries
+        # a successfully-sent text message (e.g. orphan-retry after WS disconnect) hits us
+        # with the same request_id; without this, supabase gets a second row that never gets
+        # cleaned up. Each fresh user input gets a new UUID, so this only collides on retries.
+        # Scoped to content_type="text" so server-side PENDING tool_result writes (which
+        # share the user's request_id and message_sender=USER) are not swallowed.
+        if message_sender == "USER" and content_type == "text" and request_id and conversation_id and conversation_id > 0:
             try:
                 existing = supabase.table("messages") \
                     .select("id") \
                     .eq("conversation_id", conversation_id) \
                     .eq("request_id", request_id) \
                     .eq("message_sender", "USER") \
+                    .eq("content_type", "text") \
                     .limit(1).execute()
                 if existing.data:
                     existing_id = existing.data[0]["id"]
