@@ -800,7 +800,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_close_app",
-        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away. This function automatically full screens Google Maps if there is an active Google Maps navigation in overlay mode, so the user can continue their navigation.",
+        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away, or says something like 'that's it' or 'that's all' or 'I'm good now'. This function automatically full screens Google Maps if there is an active Google Maps navigation in overlay mode, so the user can continue their navigation.",
         "input_schema": {
             "type": "object",
             "properties": {},
