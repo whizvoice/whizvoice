@@ -692,14 +692,14 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_draft_message",
-        "description": "Draft a message and show it in an overlay for user review. Works with both WhatsApp and SMS (Google Messages). The app will be opened and navigated to the specified chat automatically. You MUST use this BEFORE sending any message, so the user can review and confirm. The message appears in a yellow overlay. If editing a previously drafted message, you MUST provide previous_text to show tracked changes (deletions in red strikethrough, additions in blue). If user gave you some instruction but you're not sure what the user wants to say exactly, just show the draft message with your best guess, so the user can see it and copy edit.",
+        "description": "Draft a message and show it in an overlay for user review. Three modes: (1) WhatsApp — set app='whatsapp' and provide contact_name; the app will be opened and navigated to that chat automatically. (2) SMS / Google Messages — set app='sms' and provide contact_name; same auto-navigation. (3) Generic — omit app to draft into whatever app is currently in the foreground (Signal, Telegram, Discord, Slack, brightwheel, any compose field, etc.); does NOT open or switch apps, just uses the current one and does not need contact_name. You MUST use this BEFORE sending any message, so the user can review and confirm. The message appears in a yellow overlay. If editing a previously drafted message, you MUST provide previous_text to show tracked changes (deletions in red strikethrough, additions in blue). If user gave you some instruction but you're not sure what the user wants to say exactly, just show the draft message with your best guess, so the user can see it and copy edit.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "app": {
                     "type": "string",
                     "enum": ["whatsapp", "sms"],
-                    "description": "Which messaging app to use"
+                    "description": "Optional. Set to 'whatsapp' or 'sms' to open that messaging app and navigate to a chat. Omit to draft into the app currently in the foreground."
                 },
                 "message": {
                     "type": "string",
@@ -707,34 +707,34 @@ messaging_tools = [
                 },
                 "contact_name": {
                     "type": "string",
-                    "description": "The name, phone number, or contact of the recipient. The tool will automatically navigate to this chat if not already open."
+                    "description": "The name, phone number, or contact of the recipient. Required when app is 'whatsapp' or 'sms' so the tool can navigate to that chat. Not needed (and ignored) when app is omitted."
                 },
                 "previous_text": {
                     "type": "string",
                     "description": "The previous version of the message text. You MUST provide this when modifying a previously drafted message to show tracked changes. If there isn't a previously drafted version, don't use this parameter."
                 }
             },
-            "required": ["app", "message", "contact_name"]
+            "required": ["message"]
         }
     },
     {
         "type": "custom",
         "name": "agent_send_message",
-        "description": "Send a message via WhatsApp or SMS (Google Messages). The app will be opened automatically if not already open. IMPORTANT: You MUST have already: 1) Drafted the message (agent_draft_message), 2) Received explicit user confirmation that they are ready to send. This tool fills out the text input field and clicks the send button.",
+        "description": "Send a previously drafted message. When app is 'whatsapp' or 'sms', opens that messaging app if needed and taps its send button. When app is omitted, taps the send button in whatever app is currently in the foreground (works for Signal, Telegram, Discord, Slack, and any other compose field). IMPORTANT: You MUST have already: 1) Drafted the message (agent_draft_message), 2) Received explicit user confirmation that they are ready to send.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "app": {
                     "type": "string",
                     "enum": ["whatsapp", "sms"],
-                    "description": "Which messaging app to use"
+                    "description": "Optional. Set to 'whatsapp' or 'sms' to send via that messaging app. Omit to send in the app currently in the foreground."
                 },
                 "message": {
                     "type": "string",
                     "description": "The exact message text that was drafted and confirmed by the user"
                 }
             },
-            "required": ["app", "message"]
+            "required": ["message"]
         }
     },
     {
