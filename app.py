@@ -1009,8 +1009,8 @@ async def _route_agent_calendar_event(args, user_id, kwargs):
         return await agent_save_calendar_event(
             args.get('title'), args.get('begin_time'), args.get('end_time'),
             args.get('description'), args.get('location'), args.get('all_day', False),
-            args.get('recurrence'), args.get('availability'), args.get('access_level'),
-            args.get('timezone'),
+            args.get('attendees'), args.get('recurrence'), args.get('availability'),
+            args.get('access_level'), args.get('timezone'),
             user_id, kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
         )
 
@@ -1655,6 +1655,7 @@ TOOL_REGISTRY = {
             args.get('description'),
             args.get('location'),
             args.get('all_day', False),
+            args.get('attendees'),
             args.get('recurrence'),
             args.get('availability'),
             args.get('access_level'),
