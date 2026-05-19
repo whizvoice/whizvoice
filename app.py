@@ -119,7 +119,6 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
 6. For music playback, use the agent_youtube_music tool (currently we only support YouTube Music, not Spotify).
 7. For deciding on a random color when a list of colors isn't specified, ALWAYS use the pick_random_color tool
 8. For weather, use the get_weather tool with the appropriate days_ahead parameter (0 = today, 1 = tomorrow, etc.)
-9. Whenever you need to reason about dates or times (including "today", "tomorrow", "this week", scheduling, deadlines, etc.), you MUST call get_current_datetime first. Never guess the date.
 
 IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather than just describing what you would do.
 
@@ -623,6 +622,11 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         else:
             tools_to_send = tools
 
+    current_dt = get_current_datetime(user_id) if user_id else get_current_datetime()
+    if current_dt.startswith("Error"):
+        logger.warning(f"[CLAUDE_CONTEXT] get_current_datetime fallback for user={user_id}: {current_dt}")
+        current_dt = get_current_datetime()
+
     api_params = {
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 1000,
@@ -632,6 +636,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 "type": "text",
                 "text": CLAUDE_SYSTEM_PROMPT,
                 "cache_control": {"type": "ephemeral"}
+            },
+            {
+                "type": "text",
+                "text": f"Current date and time (user's local timezone): {current_dt}. Use this for all relative date reasoning ('today', 'yesterday', 'tomorrow', 'this week')."
             }
         ],
         "stream": stream
