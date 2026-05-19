@@ -19,7 +19,7 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
-from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories, agent_press_back, agent_get_ui, agent_click, agent_insert_text
+from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_fitbit_add_quick_calories, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
 from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
@@ -119,7 +119,6 @@ CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can hel
 6. For music playback, use the agent_youtube_music tool (currently we only support YouTube Music, not Spotify).
 7. For deciding on a random color when a list of colors isn't specified, ALWAYS use the pick_random_color tool
 8. For weather, use the get_weather tool with the appropriate days_ahead parameter (0 = today, 1 = tomorrow, etc.)
-9. Whenever you need to reason about dates or times (including "today", "tomorrow", "this week", scheduling, deadlines, etc.), you MUST call get_current_datetime first. Never guess the date.
 
 IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather than just describing what you would do.
 
@@ -623,6 +622,11 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         else:
             tools_to_send = tools
 
+    current_dt = get_current_datetime(user_id) if user_id else get_current_datetime()
+    if current_dt.startswith("Error"):
+        logger.warning(f"[CLAUDE_CONTEXT] get_current_datetime fallback for user={user_id}: {current_dt}")
+        current_dt = get_current_datetime()
+
     api_params = {
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 1000,
@@ -632,6 +636,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 "type": "text",
                 "text": CLAUDE_SYSTEM_PROMPT,
                 "cache_control": {"type": "ephemeral"}
+            },
+            {
+                "type": "text",
+                "text": f"Current date and time (user's local timezone): {current_dt}. Use this for all relative date reasoning ('today', 'yesterday', 'tomorrow', 'this week')."
             }
         ],
         "stream": stream
@@ -1009,8 +1017,8 @@ async def _route_agent_calendar_event(args, user_id, kwargs):
         return await agent_save_calendar_event(
             args.get('title'), args.get('begin_time'), args.get('end_time'),
             args.get('description'), args.get('location'), args.get('all_day', False),
-            args.get('recurrence'), args.get('availability'), args.get('access_level'),
-            args.get('timezone'),
+            args.get('attendees'), args.get('recurrence'), args.get('availability'),
+            args.get('access_level'), args.get('timezone'),
             user_id, kwargs.get('websocket'), kwargs.get('tool_result_handler'), kwargs.get('conversation_id')
         )
 
@@ -1027,29 +1035,43 @@ async def _route_agent_select_chat(args, user_id, kwargs):
 
 
 async def _route_agent_draft_message(args, user_id, kwargs):
-    """Route agent_draft_message to WhatsApp or SMS based on app."""
+    """Route agent_draft_message to WhatsApp, SMS, or the generic foreground-app handler based on app."""
     ws = kwargs.get('websocket')
     trh = kwargs.get('tool_result_handler')
     cid = kwargs.get('conversation_id')
-    if args.get('app') == 'whatsapp':
+    app = args.get('app')
+    if app == 'whatsapp':
         return await agent_whatsapp_draft_message(
             args.get('message'), args.get('contact_name'), user_id, ws, trh, cid, args.get('previous_text')
         )
-    else:
+    if app == 'sms':
         return await agent_sms_draft_message(
             args.get('message'), args.get('contact_name'), user_id, ws, trh, cid, args.get('previous_text')
         )
+    # Generic path: forward to the device's executeDraftMessage handler. Does NOT
+    # open any app — drafts into whatever app is currently in the foreground.
+    params = {"message": args.get('message')}
+    if args.get('previous_text'):
+        params['previous_text'] = args.get('previous_text')
+    return await _send_tool_and_wait(
+        "agent_draft_message", params, user_id, ws, trh, cid, timeout=10.0
+    )
 
 
 async def _route_agent_send_message(args, user_id, kwargs):
-    """Route agent_send_message to WhatsApp or SMS based on app."""
+    """Route agent_send_message to WhatsApp, SMS, or the generic foreground-app handler based on app."""
     ws = kwargs.get('websocket')
     trh = kwargs.get('tool_result_handler')
     cid = kwargs.get('conversation_id')
-    if args.get('app') == 'whatsapp':
+    app = args.get('app')
+    if app == 'whatsapp':
         return await agent_whatsapp_send_message(args.get('message'), user_id, ws, trh, cid)
-    else:
+    if app == 'sms':
         return await agent_sms_send_message(args.get('message'), user_id, ws, trh, cid)
+    # Generic path: tap the send button in whatever app is currently in the foreground.
+    return await _send_tool_and_wait(
+        "agent_send_message", {}, user_id, ws, trh, cid, timeout=10.0
+    )
 
 
 async def _route_agent_youtube_music(args, user_id, kwargs):
@@ -1252,9 +1274,8 @@ TOOL_REGISTRY = {
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
         "validation": lambda args: (
-            {"error": "app is required."} if not args.get('app') else
             {"error": "message is required."} if not args.get('message') else
-            {"error": "contact_name is required."} if not args.get('contact_name') else
+            {"error": "contact_name is required when app is 'whatsapp' or 'sms'."} if args.get('app') in ('whatsapp', 'sms') and not args.get('contact_name') else
             None
         )
     },
@@ -1265,7 +1286,6 @@ TOOL_REGISTRY = {
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (args, user_id, kwargs),
         "validation": lambda args: (
-            {"error": "app is required."} if not args.get('app') else
             {"error": "message is required."} if not args.get('message') else
             None
         )
@@ -1643,6 +1663,7 @@ TOOL_REGISTRY = {
             args.get('description'),
             args.get('location'),
             args.get('all_day', False),
+            args.get('attendees'),
             args.get('recurrence'),
             args.get('availability'),
             args.get('access_level'),
@@ -2063,6 +2084,23 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": None
+    },
+    "agent_peek_app": {
+        "function_name": "agent_peek_app",
+        "requires_auth": False,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('app_name'),
+            args.get('scope', 'full'),
+            user_id,
+            kwargs.get('websocket'),
+            kwargs.get('tool_result_handler'),
+            kwargs.get('conversation_id')
+        ),
+        "validation": lambda args: (
+            {"error": "app_name is required."} if args.get('app_name') is None else None
+        )
     },
     "agent_click": {
         "function_name": "agent_click",

@@ -715,6 +715,18 @@ async def agent_get_ui(scope: str = "interactable", user_id: str = None, websock
     )
 
 
+async def agent_peek_app(app_name: str, scope: str = "full", user_id: str = None,
+                         websocket=None, tool_result_handler=None,
+                         conversation_id: str = None) -> dict:
+    """Briefly bring a target app to the foreground, dump its UI, then restore the
+    previous app. Read-only — useful for answering questions about backgrounded apps."""
+    params = {"app_name": app_name, "scope": scope}
+    return await _send_tool_and_wait(
+        "agent_peek_app", params, user_id, websocket, tool_result_handler, conversation_id,
+        timeout=10.0,
+    )
+
+
 async def agent_click(element_id: int, user_id: str = None, websocket=None,
                       tool_result_handler=None, conversation_id: str = None) -> dict:
     """Click the element identified by element_id from the last agent_get_ui call."""
@@ -788,7 +800,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_close_app",
-        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away. This function automatically full screens Google Maps if there is an active Google Maps navigation in overlay mode, so the user can continue their navigation.",
+        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away, or says something like 'that's it' or 'that's all' or 'I'm good now'. This function automatically full screens Google Maps if there is an active Google Maps navigation in overlay mode, so the user can continue their navigation.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -854,6 +866,26 @@ screen_agent_tools = [
                 }
             },
             "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_peek_app",
+        "description": "Briefly bring a target app to the foreground, dump its on-screen UI as text, and return to whatever app the user was looking at. Use this to answer questions about the current state of a backgrounded app (e.g., \"what song is playing in YouTube Music?\". The user briefly sees the target app flash on screen (~1s). This is READ-ONLY — the previous app is restored immediately after the dump, so you cannot follow up with agent_click or agent_insert_text on the peeked app. If you need to interact with the app, use agent_launch_app + agent_get_ui instead.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "app_name": {
+                    "type": "string",
+                    "description": "Name of the app to peek (e.g., 'YouTube Music', 'WhatsApp', 'Maps'). Same fuzzy matching as agent_launch_app."
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["full", "interactable"],
+                    "description": "\"full\" (default for peek) returns the complete tree including non-interactable text — best when reading state. \"interactable\" returns only clickable/editable nodes."
+                }
+            },
+            "required": ["app_name"]
         }
     },
     {

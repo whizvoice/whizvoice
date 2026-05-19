@@ -202,9 +202,9 @@ async def agent_draft_calendar_event(title: str, begin_time: str, end_time: str 
 
 async def agent_save_calendar_event(title: str, begin_time: str, end_time: str = None,
                                      description: str = None, location: str = None,
-                                     all_day: bool = False, recurrence: str = None,
-                                     availability: str = None, access_level: str = None,
-                                     timezone: str = None,
+                                     all_day: bool = False, attendees: str = None,
+                                     recurrence: str = None, availability: str = None,
+                                     access_level: str = None, timezone: str = None,
                                      user_id: str = None, websocket=None,
                                      tool_result_handler=None, conversation_id: str = None) -> dict:
     """Save a calendar event via ContentProvider insert and dismiss the draft UI."""
@@ -215,6 +215,8 @@ async def agent_save_calendar_event(title: str, begin_time: str, end_time: str =
         params["description"] = description
     if location:
         params["location"] = location
+    if attendees:
+        params["attendees"] = attendees
     if recurrence:
         params["recurrence"] = recurrence
     if availability:
@@ -442,7 +444,7 @@ device_control_tools = [
                 },
                 "attendees": {
                     "type": "string",
-                    "description": "Comma-separated email addresses of attendees (e.g., 'alice@example.com,bob@example.com'). Only used for 'draft' action."
+                    "description": "Comma-separated email addresses of attendees (e.g., 'alice@example.com,bob@example.com'). Attendees are saved on the event for both 'draft' and 'save' actions. For 'save', the attendee will appear on the event in Google Calendar, and Google may send invitation emails via its sync adapter — but email delivery is not guaranteed by Android's Calendar Provider. If the user asks whether invites went out, tell them honestly that the attendee was added to the event but email delivery depends on Google Calendar's sync."
                 },
                 "recurrence": {
                     "type": "string",
