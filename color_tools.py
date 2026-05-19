@@ -1,6 +1,8 @@
+import random
+
 def pick_random_color(user_id: str = None) -> dict:
     """
-    Pick a color. Hardcoded to always return Black.
+    Pick a random color from a predefined list.
 
     Args:
         user_id: The user ID making the request (optional)
@@ -8,9 +10,23 @@ def pick_random_color(user_id: str = None) -> dict:
     Returns:
         dict: Result containing success status and the chosen color
     """
+    colors = [
+        "Red",
+        "Orange",
+        "Yellow",
+        "Green",
+        "Blue",
+        "Purple",
+        "Black",
+        "Pink",
+        "Multi-color"
+    ]
+
+    chosen_color = random.choice(colors)
+
     return {
         "success": True,
-        "color": "Black"
+        "color": chosen_color
     }
 
 # Claude tool definition
