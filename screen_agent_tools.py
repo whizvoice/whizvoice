@@ -572,31 +572,37 @@ async def agent_close_other_app(app_name: str, user_id: str = None, websocket = 
         }
 
 
-async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, websocket = None,
-                                          tool_result_handler = None, conversation_id: str = None) -> dict:
+async def agent_log_health_data(data_type: str, value: float, user_id: str = None, websocket = None,
+                                tool_result_handler = None, conversation_id: str = None) -> dict:
     """
-    Add quick calories to the user's Fitbit food log for today.
+    Log a health data point to the user's device.
 
-    This tool sends a tool_execution message to the Android app via WebSocket,
-    which automates the Fitbit UI to log the specified calories.
+    The Android client writes to Health Connect first. For data_type="calories" it
+    falls back to Fitbit UI automation if Health Connect is unavailable or lacks
+    write permission. For data_type="weight", it is Health-Connect-only.
 
     Args:
-        calories: The number of calories to log
+        data_type: "calories" or "weight"
+        value: kcal for calories, kg for weight
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
         conversation_id: The conversation ID for context
 
     Returns:
-        A dictionary containing the result of the operation
+        A dictionary containing the result of the operation, including a 'source'
+        field ('health_connect' or 'fitbit_ui') indicating where the data landed.
     """
     try:
+        if data_type not in ("calories", "weight"):
+            return {"error": f"Unknown data_type: {data_type}", "success": False}
+
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
-        logger.info(f"Adding quick calories to Fitbit: {calories} (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Logging health data: type={data_type} value={value} (user: {user_id}, request: {tool_request_id})")
 
         if not websocket:
-            logger.error("No WebSocket connection available for fitbit_add_quick_calories")
+            logger.error("No WebSocket connection available for agent_log_health_data")
             return {
                 "error": "No connection to device available",
                 "success": False
@@ -604,10 +610,11 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
 
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "agent_fitbit_add_quick_calories",
+            "tool": "agent_log_health_data",
             "request_id": tool_request_id,
             "params": {
-                "calories": calories
+                "data_type": data_type,
+                "value": value,
             },
             "conversation_id": conversation_id
         }
@@ -615,7 +622,7 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
         try:
             message_json = json.dumps(tool_execution_message)
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent agent_fitbit_add_quick_calories command for {calories} calories")
+            logger.info(f"Successfully sent agent_log_health_data command: {data_type}={value}")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -625,7 +632,7 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
             }
 
         if tool_result_handler:
-            logger.info(f"Waiting for fitbit_add_quick_calories result (request_id: {tool_request_id})")
+            logger.info(f"Waiting for agent_log_health_data result (request_id: {tool_request_id})")
 
             try:
                 result = await tool_result_handler.wait_for_tool_result(
@@ -633,11 +640,11 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
                     timeout=30.0
                 )
 
-                logger.info(f"Fitbit add quick calories result for {tool_request_id}: {result}")
+                logger.info(f"agent_log_health_data result for {tool_request_id}: {result}")
                 return result
 
             except Exception as e:
-                logger.error(f"Error waiting for fitbit_add_quick_calories result: {str(e)}")
+                logger.error(f"Error waiting for agent_log_health_data result: {str(e)}")
                 return {
                     "status": "error",
                     "error": f"Error waiting for device response: {str(e)}",
@@ -646,14 +653,14 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
         else:
             return {
                 "status": "sent",
-                "message": f"Command to add {calories} quick calories sent to device",
+                "message": f"Command to log {value} {data_type} sent to device",
                 "request_id": tool_request_id
             }
 
     except Exception as e:
-        logger.error(f"Error in fitbit_add_quick_calories for user {user_id}: {str(e)}")
+        logger.error(f"Error in agent_log_health_data for user {user_id}: {str(e)}")
         return {
-            "error": f"Failed to add quick calories: {str(e)}",
+            "error": f"Failed to log health data: {str(e)}",
             "success": False
         }
 
@@ -829,17 +836,22 @@ screen_agent_tools = [
     },
     {
         "type": "custom",
-        "name": "agent_fitbit_add_quick_calories",
-        "description": "Add quick calories to the user's Fitbit food log for today. This opens the Fitbit app, navigates to the Food section, and logs the specified number of calories. Use this when the user wants to log calories to Fitbit.",
+        "name": "agent_log_health_data",
+        "description": "Log a health data point on the user's device. For data_type='calories', writes to Health Connect (Google Health / Fitbit / Samsung Health / etc.); falls back to Fitbit UI automation if Health Connect is unavailable. For data_type='weight', writes to Health Connect only. Use this when the user wants to log calories consumed or a body weight measurement.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "calories": {
-                    "type": "integer",
-                    "description": "The number of calories to log (e.g., 500, 1200)"
+                "data_type": {
+                    "type": "string",
+                    "enum": ["calories", "weight"],
+                    "description": "Which kind of data to log. 'calories' = food calories consumed; 'weight' = body weight."
+                },
+                "value": {
+                    "type": "number",
+                    "description": "The numeric value. For 'calories', kilocalories (e.g. 500). For 'weight', kilograms (e.g. 72.5). Convert from lbs to kg before calling."
                 }
             },
-            "required": ["calories"]
+            "required": ["data_type", "value"]
         }
     },
     {

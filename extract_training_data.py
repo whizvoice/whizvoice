@@ -37,7 +37,7 @@ ALL_TOOLS = {
     "agent_set_volume", "agent_lookup_phone_contacts",
     "agent_app_control", "agent_launch_app", "agent_close_app", "agent_open_app", "agent_close_other_app",
     "agent_disable_continuous_listening", "agent_set_tts_enabled",
-    "cancel_pending_screen_tools", "agent_fitbit_add_quick_calories",
+    "cancel_pending_screen_tools", "agent_log_health_data",
     "agent_select_chat", "agent_draft_message", "agent_send_message", "agent_dismiss_draft",
     "agent_whatsapp_select_chat", "agent_whatsapp_send_message", "agent_whatsapp_draft_message",
     "agent_sms_select_chat", "agent_sms_send_message", "agent_sms_draft_message",
