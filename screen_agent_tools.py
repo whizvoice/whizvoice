@@ -894,7 +894,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_log_health_data",
-        "description": "Log a health data point on the user's device. For data_type='calories', writes to Health Connect (Google Health / Fitbit / Samsung Health / etc.); falls back to Fitbit UI automation if Health Connect is unavailable. For data_type='weight', writes to Health Connect only. Use this when the user wants to log calories consumed or a body weight measurement. On successful Health Connect writes, the result may include an `unconnected_health_apps` array — this means the user won't see this data. Only if you see `unconnected_health_apps`, you MUST ask the user if they want to connect an app so that they can see the data. When they agree you can use agent_open_health_app_settings for them to connect an app.",
+        "description": "Log a health data point on the user's device. Use this when the user wants to log calories consumed or a body weight measurement. If the result has `reason: \"requires_connection\"`, the value WAS written to Health Connect, but no health app is connected so the user can't see the logged data. The `unconnected_health_apps` array names the apps that aren't connected. EVERY TIME you get this result, even if you already offered earlier in the conversation, you MUST name the unconnected app(s) and tell the user the data won't show up there until they set up the connection, and offer to open Health Connect settings via agent_open_health_app_settings so user can connect an app.",
         "input_schema": {
             "type": "object",
             "properties": {
