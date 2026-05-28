@@ -665,27 +665,23 @@ async def agent_log_health_data(data_type: str, value: float, user_id: str = Non
         }
 
 
-async def agent_open_health_app_settings(package_name: str, app_name: str, user_id: str = None,
+async def agent_open_health_app_settings(user_id: str = None,
                                          websocket = None, tool_result_handler = None,
                                          conversation_id: str = None) -> dict:
     """
-    Ask the user (via an in-app dialog) whether to open a specific health app so they
-    can connect it to Health Connect. On confirm, the Android client launches the app.
+    Ask the user (via an in-app dialog) whether to open Health Connect settings so they
+    can connect an app. On confirm, the Android client launches Health Connect's
+    'Your health apps' page, where the user picks which app to wire up.
 
     Use this as a follow-up when agent_log_health_data returns an `unconnected_health_apps`
-    array — for each entry, you can offer to open it for the user.
-
-    Args:
-        package_name: Android package name (e.g. "com.fitbit.FitbitMobile")
-        app_name: User-facing name (e.g. "Google Health")
-        user_id, websocket, tool_result_handler, conversation_id: standard
+    array and the user agrees to set up the connection.
 
     Returns:
-        Dict with `success: bool` indicating whether the app was opened.
+        Dict with `success: bool` indicating whether the settings page was opened.
     """
     try:
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
-        logger.info(f"Opening health app settings: {app_name} ({package_name}) (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Opening Health Connect settings (user: {user_id}, request: {tool_request_id})")
 
         if not websocket:
             return {"error": "No connection to device available", "success": False}
@@ -694,16 +690,13 @@ async def agent_open_health_app_settings(package_name: str, app_name: str, user_
             "type": "tool_execution",
             "tool": "agent_open_health_app_settings",
             "request_id": tool_request_id,
-            "params": {
-                "package_name": package_name,
-                "app_name": app_name,
-            },
+            "params": {},
             "conversation_id": conversation_id,
         }
 
         try:
             await websocket.send_text(json.dumps(tool_execution_message))
-            logger.info(f"Sent agent_open_health_app_settings command for {app_name}")
+            logger.info("Sent agent_open_health_app_settings command")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {e}")
             return {"status": "error", "error": f"Failed to send command: {e}", "success": False}
@@ -721,12 +714,12 @@ async def agent_open_health_app_settings(package_name: str, app_name: str, user_
 
         return {
             "status": "sent",
-            "message": f"Command to open {app_name} sent to device",
+            "message": "Command to open Health Connect settings sent to device",
             "request_id": tool_request_id,
         }
     except Exception as e:
         logger.error(f"Error in agent_open_health_app_settings for user {user_id}: {e}")
-        return {"error": f"Failed to open health app settings: {e}", "success": False}
+        return {"error": f"Failed to open Health Connect settings: {e}", "success": False}
 
 
 async def _send_tool_and_wait(tool_name: str, params: dict, user_id, websocket,
@@ -901,7 +894,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_log_health_data",
-        "description": "Log a health data point on the user's device. For data_type='calories', writes to Health Connect (Google Health / Fitbit / Samsung Health / etc.); falls back to Fitbit UI automation if Health Connect is unavailable. For data_type='weight', writes to Health Connect only. Use this when the user wants to log calories consumed or a body weight measurement. On successful Health Connect writes, the result may include an `unconnected_health_apps` array — this only appears when Whiz is the only app writing to Health Connect, meaning the user likely won't see this data in any of their other apps. When the array is present, surface it as a diagnostic offer (e.g. 'I logged this, but you might not see it show up in Google Health yet — that app isn't connected to Health Connect on your device. Want me to open it so you can set up the connection?') and call agent_open_health_app_settings for whichever app the user picks. If the array is absent, do NOT mention connection setup at all — the user already has a working multi-app Health Connect setup.",
+        "description": "Log a health data point on the user's device. For data_type='calories', writes to Health Connect (Google Health / Fitbit / Samsung Health / etc.); falls back to Fitbit UI automation if Health Connect is unavailable. For data_type='weight', writes to Health Connect only. Use this when the user wants to log calories consumed or a body weight measurement. On successful Health Connect writes, the result may include an `unconnected_health_apps` array — this means the user won't see this data. Only if you see `unconnected_health_apps`, you MUST ask the user if they want to connect an app so that they can see the data. When they agree you can use agent_open_health_app_settings for them to connect an app.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -921,20 +914,11 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_open_health_app_settings",
-        "description": "Open Health Connect's 'Your health apps' settings page so the user can connect a specific app to Health Connect. Shows an in-app confirmation dialog naming the target app, and on confirm launches Health Connect settings (NOT the third-party app itself — the user grants permissions from inside Health Connect). Use this in TWO scenarios: (1) as a follow-up when agent_log_health_data returned an `unconnected_health_apps` array — call once per app the user wants to connect, passing the entry's package_name and name. (2) when the user directly asks to connect a known health app (e.g. 'connect Google Health', 'set up Fitbit with Health Connect', 'connect Samsung Health') — map the user's phrasing to the right package_name (Google Health/Fitbit → 'com.fitbit.FitbitMobile', Google Fit → 'com.google.android.apps.fitness', Samsung Health → 'com.sec.android.app.shealth', MyFitnessPal → 'com.myfitnesspal.android', Cronometer → 'com.cron.cronometer') and call this tool directly. Do NOT call agent_launch_app for Health-Connect-connection requests — this tool's dialog flow is the correct path.",
+        "description": "Open Health Connect's 'Your health apps' settings page so the user can connect a health app to Health Connect. Shows an in-app confirmation dialog, and on confirm launches Health Connect settings (NOT a third-party app itself — the user picks which app to connect from inside Health Connect, and grants permissions there). Use this in TWO scenarios: (1) as a follow-up when agent_log_health_data returned an `unconnected_health_apps` array and the user agrees to set up a connection. (2) when the user directly asks to connect any health app to Health Connect (e.g. 'connect Google Health', 'set up Fitbit with Health Connect', 'connect Samsung Health'). Do NOT call agent_launch_app for Health-Connect-connection requests — this tool's dialog flow is the correct path.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "package_name": {
-                    "type": "string",
-                    "description": "Android package name of the health app to connect. Examples: 'com.fitbit.FitbitMobile' (Google Health / Fitbit), 'com.google.android.apps.fitness' (Google Fit), 'com.sec.android.app.shealth' (Samsung Health), 'com.myfitnesspal.android' (MyFitnessPal), 'com.cron.cronometer' (Cronometer)."
-                },
-                "app_name": {
-                    "type": "string",
-                    "description": "User-facing app name shown in the in-app dialog (e.g. 'Google Health', 'Samsung Health', 'MyFitnessPal'). Use the friendly name the user would recognize."
-                }
-            },
-            "required": ["package_name", "app_name"]
+            "properties": {},
+            "required": []
         }
     },
     {

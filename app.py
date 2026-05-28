@@ -2007,18 +2007,12 @@ TOOL_REGISTRY = {
         "is_async": True,
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
-            args.get('package_name'),
-            args.get('app_name'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id'),
         ),
-        "validation": lambda args: (
-            {"error": "package_name is required."} if not args.get('package_name')
-            else {"error": "app_name is required."} if not args.get('app_name')
-            else None
-        ),
+        "validation": lambda args: None,
     },
     "add_contact_preference": {
         "function_name": "add_contact_preference",
