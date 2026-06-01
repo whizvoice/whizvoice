@@ -270,9 +270,10 @@ def get_latest_app_version(supabase) -> str | None:
     return None
 
 
-def get_unprocessed_errors(supabase, app_version: str, dump_reason: str | None = None):
+def get_unprocessed_errors(supabase, app_versions: list[str], dump_reason: str | None = None):
     """
-    Fetch unprocessed error dumps for the given app version.
+    Fetch unprocessed error dumps for any of the given app versions
+    (clean + dirty variants of the same git hash).
     Groups by dump_reason and picks the representative with the longest ui_hierarchy.
     """
     # Skip screen_agent_context in the initial fetch — it can be ~1MB per row
@@ -288,7 +289,7 @@ def get_unprocessed_errors(supabase, app_version: str, dump_reason: str | None =
     query = (
         supabase.table("screen_agent_ui_dumps")
         .select(columns)
-        .eq("app_version", app_version)
+        .in_("app_version", app_versions)
         .is_("processed_at", "null")
         .not_.is_("ui_hierarchy", "null")
         .neq("expected_failure", True)
@@ -1271,10 +1272,12 @@ def main():
         log.info("No UI dumps found in database")
         return
 
-    log.info(f"Latest app version: {latest_version}")
+    canonical = latest_version.removesuffix("-dirty")
+    matching_versions = [canonical, f"{canonical}-dirty"]
+    log.info(f"Latest app version: {latest_version} (matching: {matching_versions})")
 
     # Get unprocessed errors
-    errors = get_unprocessed_errors(supabase, latest_version, args.dump_reason)
+    errors = get_unprocessed_errors(supabase, matching_versions, args.dump_reason)
     if not errors:
         log.info("No unprocessed errors to fix")
         return

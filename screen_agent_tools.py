@@ -572,31 +572,37 @@ async def agent_close_other_app(app_name: str, user_id: str = None, websocket = 
         }
 
 
-async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, websocket = None,
-                                          tool_result_handler = None, conversation_id: str = None) -> dict:
+async def agent_log_health_data(data_type: str, value: float, user_id: str = None, websocket = None,
+                                tool_result_handler = None, conversation_id: str = None) -> dict:
     """
-    Add quick calories to the user's Fitbit food log for today.
+    Log a health data point to the user's device.
 
-    This tool sends a tool_execution message to the Android app via WebSocket,
-    which automates the Fitbit UI to log the specified calories.
+    The Android client writes to Health Connect first. For data_type="calories" it
+    falls back to Fitbit UI automation if Health Connect is unavailable or lacks
+    write permission. For data_type="weight", it is Health-Connect-only.
 
     Args:
-        calories: The number of calories to log
+        data_type: "calories" or "weight"
+        value: kcal for calories, kg for weight
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
         conversation_id: The conversation ID for context
 
     Returns:
-        A dictionary containing the result of the operation
+        A dictionary containing the result of the operation, including a 'source'
+        field ('health_connect' or 'fitbit_ui') indicating where the data landed.
     """
     try:
+        if data_type not in ("calories", "weight"):
+            return {"error": f"Unknown data_type: {data_type}", "success": False}
+
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
-        logger.info(f"Adding quick calories to Fitbit: {calories} (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Logging health data: type={data_type} value={value} (user: {user_id}, request: {tool_request_id})")
 
         if not websocket:
-            logger.error("No WebSocket connection available for fitbit_add_quick_calories")
+            logger.error("No WebSocket connection available for agent_log_health_data")
             return {
                 "error": "No connection to device available",
                 "success": False
@@ -604,10 +610,11 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
 
         tool_execution_message = {
             "type": "tool_execution",
-            "tool": "agent_fitbit_add_quick_calories",
+            "tool": "agent_log_health_data",
             "request_id": tool_request_id,
             "params": {
-                "calories": calories
+                "data_type": data_type,
+                "value": value,
             },
             "conversation_id": conversation_id
         }
@@ -615,7 +622,7 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
         try:
             message_json = json.dumps(tool_execution_message)
             await websocket.send_text(message_json)
-            logger.info(f"Successfully sent agent_fitbit_add_quick_calories command for {calories} calories")
+            logger.info(f"Successfully sent agent_log_health_data command: {data_type}={value}")
         except Exception as e:
             logger.error(f"Failed to send WebSocket message: {str(e)}")
             return {
@@ -625,7 +632,7 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
             }
 
         if tool_result_handler:
-            logger.info(f"Waiting for fitbit_add_quick_calories result (request_id: {tool_request_id})")
+            logger.info(f"Waiting for agent_log_health_data result (request_id: {tool_request_id})")
 
             try:
                 result = await tool_result_handler.wait_for_tool_result(
@@ -633,11 +640,11 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
                     timeout=30.0
                 )
 
-                logger.info(f"Fitbit add quick calories result for {tool_request_id}: {result}")
+                logger.info(f"agent_log_health_data result for {tool_request_id}: {result}")
                 return result
 
             except Exception as e:
-                logger.error(f"Error waiting for fitbit_add_quick_calories result: {str(e)}")
+                logger.error(f"Error waiting for agent_log_health_data result: {str(e)}")
                 return {
                     "status": "error",
                     "error": f"Error waiting for device response: {str(e)}",
@@ -646,16 +653,73 @@ async def agent_fitbit_add_quick_calories(calories: int, user_id: str = None, we
         else:
             return {
                 "status": "sent",
-                "message": f"Command to add {calories} quick calories sent to device",
+                "message": f"Command to log {value} {data_type} sent to device",
                 "request_id": tool_request_id
             }
 
     except Exception as e:
-        logger.error(f"Error in fitbit_add_quick_calories for user {user_id}: {str(e)}")
+        logger.error(f"Error in agent_log_health_data for user {user_id}: {str(e)}")
         return {
-            "error": f"Failed to add quick calories: {str(e)}",
+            "error": f"Failed to log health data: {str(e)}",
             "success": False
         }
+
+
+async def agent_open_health_app_settings(user_id: str = None,
+                                         websocket = None, tool_result_handler = None,
+                                         conversation_id: str = None) -> dict:
+    """
+    Ask the user (via an in-app dialog) whether to open Health Connect settings so they
+    can connect an app. On confirm, the Android client launches Health Connect's
+    'Your health apps' page, where the user picks which app to wire up.
+
+    Use this as a follow-up when agent_log_health_data returns an `unconnected_health_apps`
+    array and the user agrees to set up the connection.
+
+    Returns:
+        Dict with `success: bool` indicating whether the settings page was opened.
+    """
+    try:
+        tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
+        logger.info(f"Opening Health Connect settings (user: {user_id}, request: {tool_request_id})")
+
+        if not websocket:
+            return {"error": "No connection to device available", "success": False}
+
+        tool_execution_message = {
+            "type": "tool_execution",
+            "tool": "agent_open_health_app_settings",
+            "request_id": tool_request_id,
+            "params": {},
+            "conversation_id": conversation_id,
+        }
+
+        try:
+            await websocket.send_text(json.dumps(tool_execution_message))
+            logger.info("Sent agent_open_health_app_settings command")
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {e}")
+            return {"status": "error", "error": f"Failed to send command: {e}", "success": False}
+
+        if tool_result_handler:
+            try:
+                result = await tool_result_handler.wait_for_tool_result(
+                    request_id=tool_request_id, timeout=70.0
+                )
+                logger.info(f"agent_open_health_app_settings result for {tool_request_id}: {result}")
+                return result
+            except Exception as e:
+                logger.error(f"Error waiting for agent_open_health_app_settings result: {e}")
+                return {"status": "error", "error": f"Error waiting for device: {e}", "success": False}
+
+        return {
+            "status": "sent",
+            "message": "Command to open Health Connect settings sent to device",
+            "request_id": tool_request_id,
+        }
+    except Exception as e:
+        logger.error(f"Error in agent_open_health_app_settings for user {user_id}: {e}")
+        return {"error": f"Failed to open Health Connect settings: {e}", "success": False}
 
 
 async def _send_tool_and_wait(tool_name: str, params: dict, user_id, websocket,
@@ -712,6 +776,18 @@ async def agent_get_ui(scope: str = "interactable", user_id: str = None, websock
     return await _send_tool_and_wait(
         "agent_get_ui", params, user_id, websocket, tool_result_handler, conversation_id,
         timeout=8.0,
+    )
+
+
+async def agent_peek_app(app_name: str, scope: str = "full", user_id: str = None,
+                         websocket=None, tool_result_handler=None,
+                         conversation_id: str = None) -> dict:
+    """Briefly bring a target app to the foreground, dump its UI, then restore the
+    previous app. Read-only — useful for answering questions about backgrounded apps."""
+    params = {"app_name": app_name, "scope": scope}
+    return await _send_tool_and_wait(
+        "agent_peek_app", params, user_id, websocket, tool_result_handler, conversation_id,
+        timeout=10.0,
     )
 
 
@@ -788,7 +864,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_close_app",
-        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away. This function automatically full screens Google Maps if there is an active Google Maps navigation in overlay mode, so the user can continue their navigation.",
+        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away, or says something like 'that's it' or 'that's all' or 'I'm good now'. This function automatically full screens Google Maps if there is an active Google Maps navigation in overlay mode, so the user can continue their navigation.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -817,17 +893,32 @@ screen_agent_tools = [
     },
     {
         "type": "custom",
-        "name": "agent_fitbit_add_quick_calories",
-        "description": "Add quick calories to the user's Fitbit food log for today. This opens the Fitbit app, navigates to the Food section, and logs the specified number of calories. Use this when the user wants to log calories to Fitbit.",
+        "name": "agent_log_health_data",
+        "description": "Log a health data point on the user's device. Use this when the user wants to log calories consumed or a body weight measurement. If the result has `reason: \"requires_connection\"`, the value WAS written to Health Connect, but no health app is connected so the user can't see the logged data. The `unconnected_health_apps` array names the apps that aren't connected. EVERY TIME you get this result, even if you already offered earlier in the conversation, you MUST name the unconnected app(s) and tell the user the data won't show up there until they set up the connection, and offer to open Health Connect settings via agent_open_health_app_settings so user can connect an app.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "calories": {
-                    "type": "integer",
-                    "description": "The number of calories to log (e.g., 500, 1200)"
+                "data_type": {
+                    "type": "string",
+                    "enum": ["calories", "weight"],
+                    "description": "Which kind of data to log. 'calories' = food calories consumed; 'weight' = body weight."
+                },
+                "value": {
+                    "type": "number",
+                    "description": "The numeric value. For 'calories', kilocalories (e.g. 500). For 'weight', kilograms (e.g. 72.5). Convert from lbs to kg before calling."
                 }
             },
-            "required": ["calories"]
+            "required": ["data_type", "value"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_open_health_app_settings",
+        "description": "Open Health Connect's 'Your health apps' settings page so the user can connect a health app to Health Connect. Shows an in-app confirmation dialog, and on confirm launches Health Connect settings (NOT a third-party app itself — the user picks which app to connect from inside Health Connect, and grants permissions there). Use this in TWO scenarios: (1) as a follow-up when agent_log_health_data returned an `unconnected_health_apps` array and the user agrees to set up a connection. (2) when the user directly asks to connect any health app to Health Connect (e.g. 'connect Google Health', 'set up Fitbit with Health Connect', 'connect Samsung Health'). Do NOT call agent_launch_app for Health-Connect-connection requests — this tool's dialog flow is the correct path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     },
     {
@@ -854,6 +945,26 @@ screen_agent_tools = [
                 }
             },
             "required": []
+        }
+    },
+    {
+        "type": "custom",
+        "name": "agent_peek_app",
+        "description": "Briefly bring a target app to the foreground, dump its on-screen UI as text, and return to whatever app the user was looking at. Use this to answer questions about the current state of a backgrounded app (e.g., \"what song is playing in YouTube Music?\". The user briefly sees the target app flash on screen (~1s). This is READ-ONLY — the previous app is restored immediately after the dump, so you cannot follow up with agent_click or agent_insert_text on the peeked app. If you need to interact with the app, use agent_launch_app + agent_get_ui instead.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "app_name": {
+                    "type": "string",
+                    "description": "Name of the app to peek (e.g., 'YouTube Music', 'WhatsApp', 'Maps'). Same fuzzy matching as agent_launch_app."
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["full", "interactable"],
+                    "description": "\"full\" (default for peek) returns the complete tree including non-interactable text — best when reading state. \"interactable\" returns only clickable/editable nodes."
+                }
+            },
+            "required": ["app_name"]
         }
     },
     {

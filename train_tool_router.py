@@ -98,8 +98,9 @@ PARAM_HEADS = {
     "agent_set_volume": [
         {"name": "volume_level", "type": "int_class", "num_classes": 101},  # 0-100
     ],
-    "agent_fitbit_add_quick_calories": [
-        {"name": "calories", "type": "int_regression"},
+    "agent_log_health_data": [
+        {"name": "data_type", "type": "enum", "values": ["calories", "weight"]},
+        {"name": "value", "type": "int_regression"},
     ],
     "get_weather": [
         {"name": "days_ahead", "type": "int_class", "num_classes": 7},  # 0-6
