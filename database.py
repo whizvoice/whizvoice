@@ -391,7 +391,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         if message_sender == "USER" and content_type == "text" and request_id and conversation_id and conversation_id > 0:
             try:
                 existing = supabase.table("messages") \
-                    .select("id") \
+                    .select("id, timestamp") \
                     .eq("conversation_id", conversation_id) \
                     .eq("request_id", request_id) \
                     .eq("message_sender", "USER") \
@@ -399,8 +399,13 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                     .limit(1).execute()
                 if existing.data:
                     existing_id = existing.data[0]["id"]
+                    existing_timestamp = existing.data[0]["timestamp"]
                     logger.info(f"USER message dedupe: returning existing message_id={existing_id} for conversation_id={conversation_id}, request_id={request_id}")
-                    return (existing_id, conversation_id, [])
+                    # Canonical order is (conversation_id, message_id, cancelled_ids, timestamp).
+                    # This early-return previously returned (existing_id, conversation_id, []) — which
+                    # both omitted the timestamp (breaking the 4-tuple contract callers now unpack) and
+                    # swapped conversation_id/message_id relative to the main return.
+                    return (conversation_id, existing_id, [], existing_timestamp)
             except Exception as e:
                 logger.error(f"Error checking for existing USER message dedupe (conversation_id={conversation_id}, request_id={request_id}): {e}")
                 # Fall through to insert — losing dedupe is preferable to losing a message
