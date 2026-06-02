@@ -228,8 +228,8 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         return []
 
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None) -> Optional[Tuple[int, int, List[int]]]:
-    """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids)
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None) -> Optional[Tuple[int, int, List[int], str]]:
+    """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids, timestamp)
 
     Args:
         user_id: User ID
@@ -527,7 +527,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         saved_conv_id = saved_message.get("conversation_id")
         logger.info(f"Successfully saved {message_sender} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}, content_type={content_type}")
 
-        return (conversation_id, message_id, cancelled_message_ids)
+        return (conversation_id, message_id, cancelled_message_ids, actual_timestamp)
 
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")

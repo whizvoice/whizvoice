@@ -4543,7 +4543,7 @@ async def check_and_retry_failed_messages(
                                     )
 
                                     if save_result:
-                                        saved_conversation_id, message_id, cancelled_ids = save_result
+                                        saved_conversation_id, message_id, cancelled_ids, _ts = save_result
                                         logger.info(f"Successfully saved assistant response as message {message_id}")
                                         
                                         return {
@@ -4927,7 +4927,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             await safe_websocket_send(error_payload)
             return session_conversation_id
 
-        real_conversation_id, user_message_id, cancelled_ids = save_result
+        real_conversation_id, user_message_id, cancelled_ids, _ts = save_result
         logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}, message_id: {user_message_id}")
         # Note: USER messages shouldn't have cancelled_ids (only ASSISTANT messages cancel previous ones)
 
@@ -5376,7 +5376,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 local_objects=local_objects
             )
             if save_result:
-                saved_conversation_id, error_message_id, cancelled_ids = save_result
+                saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                 logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
             else:
                 logger.error(f"Failed to save authentication error message to database")
@@ -5449,7 +5449,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     local_objects=local_objects
                 )
                 if save_result:
-                    saved_conversation_id, error_message_id, cancelled_ids = save_result
+                    saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                     logger.info(f"BadRequest error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 else:
                     logger.error(f"Failed to save BadRequest error message to database")
@@ -5508,7 +5508,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         local_objects=local_objects
                     )
                     if save_result:
-                        saved_conversation_id, error_message_id, cancelled_ids = save_result
+                        saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                         logger.info(f"Overloaded error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 except Exception as save_error:
                     logger.error(f"Failed to save overloaded error message to database: {save_error}")
@@ -5556,7 +5556,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     local_objects=local_objects
                 )
                 if save_result:
-                    saved_conversation_id, error_message_id, cancelled_ids = save_result
+                    saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                     logger.info(f"Generic error saved as message {error_message_id} in conversation {saved_conversation_id}")
             except Exception as save_error:
                 logger.error(f"Failed to save generic error message to database: {save_error}")
@@ -5822,7 +5822,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Get the actual timestamp of the tool_use message we just saved
                 # This is critical for ensuring the tool_result has the correct timestamp (+1ms after tool_use)
                 if tool_use_save_result:
-                    tool_use_conv_id, tool_use_msg_id, cancelled_ids = tool_use_save_result
+                    tool_use_conv_id, tool_use_msg_id, cancelled_ids, _ts = tool_use_save_result
                     # Note: tool_use messages shouldn't cancel previous messages (only text messages do)
                     tool_use_msg_result = supabase.table("messages")\
                         .select("timestamp")\
@@ -6050,7 +6050,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     local_objects=local_objects
                 )
                 if save_result:
-                    saved_conversation_id, error_message_id, cancelled_ids = save_result
+                    saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                     logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 else:
                     logger.error(f"Failed to save authentication error message to database")
@@ -6111,7 +6111,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         local_objects=local_objects
                     )
                     if save_result:
-                        saved_conversation_id, error_message_id, cancelled_ids = save_result
+                        saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                         logger.info(f"BadRequest error (during tool use) saved as message {error_message_id} in conversation {saved_conversation_id}")
                     else:
                         logger.error(f"Failed to save BadRequest error message to database")
@@ -6337,7 +6337,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             save_tool_content = content_list + server_tool_blocks if server_tool_blocks else None
             save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type=save_content_type, tool_content=save_tool_content, client_timestamp=final_text_timestamp, local_objects=local_objects)
             if save_result:
-                saved_conversation_id, bot_message_id, cancelled_ids = save_result
+                saved_conversation_id, bot_message_id, cancelled_ids, saved_timestamp = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
 
                 # Cancel and broadcast previous messages if any were superseded
@@ -6416,6 +6416,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "conversation_id": saved_conversation_id,  # Include real conversation_id for client sync (resolved from optimistic if needed)
                     "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
                     "client_message_id": client_message_id,  # Echo back optimistic message ID
+                    "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "response"  # Indicate this is a direct response (vs broadcast)
                 }
                 direct_send_succeeded = await safe_websocket_send(response_payload)
@@ -6432,6 +6433,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "conversation_id": processing_conversation_id,  # Send the real conversation ID
                     "client_conversation_id": client_conversation_id,  # Include for client validation
                     "client_message_id": client_message_id,  # Include for completeness
+                    "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "broadcast"  # Keep type to indicate it's a broadcast
                 }
                 # Bot responses should go to ALL sessions - they originate from the server, not from any client session
