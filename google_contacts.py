@@ -209,4 +209,11 @@ def lookup_google_contacts(user_id, name):
 
     if contacts:
         logger.info(f"Found {len(contacts)} Google contact(s) for '{name}' (user {user_id})")
+        for c in contacts:
+            logger.info(
+                f"  Google contact: name={c.get('display_name')!r} "
+                f"phones={list((c.get('phone_numbers') or {}).keys())} "
+                f"emails={list((c.get('emails') or {}).keys())} "
+                f"addresses={list((c.get('addresses') or {}).keys())}"
+            )
     return {"contacts": contacts}
