@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_log_health_data, agent_open_health_app_settings, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
-from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
+from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
@@ -1717,20 +1717,6 @@ TOOL_REGISTRY = {
             kwargs.get('conversation_id')
         ),
         "validation": lambda args: {"error": "volume_level is required."} if args.get('volume_level') is None else None
-    },
-    "agent_lookup_phone_contacts": {
-        "function_name": "agent_lookup_phone_contacts",
-        "requires_auth": False,
-        "is_async": True,
-        "needs_websocket": True,
-        "args_mapping": lambda args, user_id, **kwargs: (
-            args.get('name'),
-            user_id,
-            kwargs.get('websocket'),
-            kwargs.get('tool_result_handler'),
-            kwargs.get('conversation_id')
-        ),
-        "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     },
     "agent_youtube_music": {
         "function_name": "_route_agent_youtube_music",
