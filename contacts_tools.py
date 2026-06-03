@@ -201,7 +201,7 @@ async def get_contact_preference(user_id: str, name: str,
     """
     Look up a contact by name (can be nickname or real name) to get their details.
     If not found in saved preferences, automatically falls back to searching the
-    device's native phone contacts.
+    device's native phone contacts, then the user's Google Contacts.
 
     Args:
         user_id: The user ID
@@ -287,6 +287,21 @@ async def get_contact_preference(user_id: str, name: str,
                     logger.info(f"No device contacts found for '{name}'")
             except Exception as e:
                 logger.warning(f"Device contacts fallback failed for '{name}': {e}")
+
+        # Still nothing — try Google Contacts (lowest priority, server-side People API).
+        try:
+            from google_contacts import lookup_google_contacts
+            google_result = lookup_google_contacts(user_id, name)
+            google_contacts = google_result.get("contacts", [])
+            if google_contacts:
+                logger.info(f"Found {len(google_contacts)} Google contact(s) for '{name}'")
+                return {
+                    "found": False,
+                    "google_contacts": google_contacts,
+                    "message": f"Not found in saved or phone contacts, but found {len(google_contacts)} match(es) in Google Contacts."
+                }
+        except Exception as e:
+            logger.warning(f"Google contacts fallback failed for '{name}': {e}")
 
         return {"found": False, "reminder": "DO NOT ask the user to create a contact unless you absolutely cannot proceed without it. For example if you have the name and messaging app you do not need to create a contact to proceed to send a message. If the user asked you for directions, just try getting directions for the phrase they gave you; the address for that phrase may already be stored in Google Maps."}
 
@@ -546,7 +561,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "get_contact_preference",
-        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. Do NOT use this for searching addresses for agent_get_google_maps_directions unless the query involves someone's name. This automatically searches saved contacts first, then falls back to the device's native phone contacts if not found. If the result includes 'device_contacts', those are matches from the phone — you can use that info directly or suggest saving it. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), send the message anyway. If the contact IS found, make SURE you have used the correct contact name (not the nickname) for sending messages. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name. Note that people may call different types of addresses different things, for example someone's home or house refers to the same address, and someone's office or work or workplace refer to the same address.",
+        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. Do NOT use this for searching addresses for agent_get_google_maps_directions unless the query involves someone's name. This automatically searches saved contacts first, then falls back to the device's native phone contacts, and finally to the user's Google Contacts. If the result includes 'device_contacts', those are matches from the phone; if it includes 'google_contacts', those are matches from Google Contacts. In either case you can use that info directly or suggest saving it. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), send the message anyway. If the contact IS found, make SURE you have used the correct contact name (not the nickname) for sending messages. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name. Note that people may call different types of addresses different things, for example someone's home or house refers to the same address, and someone's office or work or workplace refer to the same address.",
         "input_schema": {
             "type": "object",
             "properties": {

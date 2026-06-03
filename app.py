@@ -2283,7 +2283,17 @@ async def login_with_google(token_request: GoogleTokenRequest):
 
         # Ensure user and preferences exist
         ensure_user_and_prefs(user_info["sub"], email=user_info["email"])
-        
+
+        # If the client granted contacts access, exchange the one-time auth code for
+        # a refresh token and store it so we can read Google Contacts server-side.
+        # Failures here must not block sign-in.
+        from google_contacts import store_refresh_token_from_auth_code, has_google_contacts_token
+        if token_request.server_auth_code:
+            store_refresh_token_from_auth_code(user_info["sub"], token_request.server_auth_code)
+        # Tell the client whether we hold a usable contacts token, so it can decide
+        # whether to prompt an interactive re-consent to capture a fresh auth code.
+        user_info["has_google_contacts"] = has_google_contacts_token(user_info["sub"])
+
         # Create token data for our service tokens
         # For access token, include more details
         access_token_data = {
