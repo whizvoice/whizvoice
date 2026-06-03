@@ -608,7 +608,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "add_contact_preference",
-        "description": "Add or update a contact with real name, nickname, preferred messaging app, and optional phone number, email, and address. Each phone/email/address is stored with a label (e.g. 'mobile', 'work', 'personal', 'home'). If the user doesn't provide phone/email/address details, consider using agent_lookup_phone_contacts first to auto-fill from their phone contacts.",
+        "description": "Add or update a contact with real name, nickname, preferred messaging app, and optional phone number, email, and address. Each phone/email/address is stored with a label (e.g. 'mobile', 'work', 'personal', 'home'). If the user doesn't provide phone/email/address details, consider using get_contact_preference first to auto-fill from their phone or Google contacts.",
         "input_schema": {
             "type": "object",
             "properties": {

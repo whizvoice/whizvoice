@@ -538,20 +538,10 @@ device_control_tools = [
             },
             "required": ["volume_level"]
         }
-    },
-    {
-        "type": "custom",
-        "name": "agent_lookup_phone_contacts",
-        "description": "Unless user specifies phone contacts or Android contacts, ALWAYS use get_contact_preference and NOT THIS TOOL since get_contact_preference will fallback to phone contacts. Otherwise, use this tool to search the device's native phone contacts by name. Returns matching contacts with their phone numbers, email addresses, and postal addresses, each labeled by type (mobile, work, home, personal, etc.). If the device hasn't granted contacts permission, returns an empty list — ask the user for the info directly.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "The name to search for in the device's phone contacts"
-                }
-            },
-            "required": ["name"]
-        }
     }
+    # NOTE: agent_lookup_phone_contacts is intentionally NOT advertised to Claude.
+    # get_contact_preference is the single contact-lookup entry point (saved -> phone
+    # -> Google); it calls the agent_lookup_phone_contacts() function directly as an
+    # internal step. Exposing the phone-only tool let the model bypass the saved +
+    # Google logic, so it's kept as an internal device tool only.
 ]
