@@ -278,6 +278,23 @@ async def agent_lookup_phone_contacts(name: str, user_id: str = None, websocket=
     )
 
 
+async def agent_request_google_contacts_consent(user_id: str = None, websocket=None,
+                                                 tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Ask the device to run the Google Contacts consent flow.
+
+    The device shows Google's incremental consent UI and returns a one-time server
+    auth code. Returns {server_auth_code: ...} on grant, {declined: true} on cancel,
+    or {timed_out: true} if the user never responded. The longer initial timeout
+    covers the round-trip until the device sends 'waiting_for_google_contacts_consent'
+    (which then extends the server-side deadline while the user consents).
+    """
+    return await _send_device_tool(
+        "agent_request_google_contacts_consent", {},
+        user_id, websocket, tool_result_handler, conversation_id,
+        timeout=15.0
+    )
+
+
 # ========== Tool definitions for Claude ==========
 
 device_control_tools = [

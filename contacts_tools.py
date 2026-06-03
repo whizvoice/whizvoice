@@ -200,6 +200,8 @@ _FIELD_TO_BUCKET = {"phone": "phone_numbers", "email": "emails", "address": "add
 # When the caller doesn't say what it needs, enrich the buckets that are commonly
 # both wanted and missing from phone contacts (numbers are almost always present).
 _DEFAULT_ENRICH_FIELDS = ["email", "address"]
+# Remembers an explicit user decline of Google Contacts access, so we stop nagging.
+_CONSENT_DECLINED_PREF_KEY = "google_contacts_consent_declined"
 
 
 async def get_contact_preference(user_id: str, name: str,
@@ -249,17 +251,68 @@ async def get_contact_preference(user_id: str, name: str,
                 "primary_address": contact.get("primary_address")
             }
 
-        def _enrich(result):
+        async def _ensure_google_token(prompt):
+            """Return True if Google Contacts can be queried for this user.
+
+            If no refresh token is stored yet and `prompt` is True, runs the
+            on-demand consent flow on the device (mirroring the contacts-permission
+            pattern), stores the resulting token, and returns True on success. A
+            prior explicit decline is remembered so we don't nag on every lookup.
+            Never raises.
+            """
+            from google_contacts import has_google_contacts_token, store_refresh_token_from_auth_code
+            if has_google_contacts_token(user_id):
+                return True
+            if not prompt or websocket is None:
+                return False
+            try:
+                if get_preference(user_id, _CONSENT_DECLINED_PREF_KEY) == "true":
+                    logger.info(f"User {user_id} previously declined Google Contacts; not prompting")
+                    return False
+            except Exception:
+                pass
+            try:
+                from device_control_tools import agent_request_google_contacts_consent
+                logger.info(f"Requesting on-demand Google Contacts consent for user {user_id}")
+                result = await agent_request_google_contacts_consent(
+                    user_id, websocket, tool_result_handler, conversation_id
+                )
+            except Exception as e:
+                logger.warning(f"Google Contacts consent request failed for user {user_id}: {e}")
+                return False
+            code = result.get("server_auth_code")
+            if code:
+                stored = store_refresh_token_from_auth_code(user_id, code)
+                if stored:
+                    try:
+                        set_preference(user_id, _CONSENT_DECLINED_PREF_KEY, "false")
+                    except Exception:
+                        pass
+                return stored
+            if result.get("declined"):
+                logger.info(f"User {user_id} declined Google Contacts consent")
+                try:
+                    set_preference(user_id, _CONSENT_DECLINED_PREF_KEY, "true")
+                except Exception:
+                    pass
+            return False
+
+        async def _enrich(result):
             """Fill any needed-but-missing buckets on `result` from Google Contacts.
 
             Only calls Google when a requested field is actually absent, and only
-            merges the matching person's data (by display name). Mutates and
-            returns `result`; never raises.
+            merges the matching person's data (by display name). Prompts for consent
+            on demand only when the caller explicitly named the field(s) it needs.
+            Mutates and returns `result`; never raises.
             """
             fields = needed_fields or _DEFAULT_ENRICH_FIELDS
             missing = [(f, _FIELD_TO_BUCKET[f]) for f in fields
                        if f in _FIELD_TO_BUCKET and not result.get(_FIELD_TO_BUCKET[f])]
             if not missing:
+                return result
+            # Prompt for consent only on explicit field requests; for the default
+            # email/address top-up, enrich only if access was already granted.
+            if not await _ensure_google_token(prompt=needed_fields is not None):
                 return result
             try:
                 from google_contacts import lookup_google_contacts
@@ -293,13 +346,13 @@ async def get_contact_preference(user_id: str, name: str,
             contact_id = data["nickname_index"][normalized_name]
             contact = data["contacts"].get(contact_id)
             if contact:
-                return _enrich(_build_result(contact))
+                return await _enrich(_build_result(contact))
 
         # Try exact real_name match
         for contact_id, contact in data["contacts"].items():
             real_name = contact.get("real_name", "")
             if real_name and normalize_nickname(real_name) == normalized_name:
-                return _enrich(_build_result(contact))
+                return await _enrich(_build_result(contact))
 
         # Try partial match: search term matches any word in real_name
         partial_matches = []
@@ -311,7 +364,7 @@ async def get_contact_preference(user_id: str, name: str,
                     partial_matches.append(contact)
 
         if len(partial_matches) == 1:
-            return _enrich(_build_result(partial_matches[0]))
+            return await _enrich(_build_result(partial_matches[0]))
         elif len(partial_matches) > 1:
             return {
                 "found": True,
@@ -334,7 +387,7 @@ async def get_contact_preference(user_id: str, name: str,
                     # Enrich a single unambiguous phone match (e.g. has a number but no
                     # email) from Google Contacts. Skip when ambiguous.
                     if len(device_contacts) == 1:
-                        _enrich(device_contacts[0])
+                        await _enrich(device_contacts[0])
                     return {
                         "found": False,
                         "device_contacts": device_contacts,
@@ -348,10 +401,14 @@ async def get_contact_preference(user_id: str, name: str,
                 logger.warning(f"Device contacts fallback failed for '{name}': {e}")
 
         # Still nothing — try Google Contacts (lowest priority, server-side People API).
+        # Prompt for consent on demand since the whole lookup otherwise failed.
         try:
-            from google_contacts import lookup_google_contacts
-            google_result = lookup_google_contacts(user_id, name)
-            google_contacts = google_result.get("contacts", [])
+            if await _ensure_google_token(prompt=True):
+                from google_contacts import lookup_google_contacts
+                google_result = lookup_google_contacts(user_id, name)
+                google_contacts = google_result.get("contacts", [])
+            else:
+                google_contacts = []
             if google_contacts:
                 logger.info(f"Found {len(google_contacts)} Google contact(s) for '{name}'")
                 return {

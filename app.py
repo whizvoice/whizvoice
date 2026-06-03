@@ -3096,12 +3096,16 @@ async def websocket_endpoint(websocket: WebSocket):
                         status = message_data.get("status", "")
                         status_message = message_data.get("message", "")
                         logger.info(f"Received tool_status: request_id={tool_request_id}, status={status}")
-                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_contacts_permission", "waiting_for_calendar_permission"):
-                            metadata = tool_result_handler.extend_deadline(tool_request_id, 65.0)
+                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_contacts_permission", "waiting_for_calendar_permission", "waiting_for_google_contacts_consent"):
+                            # The Google consent UI (full Google screen + unverified warning)
+                            # takes longer than a one-tap permission grant, so extend further.
+                            extension = 130.0 if status == "waiting_for_google_contacts_consent" else 65.0
+                            metadata = tool_result_handler.extend_deadline(tool_request_id, extension)
                             # Update the Redis placeholder so Claude sees why the tool is waiting
                             if metadata and metadata.get('tool_use_id') and metadata.get('session_id'):
                                 placeholder = ("Waiting for user to unlock phone..." if status == "waiting_for_unlock"
                                                else "Waiting for user to grant calendar permission..." if status == "waiting_for_calendar_permission"
+                                               else "Waiting for user to grant Google Contacts access..." if status == "waiting_for_google_contacts_consent"
                                                else "Waiting for user to grant contacts permission...")
                                 await update_tool_results(
                                     metadata['session_id'],
