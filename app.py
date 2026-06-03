@@ -2045,7 +2045,8 @@ TOOL_REGISTRY = {
             args.get('name'),
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
-            kwargs.get('conversation_id')
+            kwargs.get('conversation_id'),
+            args.get('needed_fields')
         ),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     },
