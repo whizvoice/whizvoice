@@ -200,8 +200,6 @@ _FIELD_TO_BUCKET = {"phone": "phone_numbers", "email": "emails", "address": "add
 # When the caller doesn't say what it needs, enrich the buckets that are commonly
 # both wanted and missing from phone contacts (numbers are almost always present).
 _DEFAULT_ENRICH_FIELDS = ["email", "address"]
-# Remembers an explicit user decline of Google Contacts access, so we stop nagging.
-_CONSENT_DECLINED_PREF_KEY = "google_contacts_consent_declined"
 
 
 async def get_contact_preference(user_id: str, name: str,
@@ -256,21 +254,16 @@ async def get_contact_preference(user_id: str, name: str,
 
             If no refresh token is stored yet and `prompt` is True, runs the
             on-demand consent flow on the device (mirroring the contacts-permission
-            pattern), stores the resulting token, and returns True on success. A
-            prior explicit decline is remembered so we don't nag on every lookup.
-            Never raises.
+            pattern) and stores the resulting token, returning True on success.
+            A failed/cancelled consent just fails this turn — we re-prompt next time
+            rather than permanently suppressing (avoids a transient sign-in error
+            locking the feature off). Never raises.
             """
             from google_contacts import has_google_contacts_token, store_refresh_token_from_auth_code
             if has_google_contacts_token(user_id):
                 return True
             if not prompt or websocket is None:
                 return False
-            try:
-                if get_preference(user_id, _CONSENT_DECLINED_PREF_KEY) == "true":
-                    logger.info(f"User {user_id} previously declined Google Contacts; not prompting")
-                    return False
-            except Exception:
-                pass
             try:
                 from device_control_tools import agent_request_google_contacts_consent
                 logger.info(f"Requesting on-demand Google Contacts consent for user {user_id}")
@@ -282,19 +275,8 @@ async def get_contact_preference(user_id: str, name: str,
                 return False
             code = result.get("server_auth_code")
             if code:
-                stored = store_refresh_token_from_auth_code(user_id, code)
-                if stored:
-                    try:
-                        set_preference(user_id, _CONSENT_DECLINED_PREF_KEY, "false")
-                    except Exception:
-                        pass
-                return stored
-            if result.get("declined"):
-                logger.info(f"User {user_id} declined Google Contacts consent")
-                try:
-                    set_preference(user_id, _CONSENT_DECLINED_PREF_KEY, "true")
-                except Exception:
-                    pass
+                return store_refresh_token_from_auth_code(user_id, code)
+            logger.info(f"Google Contacts consent not granted for user {user_id}: {result}")
             return False
 
         async def _enrich(result):
