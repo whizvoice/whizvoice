@@ -426,7 +426,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_calendar_event",
-        "description": "Draft or save a calendar event. Use action 'draft' to open the calendar app pre-filled with event details — after drafting, ask the user to confirm, then call again with action 'save'. Use action 'save' to save the event directly to the device calendar and dismiss the draft UI. Pass the same event params for both calls.",
+        "description": "Draft or save a calendar event. Use action 'draft' to open the calendar app pre-filled with event details — after drafting, ask the user to confirm, then call again with action 'save'. Use action 'save' to save the event directly to the device calendar and dismiss the draft UI. Pass the same event params for both calls. NEVER use a fake or example email for guests.",
         "input_schema": {
             "type": "object",
             "properties": {
