@@ -985,7 +985,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_insert_text",
-        "description": "Type text into an input field on the current screen. If element_id is provided, it must come from the most recent agent_get_ui call. If omitted, the focused input is used, falling back to the sole editable field on screen. The field is cleared before the new text is inserted.",
+        "description": "Type text into an input field on the current screen. If element_id is provided, it must come from the most recent agent_get_ui call. If omitted, the focused input is used, falling back to the sole editable field on screen. The field is cleared before the new text is inserted. Set submit=true to press the keyboard's Enter/Search/Go action on the field after typing — use this to submit a search bar or send a query in one step instead of looking for a separate search button.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -996,6 +996,10 @@ screen_agent_tools = [
                 "element_id": {
                     "type": "integer",
                     "description": "Optional. The element_id from the most recent agent_get_ui call. Omit to target the focused input or the only editable field on screen."
+                },
+                "submit": {
+                    "type": "boolean",
+                    "description": "Optional, default false. If true, presses Enter / the keyboard's IME action (Search, Go, Done) on the field after the text is set, submitting it. Use for search bars where there is no obvious search button to click."
                 }
             },
             "required": ["text"]
