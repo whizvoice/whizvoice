@@ -4793,6 +4793,9 @@ async def upload_wake_word_audio(
     timestamp: str = Form(...),
     raw_vosk_json: str = Form(...),
     classifier_score: str = Form(default="-1.0"),
+    verifier_cosine: str = Form(default=""),
+    verifier_decision: str = Form(default=""),
+    outcome: str = Form(default="fired"),
     current_user: Dict = Depends(get_current_user)
 ):
     """
@@ -4819,6 +4822,10 @@ async def upload_wake_word_audio(
         accepted_val = accepted.lower() == "true"
         timestamp_val = int(timestamp)
         classifier_score_val = float(classifier_score)
+        # Empty string means "not applicable" (e.g. voice match off) → store NULL.
+        verifier_cosine_val = float(verifier_cosine) if verifier_cosine else None
+        verifier_decision_val = verifier_decision if verifier_decision else None
+        outcome_val = outcome if outcome else "fired"
 
         insert_data = {
             "user_id": user_id,
@@ -4830,6 +4837,9 @@ async def upload_wake_word_audio(
             "storage_path": storage_path,
             "file_size_bytes": file_size,
             "classifier_score": classifier_score_val,
+            "verifier_cosine": verifier_cosine_val,
+            "verifier_decision": verifier_decision_val,
+            "outcome": outcome_val,
         }
 
         result = supabase.table("wake_word_audio_clips").insert(insert_data).execute()
@@ -4838,7 +4848,7 @@ async def upload_wake_word_audio(
             raise HTTPException(status_code=500, detail="Failed to save audio clip metadata")
 
         row = result.data[0]
-        logger.info(f"Saved wake word audio for user {user_id}: phrase={phrase}, confidence={confidence_val}, classifier_score={classifier_score_val}, accepted={accepted_val}, id={row['id']}")
+        logger.info(f"Saved wake word audio for user {user_id}: phrase={phrase}, classifier_score={classifier_score_val}, accepted={accepted_val}, outcome={outcome_val}, verifier_cosine={verifier_cosine_val}, verifier_decision={verifier_decision_val}, id={row['id']}")
 
         return WakeWordAudioResponse(
             id=row["id"],
