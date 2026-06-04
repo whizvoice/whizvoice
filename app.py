@@ -4657,7 +4657,28 @@ async def get_conversation_pending_requests(
     session_id = f"ws_{user_id}_conv_{conversation_id}"
 
     try:
-        active_request_ids = await get_active_requests(session_id)
+        active_request_ids = set(await get_active_requests(session_id))
+
+        # An in-flight request started while the chat was still optimistic is tracked
+        # under the optimistic-ID session key (message_session_id at the send site), and
+        # rename_chat_session does not move the active_requests set during migration. So
+        # also union in the optimistic key's active requests, resolving the optimistic ID
+        # the same way the WebSocket connect handler does.
+        if conversation_id > 0:
+            try:
+                opt_result = supabase.table("conversations")\
+                    .select("optimistic_chat_id")\
+                    .eq("id", conversation_id)\
+                    .eq("user_id", user_id)\
+                    .is_("deleted_at", "null")\
+                    .execute()
+                if opt_result.data and len(opt_result.data) > 0:
+                    opt_chat_id = opt_result.data[0].get("optimistic_chat_id")
+                    if opt_chat_id:
+                        opt_session_id = f"ws_{user_id}_conv_{int(opt_chat_id)}"
+                        active_request_ids |= set(await get_active_requests(opt_session_id))
+            except Exception as e:
+                logger.warning(f"Could not union optimistic-key pending requests for conversation {conversation_id}: {e}")
 
         # Filter to only truly pending/processing requests
         pending_ids = []
