@@ -4699,8 +4699,10 @@ async def get_conversation_pending_requests(
 
 # Dump reasons that should NOT trigger the Android autofix pipeline.
 # Autofix targets client-side Android bugs; rage shakes are usually UX feedback,
-# and server_error_5xx reports describe server-side failures (handled separately).
-NON_AUTOFIX_DUMP_REASONS = {"rage_shake", "server_error_5xx"}
+# server_error_5xx reports describe server-side failures (handled separately), and
+# process_death rows are diagnostic post-mortems (native crash / ANR / low-memory)
+# that autofix can't act on.
+NON_AUTOFIX_DUMP_REASONS = {"rage_shake", "server_error_5xx", "process_death"}
 
 
 @app.post("/ui-dumps", response_model=UiDumpResponse)

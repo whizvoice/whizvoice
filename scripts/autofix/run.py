@@ -296,8 +296,9 @@ def get_unprocessed_errors(supabase, app_versions: list[str], dump_reason: str |
         .not_.is_("is_emulator", "true")
         # rage_shake / bug_button are user-triggered bug reports, not screen-agent
         # navigation failures. They carry full screenshot payloads but autofix
-        # can't act on free-text user complaints.
-        .not_.in_("dump_reason", ("rage_shake", "bug_button"))
+        # can't act on free-text user complaints. process_death rows are diagnostic
+        # crash/ANR post-mortems autofix can't act on either.
+        .not_.in_("dump_reason", ("rage_shake", "bug_button", "process_death"))
     )
 
     if dump_reason:
