@@ -894,7 +894,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_log_health_data",
-        "description": "Log a health data point on the user's device. Use this when the user wants to log calories consumed or a body weight measurement. If the result has `reason: \"requires_connection\"`, the value WAS written to Health Connect, but no health app is connected so the user can't see the logged data. The `unconnected_health_apps` array names the apps that aren't connected. EVERY TIME you get this result, even if you already offered earlier in the conversation, you MUST name the unconnected app(s) and tell the user the data won't show up there until they set up the connection, and offer to open Health Connect settings via agent_open_health_app_settings so user can connect an app.",
+        "description": "Log a health data point on the user's device. Use this when the user wants to log calories consumed or a body weight measurement. If the user names a food without a calorie count, estimate the calorie count to call this tool. If the result has `reason: \"requires_connection\"`, the value WAS written to Health Connect, but no health app is connected so the user can't see the logged data. The `unconnected_health_apps` array names the apps that aren't connected. EVERY TIME you get this result, even if you already offered earlier in the conversation, you MUST name the unconnected app(s) and tell the user the data won't show up there until they set up the connection, and offer to open Health Connect settings via agent_open_health_app_settings so user can connect an app.",
         "input_schema": {
             "type": "object",
             "properties": {
