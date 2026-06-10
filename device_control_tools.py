@@ -363,7 +363,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_submit_bug_report",
-        "description": "File a bug report on the user's behalf. Captures a snapshot of the current screen, recent logs, and a recent audio buffer, and submits it along with the user's description of the problem. Use when the user asks to file a bug, report a problem, or send feedback about something broken in Whiz. The `message` parameter MUST contain a clear description of what is wrong. If the user has not stated what the problem is, ASK them what's wrong before calling this tool. If what they said doesn't really make sense, submit the bug anyways and let them know so they have the option to correct it. Do not call this tool just because the user mentioned bugs in passing.",
+        "description": "File a bug report on the user's behalf. Captures a snapshot of the current screen, recent logs, and a recent audio buffer, and submits it along with the user's description of the problem. Use when the user asks to file a bug, report a problem, or send feedback about something broken in Whiz. If the user has not stated what the problem is, ASK them what's wrong before calling this tool. If what they said doesn't really make sense, submit the bug anyways and let them know so they have the option to correct it. Do not call this tool just because the user mentioned bugs in passing.",
         "input_schema": {
             "type": "object",
             "properties": {
