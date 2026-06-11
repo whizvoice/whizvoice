@@ -672,7 +672,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_select_chat",
-        "description": "Select a specific chat/conversation by contact or group name. Works with both WhatsApp and SMS (Google Messages). The app will be opened automatically if not already open. Use this when the user wants to open a conversation with a specific person or group. Look up get_contact_preference for the name you're given simultaneously with this tool to see if there's a nickname or common mispelling.",
+        "description": "Select a specific chat/conversation by contact or group name. Works with both WhatsApp and SMS (Google Messages). The app will be opened automatically if not already open. Use this when the user wants to open a conversation with a specific person or group. ALWAYS look up get_contact_preference for the name you're given IN PARALLEL with this tool, so that if you find there's a nickname or common mispelling, you can reissue agent_select_chat with the correct spelling.",
         "input_schema": {
             "type": "object",
             "properties": {
