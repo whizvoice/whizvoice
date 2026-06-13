@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_log_health_data, agent_open_health_app_settings, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
-from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume, agent_lookup_phone_contacts
+from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
@@ -1718,20 +1718,6 @@ TOOL_REGISTRY = {
         ),
         "validation": lambda args: {"error": "volume_level is required."} if args.get('volume_level') is None else None
     },
-    "agent_lookup_phone_contacts": {
-        "function_name": "agent_lookup_phone_contacts",
-        "requires_auth": False,
-        "is_async": True,
-        "needs_websocket": True,
-        "args_mapping": lambda args, user_id, **kwargs: (
-            args.get('name'),
-            user_id,
-            kwargs.get('websocket'),
-            kwargs.get('tool_result_handler'),
-            kwargs.get('conversation_id')
-        ),
-        "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
-    },
     "agent_youtube_music": {
         "function_name": "_route_agent_youtube_music",
         "requires_auth": False,
@@ -2045,7 +2031,8 @@ TOOL_REGISTRY = {
             args.get('name'),
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
-            kwargs.get('conversation_id')
+            kwargs.get('conversation_id'),
+            args.get('needed_fields')
         ),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
     },
@@ -2283,7 +2270,17 @@ async def login_with_google(token_request: GoogleTokenRequest):
 
         # Ensure user and preferences exist
         ensure_user_and_prefs(user_info["sub"], email=user_info["email"])
-        
+
+        # If the client granted contacts access, exchange the one-time auth code for
+        # a refresh token and store it so we can read Google Contacts server-side.
+        # Failures here must not block sign-in.
+        from google_contacts import store_refresh_token_from_auth_code, has_google_contacts_token
+        if token_request.server_auth_code:
+            store_refresh_token_from_auth_code(user_info["sub"], token_request.server_auth_code)
+        # Tell the client whether we hold a usable contacts token, so it can decide
+        # whether to prompt an interactive re-consent to capture a fresh auth code.
+        user_info["has_google_contacts"] = has_google_contacts_token(user_info["sub"])
+
         # Create token data for our service tokens
         # For access token, include more details
         access_token_data = {
@@ -3085,12 +3082,16 @@ async def websocket_endpoint(websocket: WebSocket):
                         status = message_data.get("status", "")
                         status_message = message_data.get("message", "")
                         logger.info(f"Received tool_status: request_id={tool_request_id}, status={status}")
-                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_contacts_permission", "waiting_for_calendar_permission"):
-                            metadata = tool_result_handler.extend_deadline(tool_request_id, 65.0)
+                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_contacts_permission", "waiting_for_calendar_permission", "waiting_for_google_contacts_consent"):
+                            # The Google consent UI (full Google screen + unverified warning)
+                            # takes longer than a one-tap permission grant, so extend further.
+                            extension = 130.0 if status == "waiting_for_google_contacts_consent" else 65.0
+                            metadata = tool_result_handler.extend_deadline(tool_request_id, extension)
                             # Update the Redis placeholder so Claude sees why the tool is waiting
                             if metadata and metadata.get('tool_use_id') and metadata.get('session_id'):
                                 placeholder = ("Waiting for user to unlock phone..." if status == "waiting_for_unlock"
                                                else "Waiting for user to grant calendar permission..." if status == "waiting_for_calendar_permission"
+                                               else "Waiting for user to grant Google Contacts access..." if status == "waiting_for_google_contacts_consent"
                                                else "Waiting for user to grant contacts permission...")
                                 await update_tool_results(
                                     metadata['session_id'],
@@ -4543,7 +4544,7 @@ async def check_and_retry_failed_messages(
                                     )
 
                                     if save_result:
-                                        saved_conversation_id, message_id, cancelled_ids = save_result
+                                        saved_conversation_id, message_id, cancelled_ids, _ts = save_result
                                         logger.info(f"Successfully saved assistant response as message {message_id}")
                                         
                                         return {
@@ -4656,7 +4657,28 @@ async def get_conversation_pending_requests(
     session_id = f"ws_{user_id}_conv_{conversation_id}"
 
     try:
-        active_request_ids = await get_active_requests(session_id)
+        active_request_ids = set(await get_active_requests(session_id))
+
+        # An in-flight request started while the chat was still optimistic is tracked
+        # under the optimistic-ID session key (message_session_id at the send site), and
+        # rename_chat_session does not move the active_requests set during migration. So
+        # also union in the optimistic key's active requests, resolving the optimistic ID
+        # the same way the WebSocket connect handler does.
+        if conversation_id > 0:
+            try:
+                opt_result = supabase.table("conversations")\
+                    .select("optimistic_chat_id")\
+                    .eq("id", conversation_id)\
+                    .eq("user_id", user_id)\
+                    .is_("deleted_at", "null")\
+                    .execute()
+                if opt_result.data and len(opt_result.data) > 0:
+                    opt_chat_id = opt_result.data[0].get("optimistic_chat_id")
+                    if opt_chat_id:
+                        opt_session_id = f"ws_{user_id}_conv_{int(opt_chat_id)}"
+                        active_request_ids |= set(await get_active_requests(opt_session_id))
+            except Exception as e:
+                logger.warning(f"Could not union optimistic-key pending requests for conversation {conversation_id}: {e}")
 
         # Filter to only truly pending/processing requests
         pending_ids = []
@@ -4677,8 +4699,10 @@ async def get_conversation_pending_requests(
 
 # Dump reasons that should NOT trigger the Android autofix pipeline.
 # Autofix targets client-side Android bugs; rage shakes are usually UX feedback,
-# and server_error_5xx reports describe server-side failures (handled separately).
-NON_AUTOFIX_DUMP_REASONS = {"rage_shake", "server_error_5xx"}
+# server_error_5xx reports describe server-side failures (handled separately), and
+# process_death rows are diagnostic post-mortems (native crash / ANR / low-memory)
+# that autofix can't act on.
+NON_AUTOFIX_DUMP_REASONS = {"rage_shake", "server_error_5xx", "process_death"}
 
 
 @app.post("/ui-dumps", response_model=UiDumpResponse)
@@ -4771,6 +4795,9 @@ async def upload_wake_word_audio(
     timestamp: str = Form(...),
     raw_vosk_json: str = Form(...),
     classifier_score: str = Form(default="-1.0"),
+    verifier_cosine: str = Form(default=""),
+    verifier_decision: str = Form(default=""),
+    outcome: str = Form(default="fired"),
     current_user: Dict = Depends(get_current_user)
 ):
     """
@@ -4797,6 +4824,10 @@ async def upload_wake_word_audio(
         accepted_val = accepted.lower() == "true"
         timestamp_val = int(timestamp)
         classifier_score_val = float(classifier_score)
+        # Empty string means "not applicable" (e.g. voice match off) → store NULL.
+        verifier_cosine_val = float(verifier_cosine) if verifier_cosine else None
+        verifier_decision_val = verifier_decision if verifier_decision else None
+        outcome_val = outcome if outcome else "fired"
 
         insert_data = {
             "user_id": user_id,
@@ -4808,6 +4839,9 @@ async def upload_wake_word_audio(
             "storage_path": storage_path,
             "file_size_bytes": file_size,
             "classifier_score": classifier_score_val,
+            "verifier_cosine": verifier_cosine_val,
+            "verifier_decision": verifier_decision_val,
+            "outcome": outcome_val,
         }
 
         result = supabase.table("wake_word_audio_clips").insert(insert_data).execute()
@@ -4816,7 +4850,7 @@ async def upload_wake_word_audio(
             raise HTTPException(status_code=500, detail="Failed to save audio clip metadata")
 
         row = result.data[0]
-        logger.info(f"Saved wake word audio for user {user_id}: phrase={phrase}, confidence={confidence_val}, classifier_score={classifier_score_val}, accepted={accepted_val}, id={row['id']}")
+        logger.info(f"Saved wake word audio for user {user_id}: phrase={phrase}, classifier_score={classifier_score_val}, accepted={accepted_val}, outcome={outcome_val}, verifier_cosine={verifier_cosine_val}, verifier_decision={verifier_decision_val}, id={row['id']}")
 
         return WakeWordAudioResponse(
             id=row["id"],
@@ -4927,7 +4961,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             await safe_websocket_send(error_payload)
             return session_conversation_id
 
-        real_conversation_id, user_message_id, cancelled_ids = save_result
+        real_conversation_id, user_message_id, cancelled_ids, _ts = save_result
         logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}, message_id: {user_message_id}")
         # Note: USER messages shouldn't have cancelled_ids (only ASSISTANT messages cancel previous ones)
 
@@ -5376,7 +5410,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 local_objects=local_objects
             )
             if save_result:
-                saved_conversation_id, error_message_id, cancelled_ids = save_result
+                saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                 logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
             else:
                 logger.error(f"Failed to save authentication error message to database")
@@ -5449,7 +5483,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     local_objects=local_objects
                 )
                 if save_result:
-                    saved_conversation_id, error_message_id, cancelled_ids = save_result
+                    saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                     logger.info(f"BadRequest error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 else:
                     logger.error(f"Failed to save BadRequest error message to database")
@@ -5508,7 +5542,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         local_objects=local_objects
                     )
                     if save_result:
-                        saved_conversation_id, error_message_id, cancelled_ids = save_result
+                        saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                         logger.info(f"Overloaded error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 except Exception as save_error:
                     logger.error(f"Failed to save overloaded error message to database: {save_error}")
@@ -5556,7 +5590,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     local_objects=local_objects
                 )
                 if save_result:
-                    saved_conversation_id, error_message_id, cancelled_ids = save_result
+                    saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                     logger.info(f"Generic error saved as message {error_message_id} in conversation {saved_conversation_id}")
             except Exception as save_error:
                 logger.error(f"Failed to save generic error message to database: {save_error}")
@@ -5822,7 +5856,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Get the actual timestamp of the tool_use message we just saved
                 # This is critical for ensuring the tool_result has the correct timestamp (+1ms after tool_use)
                 if tool_use_save_result:
-                    tool_use_conv_id, tool_use_msg_id, cancelled_ids = tool_use_save_result
+                    tool_use_conv_id, tool_use_msg_id, cancelled_ids, _ts = tool_use_save_result
                     # Note: tool_use messages shouldn't cancel previous messages (only text messages do)
                     tool_use_msg_result = supabase.table("messages")\
                         .select("timestamp")\
@@ -6050,7 +6084,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     local_objects=local_objects
                 )
                 if save_result:
-                    saved_conversation_id, error_message_id, cancelled_ids = save_result
+                    saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                     logger.info(f"Authentication error saved as message {error_message_id} in conversation {saved_conversation_id}")
                 else:
                     logger.error(f"Failed to save authentication error message to database")
@@ -6111,7 +6145,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         local_objects=local_objects
                     )
                     if save_result:
-                        saved_conversation_id, error_message_id, cancelled_ids = save_result
+                        saved_conversation_id, error_message_id, cancelled_ids, _ts = save_result
                         logger.info(f"BadRequest error (during tool use) saved as message {error_message_id} in conversation {saved_conversation_id}")
                     else:
                         logger.error(f"Failed to save BadRequest error message to database")
@@ -6337,7 +6371,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             save_tool_content = content_list + server_tool_blocks if server_tool_blocks else None
             save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type=save_content_type, tool_content=save_tool_content, client_timestamp=final_text_timestamp, local_objects=local_objects)
             if save_result:
-                saved_conversation_id, bot_message_id, cancelled_ids = save_result
+                saved_conversation_id, bot_message_id, cancelled_ids, saved_timestamp = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
 
                 # Cancel and broadcast previous messages if any were superseded
@@ -6416,6 +6450,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "conversation_id": saved_conversation_id,  # Include real conversation_id for client sync (resolved from optimistic if needed)
                     "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
                     "client_message_id": client_message_id,  # Echo back optimistic message ID
+                    "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "response"  # Indicate this is a direct response (vs broadcast)
                 }
                 direct_send_succeeded = await safe_websocket_send(response_payload)
@@ -6432,6 +6467,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "conversation_id": processing_conversation_id,  # Send the real conversation ID
                     "client_conversation_id": client_conversation_id,  # Include for client validation
                     "client_message_id": client_message_id,  # Include for completeness
+                    "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "broadcast"  # Keep type to indicate it's a broadcast
                 }
                 # Bot responses should go to ALL sessions - they originate from the server, not from any client session

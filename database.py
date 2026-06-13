@@ -228,8 +228,8 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
         return []
 
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None) -> Optional[Tuple[int, int, List[int]]]:
-    """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids)
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None) -> Optional[Tuple[int, int, List[int], str]]:
+    """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids, timestamp)
 
     Args:
         user_id: User ID
@@ -391,7 +391,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         if message_sender == "USER" and content_type == "text" and request_id and conversation_id and conversation_id > 0:
             try:
                 existing = supabase.table("messages") \
-                    .select("id") \
+                    .select("id, timestamp") \
                     .eq("conversation_id", conversation_id) \
                     .eq("request_id", request_id) \
                     .eq("message_sender", "USER") \
@@ -399,8 +399,13 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                     .limit(1).execute()
                 if existing.data:
                     existing_id = existing.data[0]["id"]
+                    existing_timestamp = existing.data[0]["timestamp"]
                     logger.info(f"USER message dedupe: returning existing message_id={existing_id} for conversation_id={conversation_id}, request_id={request_id}")
-                    return (existing_id, conversation_id, [])
+                    # Canonical order is (conversation_id, message_id, cancelled_ids, timestamp).
+                    # This early-return previously returned (existing_id, conversation_id, []) — which
+                    # both omitted the timestamp (breaking the 4-tuple contract callers now unpack) and
+                    # swapped conversation_id/message_id relative to the main return.
+                    return (conversation_id, existing_id, [], existing_timestamp)
             except Exception as e:
                 logger.error(f"Error checking for existing USER message dedupe (conversation_id={conversation_id}, request_id={request_id}): {e}")
                 # Fall through to insert — losing dedupe is preferable to losing a message
@@ -527,7 +532,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         saved_conv_id = saved_message.get("conversation_id")
         logger.info(f"Successfully saved {message_sender} message: message_id={message_id}, conversation_id={saved_conv_id}, request_id={request_id}, content_type={content_type}")
 
-        return (conversation_id, message_id, cancelled_message_ids)
+        return (conversation_id, message_id, cancelled_message_ids, actual_timestamp)
 
     except Exception as e:
         logger.error(f"Error saving message to database: {str(e)}")

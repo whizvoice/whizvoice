@@ -278,6 +278,23 @@ async def agent_lookup_phone_contacts(name: str, user_id: str = None, websocket=
     )
 
 
+async def agent_request_google_contacts_consent(user_id: str = None, websocket=None,
+                                                 tool_result_handler=None, conversation_id: str = None) -> dict:
+    """Ask the device to run the Google Contacts consent flow.
+
+    The device shows Google's incremental consent UI and returns a one-time server
+    auth code. Returns {server_auth_code: ...} on grant, {declined: true} on cancel,
+    or {timed_out: true} if the user never responded. The longer initial timeout
+    covers the round-trip until the device sends 'waiting_for_google_contacts_consent'
+    (which then extends the server-side deadline while the user consents).
+    """
+    return await _send_device_tool(
+        "agent_request_google_contacts_consent", {},
+        user_id, websocket, tool_result_handler, conversation_id,
+        timeout=15.0
+    )
+
+
 # ========== Tool definitions for Claude ==========
 
 device_control_tools = [
@@ -346,7 +363,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_submit_bug_report",
-        "description": "File a bug report on the user's behalf. Captures a snapshot of the current screen, recent logs, and a recent audio buffer, and submits it along with the user's description of the problem. Use when the user asks to file a bug, report a problem, or send feedback about something broken in Whiz. The `message` parameter MUST contain a clear description of what is wrong. If the user has not stated what the problem is, ASK them what's wrong before calling this tool — do not call it with a placeholder or guessed message. Do not call this tool just because the user mentioned bugs in passing.",
+        "description": "File a bug report on the user's behalf. Captures a snapshot of the current screen, recent logs, and a recent audio buffer, and submits it along with the user's description of the problem. Use when the user asks to file a bug, report a problem, or send feedback about something broken in Whiz. If the user has not stated what the problem is, ASK them what's wrong before calling this tool. If what they said doesn't really make sense, submit the bug anyways and let them know so they have the option to correct it. Do not call this tool just because the user mentioned bugs in passing.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -409,7 +426,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_calendar_event",
-        "description": "Draft or save a calendar event. Use action 'draft' to open the calendar app pre-filled with event details — after drafting, ask the user to confirm, then call again with action 'save'. Use action 'save' to save the event directly to the device calendar and dismiss the draft UI. Pass the same event params for both calls.",
+        "description": "Draft or save a calendar event. Use action 'draft' to open the calendar app pre-filled with event details — after drafting, ask the user to confirm, then call again with action 'save'. Use action 'save' to save the event directly to the device calendar and dismiss the draft UI. Pass the same event params for both calls. NEVER use a fake or example email for guests. Use get_contact_preference to find email addresses. Guests can ONLY be invited by email, not phone number.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -521,20 +538,10 @@ device_control_tools = [
             },
             "required": ["volume_level"]
         }
-    },
-    {
-        "type": "custom",
-        "name": "agent_lookup_phone_contacts",
-        "description": "Unless user specifies phone contacts or Android contacts, ALWAYS use get_contact_preference and NOT THIS TOOL since get_contact_preference will fallback to phone contacts. Otherwise, use this tool to search the device's native phone contacts by name. Returns matching contacts with their phone numbers, email addresses, and postal addresses, each labeled by type (mobile, work, home, personal, etc.). If the device hasn't granted contacts permission, returns an empty list — ask the user for the info directly.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "The name to search for in the device's phone contacts"
-                }
-            },
-            "required": ["name"]
-        }
     }
+    # NOTE: agent_lookup_phone_contacts is intentionally NOT advertised to Claude.
+    # get_contact_preference is the single contact-lookup entry point (saved -> phone
+    # -> Google); it calls the agent_lookup_phone_contacts() function directly as an
+    # internal step. Exposing the phone-only tool let the model bypass the saved +
+    # Google logic, so it's kept as an internal device tool only.
 ]

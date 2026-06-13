@@ -19,6 +19,11 @@ class ChatResponse(BaseModel):
 # Authentication models
 class GoogleTokenRequest(BaseModel):
     token: str
+    # Optional one-time OAuth server auth code. When present, the server exchanges
+    # it for a Google refresh token (with contacts scopes) and stores it so it can
+    # read the user's Google Contacts server-side. Absent for clients/users that
+    # haven't granted the contacts scopes.
+    server_auth_code: Optional[str] = None
 
 
 class TokenResponse(BaseModel):

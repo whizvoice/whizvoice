@@ -195,13 +195,26 @@ def add_contact_preference(user_id: str, nickname: Optional[str], real_name: str
         }
 
 
+# Maps a requested field name to the bucket key used in contact results.
+_FIELD_TO_BUCKET = {"phone": "phone_numbers", "email": "emails", "address": "addresses"}
+# When the caller doesn't say what it needs, enrich the buckets that are commonly
+# both wanted and missing from phone contacts (numbers are almost always present).
+_DEFAULT_ENRICH_FIELDS = ["email", "address"]
+
+
 async def get_contact_preference(user_id: str, name: str,
                                   websocket=None, tool_result_handler=None,
-                                  conversation_id: str = None) -> Dict[str, Any]:
+                                  conversation_id: str = None,
+                                  needed_fields=None) -> Dict[str, Any]:
     """
     Look up a contact by name (can be nickname or real name) to get their details.
     If not found in saved preferences, automatically falls back to searching the
-    device's native phone contacts.
+    device's native phone contacts, then the user's Google Contacts.
+
+    When a contact IS found in saved/phone contacts but is missing a field the
+    caller needs (see needed_fields), the missing field is filled in from the
+    user's Google Contacts (matched by name) — so e.g. a phone contact that has a
+    number but no email can still resolve an email.
 
     Args:
         user_id: The user ID
@@ -209,6 +222,9 @@ async def get_contact_preference(user_id: str, name: str,
         websocket: Optional websocket for device contact lookup fallback
         tool_result_handler: Optional handler for device tool results
         conversation_id: Optional conversation ID for device tool context
+        needed_fields: Optional list of the detail(s) the caller needs right now,
+            any of 'phone' / 'email' / 'address'. Drives Google-Contacts enrichment
+            of an otherwise-incomplete match. Defaults to email+address when omitted.
 
     Returns:
         Dictionary with found status and contact details if found
@@ -233,18 +249,85 @@ async def get_contact_preference(user_id: str, name: str,
                 "primary_address": contact.get("primary_address")
             }
 
+        async def _ensure_google_token(prompt):
+            """Return True if Google Contacts can be queried for this user.
+
+            If no refresh token is stored yet and `prompt` is True, runs the
+            on-demand consent flow on the device (mirroring the contacts-permission
+            pattern) and stores the resulting token, returning True on success.
+            A failed/cancelled consent just fails this turn — we re-prompt next time
+            rather than permanently suppressing (avoids a transient sign-in error
+            locking the feature off). Never raises.
+            """
+            from google_contacts import has_google_contacts_token, store_refresh_token_from_auth_code
+            if has_google_contacts_token(user_id):
+                return True
+            if not prompt or websocket is None:
+                return False
+            try:
+                from device_control_tools import agent_request_google_contacts_consent
+                logger.info(f"Requesting on-demand Google Contacts consent for user {user_id}")
+                result = await agent_request_google_contacts_consent(
+                    user_id, websocket, tool_result_handler, conversation_id
+                )
+            except Exception as e:
+                logger.warning(f"Google Contacts consent request failed for user {user_id}: {e}")
+                return False
+            code = result.get("server_auth_code")
+            if code:
+                return store_refresh_token_from_auth_code(user_id, code)
+            logger.info(f"Google Contacts consent not granted for user {user_id}: {result}")
+            return False
+
+        async def _google_matches_if_missing(contact):
+            """Return ALL of the user's matching Google Contacts when `contact` is
+            missing a needed field, else [].
+
+            We deliberately don't merge or pick a single match — surfacing the full
+            list lets the LLM see exactly what data exists across sources and
+            reconcile it (or ask the user). Prompts for consent on demand only when
+            the caller explicitly named the field(s) it needs. Never raises.
+            """
+            fields = needed_fields or _DEFAULT_ENRICH_FIELDS
+            missing = [f for f in fields
+                       if f in _FIELD_TO_BUCKET and not contact.get(_FIELD_TO_BUCKET[f])]
+            if not missing:
+                return []
+            # Prompt for consent only on explicit field requests; for the default
+            # email/address top-up, only consult Google if access was already granted.
+            if not await _ensure_google_token(prompt=needed_fields is not None):
+                return []
+            try:
+                from google_contacts import lookup_google_contacts
+                matches = lookup_google_contacts(user_id, name).get("contacts", [])
+            except Exception as e:
+                logger.warning(f"Google enrichment lookup failed for '{name}': {e}")
+                return []
+            if matches:
+                logger.info(f"Surfacing {len(matches)} Google contact(s) for '{name}' (missing: {missing})")
+            return matches
+
+        async def _build_and_enrich(contact):
+            """Build a saved-contact result and attach Google matches if it's missing
+            a needed field."""
+            res = _build_result(contact)
+            matches = await _google_matches_if_missing(res)
+            if matches:
+                res["google_contacts"] = matches
+            return res
+
         # Try exact nickname match via index
         if normalized_name in data["nickname_index"]:
             contact_id = data["nickname_index"][normalized_name]
             contact = data["contacts"].get(contact_id)
             if contact:
-                return _build_result(contact)
+                return await _build_and_enrich(contact)
 
         # Try exact real_name match
         for contact_id, contact in data["contacts"].items():
             real_name = contact.get("real_name", "")
             if real_name and normalize_nickname(real_name) == normalized_name:
-                return _build_result(contact)
+                return await _build_and_enrich(contact)
 
         # Try partial match: search term matches any word in real_name
         partial_matches = []
@@ -256,7 +339,7 @@ async def get_contact_preference(user_id: str, name: str,
                     partial_matches.append(contact)
 
         if len(partial_matches) == 1:
-            return _build_result(partial_matches[0])
+            return await _build_and_enrich(partial_matches[0])
         elif len(partial_matches) > 1:
             return {
                 "found": True,
@@ -276,17 +359,44 @@ async def get_contact_preference(user_id: str, name: str,
                 device_contacts = device_result.get("contacts", [])
                 if device_contacts:
                     logger.info(f"Found {len(device_contacts)} device contact(s) for '{name}'")
-                    return {
+                    response = {
                         "found": False,
                         "device_contacts": device_contacts,
                         "message": f"Not found in saved contacts, but found {len(device_contacts)} match(es) in phone contacts."
                     }
+                    # If the single phone match is missing a needed field (e.g. has a
+                    # number but no email), also surface the user's Google matches so
+                    # the LLM can fill the gap from whichever one has it.
+                    if len(device_contacts) == 1:
+                        matches = await _google_matches_if_missing(device_contacts[0])
+                        if matches:
+                            response["google_contacts"] = matches
+                    return response
                 elif device_result.get("permission_denied"):
                     logger.info(f"Device contacts permission denied for '{name}'")
                 else:
                     logger.info(f"No device contacts found for '{name}'")
             except Exception as e:
                 logger.warning(f"Device contacts fallback failed for '{name}': {e}")
+
+        # Still nothing — try Google Contacts (lowest priority, server-side People API).
+        # Prompt for consent on demand since the whole lookup otherwise failed.
+        try:
+            if await _ensure_google_token(prompt=True):
+                from google_contacts import lookup_google_contacts
+                google_result = lookup_google_contacts(user_id, name)
+                google_contacts = google_result.get("contacts", [])
+            else:
+                google_contacts = []
+            if google_contacts:
+                logger.info(f"Found {len(google_contacts)} Google contact(s) for '{name}'")
+                return {
+                    "found": False,
+                    "google_contacts": google_contacts,
+                    "message": f"Not found in saved or phone contacts, but found {len(google_contacts)} match(es) in Google Contacts."
+                }
+        except Exception as e:
+            logger.warning(f"Google contacts fallback failed for '{name}': {e}")
 
         return {"found": False, "reminder": "DO NOT ask the user to create a contact unless you absolutely cannot proceed without it. For example if you have the name and messaging app you do not need to create a contact to proceed to send a message. If the user asked you for directions, just try getting directions for the phrase they gave you; the address for that phrase may already be stored in Google Maps."}
 
@@ -498,7 +608,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "add_contact_preference",
-        "description": "Add or update a contact with real name, nickname, preferred messaging app, and optional phone number, email, and address. Each phone/email/address is stored with a label (e.g. 'mobile', 'work', 'personal', 'home'). If the user doesn't provide phone/email/address details, consider using agent_lookup_phone_contacts first to auto-fill from their phone contacts.",
+        "description": "Add or update a contact with real name, nickname, preferred messaging app, and optional phone number, email, and address. Each phone/email/address is stored with a label (e.g. 'mobile', 'work', 'personal', 'home'). If the user doesn't provide phone/email/address details, consider using get_contact_preference first to auto-fill from their phone or Google contacts.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -546,13 +656,18 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "get_contact_preference",
-        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. Do NOT use this for searching addresses for agent_get_google_maps_directions unless the query involves someone's name. This automatically searches saved contacts first, then falls back to the device's native phone contacts if not found. If the result includes 'device_contacts', those are matches from the phone — you can use that info directly or suggest saving it. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), send the message anyway. If the contact IS found, make SURE you have used the correct contact name (not the nickname) for sending messages. Also use this to look up a contact's email for Asana task assignment. The name can match either the nickname or the real name. Note that people may call different types of addresses different things, for example someone's home or house refers to the same address, and someone's office or work or workplace refer to the same address.",
+        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. Do NOT use this for searching addresses for agent_get_google_maps_directions unless the query involves someone's name. If you need a specific detail (an email to send a message, an address for directions, a number to call), pass 'needed_fields'. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), continue to complete the task. If the contact IS found, make SURE you have used the correct contact name (not the nickname) for sending messages. Note that people may call different types of addresses different things, for example someone's home or house refers to the same address, and someone's office or work or workplace refer to the same address.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
                     "description": "The name to look up - can be a nickname (e.g., 'husband', 'mom', 'boss') or a real name (e.g., 'Robin Pham')"
+                },
+                "needed_fields": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["phone", "email", "address"]},
+                    "description": "Optional. The specific detail(s) you need from this contact right now, e.g. ['email'] before sending an email, ['address'] before getting directions, ['phone'] before calling. If the matched contact (saved or phone) is missing a requested field, the lookup will fill it in from the user's Google Contacts. Pass this whenever you're after a particular detail; omit it if you just need general contact info."
                 }
             },
             "required": ["name"]

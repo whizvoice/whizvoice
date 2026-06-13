@@ -894,7 +894,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_log_health_data",
-        "description": "Log a health data point on the user's device. Use this when the user wants to log calories consumed or a body weight measurement. If the result has `reason: \"requires_connection\"`, the value WAS written to Health Connect, but no health app is connected so the user can't see the logged data. The `unconnected_health_apps` array names the apps that aren't connected. EVERY TIME you get this result, even if you already offered earlier in the conversation, you MUST name the unconnected app(s) and tell the user the data won't show up there until they set up the connection, and offer to open Health Connect settings via agent_open_health_app_settings so user can connect an app.",
+        "description": "Log a health data point on the user's device. Use this when the user wants to log calories consumed or a body weight measurement. If the user names a food without a calorie count, estimate the calorie count to call this tool. If the result has `reason: \"requires_connection\"`, the value WAS written to Health Connect, but no health app is connected so the user can't see the logged data. The `unconnected_health_apps` array names the apps that aren't connected. EVERY TIME you get this result, even if you already offered earlier in the conversation, you MUST name the unconnected app(s) and tell the user the data won't show up there until they set up the connection, and offer to open Health Connect settings via agent_open_health_app_settings so user can connect an app.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -985,7 +985,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_insert_text",
-        "description": "Type text into an input field on the current screen. If element_id is provided, it must come from the most recent agent_get_ui call. If omitted, the focused input is used, falling back to the sole editable field on screen. The field is cleared before the new text is inserted.",
+        "description": "Type text into an input field on the current screen. If element_id is provided, it must come from the most recent agent_get_ui call. If omitted, the focused input is used, falling back to the sole editable field on screen. The field is cleared before the new text is inserted. Set submit=true to press the keyboard's Enter/Search/Go action on the field after typing — use this to submit a search bar or send a query in one step instead of looking for a separate search button.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -996,6 +996,10 @@ screen_agent_tools = [
                 "element_id": {
                     "type": "integer",
                     "description": "Optional. The element_id from the most recent agent_get_ui call. Omit to target the focused input or the only editable field on screen."
+                },
+                "submit": {
+                    "type": "boolean",
+                    "description": "Optional, default false. If true, presses Enter / the keyboard's IME action (Search, Go, Done) on the field after the text is set, submitting it. Use for search bars where there is no obvious search button to click."
                 }
             },
             "required": ["text"]

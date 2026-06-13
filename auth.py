@@ -15,8 +15,13 @@ from google.oauth2 import id_token
 from google.auth.transport import requests
 import logging
 
-# Security scheme for JWT
-security = HTTPBearer()
+# Security scheme for JWT.
+# auto_error=False so a missing/malformed Authorization header yields None here
+# (instead of HTTPBearer's default 403) and we can raise a 401 ourselves below.
+# 401 is the correct status for missing/expired credentials and is what the
+# Android client's OkHttp TokenAuthenticator listens for to refresh-and-retry
+# (OkHttp Authenticator fires only on 401/407, never 403).
+security = HTTPBearer(auto_error=False)
 
 # Configuration (ideally stored in environment variables)
 SECRET_KEY = GOOGLE_WEB_CLIENT_SECRET
@@ -129,13 +134,17 @@ def verify_google_token(token: str) -> Dict:
         print(f"Unexpected error during token verification: {str(e)}")
         raise AuthError(f"Token verification failed: {str(e)}")
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
     """
     Get the current user from a JWT token
     """
     try:
-        if not credentials.credentials:
-            raise HTTPException(status_code=401, detail="No token provided")
+        if credentials is None or not credentials.credentials:
+            raise HTTPException(
+                status_code=401,
+                detail="No token provided",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         
         user_info = verify_token(credentials.credentials, logger)
         user_id = user_info.get("sub")
