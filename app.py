@@ -628,8 +628,13 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         current_dt = get_current_datetime()
 
     api_params = {
-        "model": "claude-sonnet-4-5-20250929",
+        "model": "claude-sonnet-4-6",
         "max_tokens": 1000,
+        # Low effort + thinking disabled keeps latency/cost matched to the prior
+        # Sonnet 4.5 behavior (4.5 had no effort param and no thinking by default).
+        # Drop "thinking" to let 4.6 adaptively think on harder turns (slower).
+        "output_config": {"effort": "low"},
+        "thinking": {"type": "disabled"},
         "messages": messages,
         "system": [
             {
