@@ -134,6 +134,8 @@ DON'T DUPLICATE: You have access to the tool history and the success/failure of 
 
 PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
 
+SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result.
+
 EXTRA NOTE ABOUT NAVIGATION: If you are about to close yourself but you used agent_get_google_maps_directions during the converation, please launch_app Google Maps before you close so the user can continue to navigate.
 """
 
