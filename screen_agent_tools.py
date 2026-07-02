@@ -572,7 +572,7 @@ async def agent_close_other_app(app_name: str, user_id: str = None, websocket = 
         }
 
 
-async def agent_log_health_data(data_type: str, value: float, user_id: str = None, websocket = None,
+async def agent_log_health_data(data_type: str, value: float, date: str = None, user_id: str = None, websocket = None,
                                 tool_result_handler = None, conversation_id: str = None) -> dict:
     """
     Log a health data point to the user's device.
@@ -584,6 +584,9 @@ async def agent_log_health_data(data_type: str, value: float, user_id: str = Non
     Args:
         data_type: "calories" or "weight"
         value: kcal for calories, kg for weight
+        date: Optional ISO date (YYYY-MM-DD) to log to. Omit/None logs to today (now).
+              A past date writes the record at noon local time on that day. Backdating
+              requires Health Connect (the Fitbit UI fallback can only log to today).
         user_id: The user ID (for logging purposes)
         websocket: The WebSocket connection to send messages through
         tool_result_handler: Handler for tracking pending tool executions
@@ -599,7 +602,7 @@ async def agent_log_health_data(data_type: str, value: float, user_id: str = Non
 
         tool_request_id = f"tool_{uuid.uuid4().hex[:8]}"
 
-        logger.info(f"Logging health data: type={data_type} value={value} (user: {user_id}, request: {tool_request_id})")
+        logger.info(f"Logging health data: type={data_type} value={value} date={date or 'today'} (user: {user_id}, request: {tool_request_id})")
 
         if not websocket:
             logger.error("No WebSocket connection available for agent_log_health_data")
@@ -615,6 +618,9 @@ async def agent_log_health_data(data_type: str, value: float, user_id: str = Non
             "params": {
                 "data_type": data_type,
                 "value": value,
+                # Only include `date` when backdating so older app builds (which ignore
+                # unknown keys) keep logging to today, and the message stays minimal.
+                **({"date": date} if date else {}),
             },
             "conversation_id": conversation_id
         }
@@ -906,6 +912,10 @@ screen_agent_tools = [
                 "value": {
                     "type": "number",
                     "description": "The numeric value. For 'calories', kilocalories (e.g. 500). For 'weight', kilograms (e.g. 72.5). Convert from lbs to kg before calling."
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Optional. ISO date (YYYY-MM-DD) to log this entry to, in the user's local timezone. OMIT for today (the default). Only set this when the user refers to a different day (e.g. 'yesterday', 'last Monday'); resolve the relative day to a concrete date using the current date already provided to you. Must not be a future date."
                 }
             },
             "required": ["data_type", "value"]
