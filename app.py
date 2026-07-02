@@ -2010,6 +2010,7 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id, **kwargs: (
             args.get('data_type'),
             args.get('value'),
+            args.get('date'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
