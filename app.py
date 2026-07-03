@@ -134,6 +134,8 @@ DON'T DUPLICATE: You have access to the tool history and the success/failure of 
 
 PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
 
+SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result.
+
 EXTRA NOTE ABOUT NAVIGATION: If you are about to close yourself but you used agent_get_google_maps_directions during the converation, please launch_app Google Maps before you close so the user can continue to navigate.
 """
 
@@ -605,6 +607,34 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         logger.warning(f"[CLAUDE_CONTEXT] Orphaned tool_use detected but no conversation_id, inserting synthetic tool_results")
         _fix_orphaned_tool_uses(messages)
 
+    # GUARD: the context must never end on an assistant message.
+    # Under concurrent requests on one conversation, a sibling request can finish and append its
+    # final assistant turn to the shared (per-conversation) context while THIS request is still
+    # mid tool-loop. When this request then re-reads the context to continue after its tool
+    # returns, the message list ends on that sibling's assistant message, and the Claude API
+    # rejects it ("does not support assistant message prefill. The conversation must end with a
+    # user message."). Insert a persisted user message so the list ends on a user turn. It is
+    # stored as hidden_text so it stays out of the chat UI while remaining visible to the LLM,
+    # and it is a permanent part of the conversation history (DB + Redis), not a temporary patch.
+    if messages and messages[-1].get('role') == 'assistant':
+        filler_text = "[system: previous tool result returned above; no new message from the user]"
+        logger.warning(
+            f"[CLAUDE_CONTEXT] Context for session {session_id} ends on an assistant message "
+            f"(concurrent-request lap); inserting persisted hidden_text user filler to keep the call valid"
+        )
+        # Persist durably to the DB (now() timestamp sorts it after the lapping sibling, so
+        # reloads stay valid) and mirror it into the live Redis context so both stores agree.
+        # request_id is intentionally omitted so this filler is never pulled into another
+        # request's timestamp window when that request's trailing assistant text is saved.
+        if conversation_id and user_id:
+            try:
+                save_message_to_db(user_id, conversation_id, filler_text, "USER", content_type="hidden_text")
+            except Exception as filler_err:
+                logger.error(f"[CLAUDE_CONTEXT] Failed to persist hidden_text filler: {filler_err}")
+        await add_chat_message(session_id, {"role": "user", "content": filler_text})
+        # End THIS call's outgoing message list on the user turn.
+        messages.append({"role": "user", "content": filler_text})
+
     # Log the conversation context being sent to Claude
     logger.info(f"[CLAUDE_CONTEXT] Sending {len(messages)} messages to Claude for session {session_id}, stream={stream}")
     for i, msg in enumerate(messages):
@@ -628,8 +658,13 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         current_dt = get_current_datetime()
 
     api_params = {
-        "model": "claude-sonnet-4-5-20250929",
+        "model": "claude-sonnet-4-6",
         "max_tokens": 1000,
+        # Low effort + thinking disabled keeps latency/cost matched to the prior
+        # Sonnet 4.5 behavior (4.5 had no effort param and no thinking by default).
+        # Drop "thinking" to let 4.6 adaptively think on harder turns (slower).
+        "output_config": {"effort": "low"},
+        "thinking": {"type": "disabled"},
         "messages": messages,
         "system": [
             {
@@ -1975,6 +2010,7 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id, **kwargs: (
             args.get('data_type'),
             args.get('value'),
+            args.get('date'),
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
