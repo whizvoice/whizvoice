@@ -429,6 +429,92 @@ def _fix_orphaned_tool_uses(messages: List[Dict]) -> None:
         i += 1
 
 
+def _relocate_orphaned_server_tool_uses(messages: List[Dict]) -> bool:
+    """Recover unresolved web_search server_tool_use blocks by moving them to a
+    trailing assistant turn. Returns True if a trailing search turn was appended.
+
+    A web_search server_tool_use runs only while it is the trailing open turn. If the
+    turn that emitted it is closed before the deferred search runs (a concurrent
+    request flow or a user interjection appends later turns), the search is left
+    buried and unpaired, and every replay 400s:
+      `web_search tool use with id ... was found without a corresponding
+       web_search_tool_result block`.
+
+    Verified against the API (2026-07-18): extracting the orphaned server_tool_use and
+    re-appending it as a trailing assistant turn makes the API resume and complete the
+    deferred search and return the real result on the next response. Pairing is by
+    tool_use_id, not position; multiple orphans can share one trailing turn. The
+    legitimate still-open trailing search (its assistant turn followed only by
+    tool_result user messages) is left in place.
+    """
+    # tool_use_ids that already have their result block anywhere in the history.
+    resolved_ids = set()
+    for msg in messages:
+        content = msg.get('content')
+        if isinstance(content, list):
+            for b in content:
+                if (isinstance(b, dict) and b.get('type') == 'web_search_tool_result'
+                        and b.get('tool_use_id')):
+                    resolved_ids.add(b['tool_use_id'])
+
+    def _is_legit_open(idx: int) -> bool:
+        # Leave in place iff every message after this assistant turn is a user message
+        # containing only tool_result blocks (the in-flight continuation the API runs).
+        for j in range(idx + 1, len(messages)):
+            m = messages[j]
+            if m.get('role') != 'user':
+                return False
+            c = m.get('content')
+            if not isinstance(c, list) or not all(
+                    isinstance(b, dict) and b.get('type') == 'tool_result' for b in c):
+                return False
+        return True
+
+    relocated = []
+    empty_assistant_indices = []
+    for i, msg in enumerate(messages):
+        if msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content')
+        if not isinstance(content, list):
+            continue
+        has_unpaired = any(
+            isinstance(b, dict) and b.get('type') == 'server_tool_use'
+            and b.get('id') and b['id'] not in resolved_ids
+            for b in content
+        )
+        if not has_unpaired or _is_legit_open(i):
+            continue
+        kept = []
+        for b in content:
+            if (isinstance(b, dict) and b.get('type') == 'server_tool_use'
+                    and b.get('id') and b['id'] not in resolved_ids):
+                relocated.append(b)
+            else:
+                kept.append(b)
+        msg['content'] = kept
+        if not kept:
+            empty_assistant_indices.append(i)
+
+    if not relocated:
+        return False
+
+    # Drop any assistant message left empty by the extraction (an empty content list
+    # is not a valid message).
+    if empty_assistant_indices:
+        drop = set(empty_assistant_indices)
+        messages[:] = [m for k, m in enumerate(messages) if k not in drop]
+
+    ids = [b.get('id') for b in relocated]
+    logger.warning(
+        f"[_relocate_orphaned_server_tool_uses] Recovering {len(relocated)} buried "
+        f"web_search server_tool_use block(s) by relocating to a trailing assistant "
+        f"turn so the API completes them: {ids}"
+    )
+    messages.append({"role": "assistant", "content": relocated})
+    return True
+
+
 class _SafetyNetSkip(Exception):
     """Raised when the empty-context safety-net can't resolve a conversation and should skip silently."""
     pass
@@ -600,6 +686,14 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         logger.warning(f"[CLAUDE_CONTEXT] Orphaned tool_use detected but no conversation_id, inserting synthetic tool_results")
         _fix_orphaned_tool_uses(messages)
 
+    # Recover any buried, unresolved web_search server_tool_use (its turn was closed
+    # before the deferred search ran — concurrent flow or user interjection) by
+    # relocating it to a trailing assistant turn. The API then resumes and completes
+    # the search and returns the real result. Without this, the orphaned block 400s on
+    # every replay and permanently bricks the conversation. Runs on the final outgoing
+    # list, so it covers the initial request, tool-loop continuations, and retries.
+    relocated_search_turn = _relocate_orphaned_server_tool_uses(messages)
+
     # GUARD: the context must never end on an assistant message.
     # Under concurrent requests on one conversation, a sibling request can finish and append its
     # final assistant turn to the shared (per-conversation) context while THIS request is still
@@ -609,7 +703,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     # user message."). Insert a persisted user message so the list ends on a user turn. It is
     # stored as hidden_text so it stays out of the chat UI while remaining visible to the LLM,
     # and it is a permanent part of the conversation history (DB + Redis), not a temporary patch.
-    if messages and messages[-1].get('role') == 'assistant':
+    # A relocated trailing search turn legitimately ends the list on an assistant
+    # message (a valid server-tool resume shape); don't append a user filler over it.
+    if (messages and messages[-1].get('role') == 'assistant'
+            and not relocated_search_turn):
         filler_text = "[system: previous tool result returned above; no new message from the user]"
         logger.warning(
             f"[CLAUDE_CONTEXT] Context for session {session_id} ends on an assistant message "
