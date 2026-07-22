@@ -9,7 +9,7 @@ import traceback
 import logging
 import time
 from fastapi.responses import JSONResponse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -107,18 +107,9 @@ stripe.api_key = STRIPE_SECRET_KEY
 set_stripe_config(STRIPE_SECRET_KEY, STRIPE_PRICE_ID)
 
 # System prompt for Claude
-CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can help with anything. You have access to various tools that you MUST use when appropriate:
+CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can help with anything. You have access to various tools that you MUST use when appropriate. Each tool's description explains when and how to use it — follow those. A couple of things the tool descriptions don't cover:
 
-1. When the user asks to open/launch an app (like WhatsApp, YouTube, Maps, etc.), you MUST use the 'launch_app' tool
-2. For WhatsApp messaging, use the WhatsApp-specific tools (whatsapp_select_chat, whatsapp_draft_message, whatsapp_send_message)
-3. For SMS texting, use the SMS-specific tools (sms_select_chat, sms_draft_message, sms_send_message)
-4. For Asana/task management, use the Asana tools
-   - remember to use update_asana_task instead of get_new_asana_task_id if you are changing a task, to avoid creating duplicates.
-   - Before creating a new task, check the parent task preference using get_parent_task_preference. If it returns 'true', you MUST always assign a parent task — ask the user if you're unsure which parent to use.
-5. For app information, use the get_app_info tool
-6. For music playback, use the agent_youtube_music tool (currently we only support YouTube Music, not Spotify).
-7. For deciding on a random color when a list of colors isn't specified, ALWAYS use the pick_random_color tool
-8. For weather, use the get_weather tool with the appropriate days_ahead parameter (0 = today, 1 = tomorrow, etc.)
+- For music playback, we currently only support YouTube Music, not Spotify.
 
 IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather than just describing what you would do.
 
@@ -133,6 +124,8 @@ FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *
 DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. PLEASE CHECK THE HISTORY. Often multiple Asana tasks will be created as different versions of the same user intent, and YOU NEED TO PROACTIVELY DELETE THE OLD ONES.
 
 PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
+
+ACT FIRST CLARIFY LATER: People use this app while multitasking, and if you ask for clarification for bug reports and adding items to to do list without executing, the user may not see it and what they wanted is dropped. You can always adjust what you did later.
 
 SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result.
 
@@ -436,6 +429,92 @@ def _fix_orphaned_tool_uses(messages: List[Dict]) -> None:
         i += 1
 
 
+def _relocate_orphaned_server_tool_uses(messages: List[Dict]) -> bool:
+    """Recover unresolved web_search server_tool_use blocks by moving them to a
+    trailing assistant turn. Returns True if a trailing search turn was appended.
+
+    A web_search server_tool_use runs only while it is the trailing open turn. If the
+    turn that emitted it is closed before the deferred search runs (a concurrent
+    request flow or a user interjection appends later turns), the search is left
+    buried and unpaired, and every replay 400s:
+      `web_search tool use with id ... was found without a corresponding
+       web_search_tool_result block`.
+
+    Verified against the API (2026-07-18): extracting the orphaned server_tool_use and
+    re-appending it as a trailing assistant turn makes the API resume and complete the
+    deferred search and return the real result on the next response. Pairing is by
+    tool_use_id, not position; multiple orphans can share one trailing turn. The
+    legitimate still-open trailing search (its assistant turn followed only by
+    tool_result user messages) is left in place.
+    """
+    # tool_use_ids that already have their result block anywhere in the history.
+    resolved_ids = set()
+    for msg in messages:
+        content = msg.get('content')
+        if isinstance(content, list):
+            for b in content:
+                if (isinstance(b, dict) and b.get('type') == 'web_search_tool_result'
+                        and b.get('tool_use_id')):
+                    resolved_ids.add(b['tool_use_id'])
+
+    def _is_legit_open(idx: int) -> bool:
+        # Leave in place iff every message after this assistant turn is a user message
+        # containing only tool_result blocks (the in-flight continuation the API runs).
+        for j in range(idx + 1, len(messages)):
+            m = messages[j]
+            if m.get('role') != 'user':
+                return False
+            c = m.get('content')
+            if not isinstance(c, list) or not all(
+                    isinstance(b, dict) and b.get('type') == 'tool_result' for b in c):
+                return False
+        return True
+
+    relocated = []
+    empty_assistant_indices = []
+    for i, msg in enumerate(messages):
+        if msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content')
+        if not isinstance(content, list):
+            continue
+        has_unpaired = any(
+            isinstance(b, dict) and b.get('type') == 'server_tool_use'
+            and b.get('id') and b['id'] not in resolved_ids
+            for b in content
+        )
+        if not has_unpaired or _is_legit_open(i):
+            continue
+        kept = []
+        for b in content:
+            if (isinstance(b, dict) and b.get('type') == 'server_tool_use'
+                    and b.get('id') and b['id'] not in resolved_ids):
+                relocated.append(b)
+            else:
+                kept.append(b)
+        msg['content'] = kept
+        if not kept:
+            empty_assistant_indices.append(i)
+
+    if not relocated:
+        return False
+
+    # Drop any assistant message left empty by the extraction (an empty content list
+    # is not a valid message).
+    if empty_assistant_indices:
+        drop = set(empty_assistant_indices)
+        messages[:] = [m for k, m in enumerate(messages) if k not in drop]
+
+    ids = [b.get('id') for b in relocated]
+    logger.warning(
+        f"[_relocate_orphaned_server_tool_uses] Recovering {len(relocated)} buried "
+        f"web_search server_tool_use block(s) by relocating to a trailing assistant "
+        f"turn so the API completes them: {ids}"
+    )
+    messages.append({"role": "assistant", "content": relocated})
+    return True
+
+
 class _SafetyNetSkip(Exception):
     """Raised when the empty-context safety-net can't resolve a conversation and should skip silently."""
     pass
@@ -607,6 +686,14 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         logger.warning(f"[CLAUDE_CONTEXT] Orphaned tool_use detected but no conversation_id, inserting synthetic tool_results")
         _fix_orphaned_tool_uses(messages)
 
+    # Recover any buried, unresolved web_search server_tool_use (its turn was closed
+    # before the deferred search ran — concurrent flow or user interjection) by
+    # relocating it to a trailing assistant turn. The API then resumes and completes
+    # the search and returns the real result. Without this, the orphaned block 400s on
+    # every replay and permanently bricks the conversation. Runs on the final outgoing
+    # list, so it covers the initial request, tool-loop continuations, and retries.
+    relocated_search_turn = _relocate_orphaned_server_tool_uses(messages)
+
     # GUARD: the context must never end on an assistant message.
     # Under concurrent requests on one conversation, a sibling request can finish and append its
     # final assistant turn to the shared (per-conversation) context while THIS request is still
@@ -616,7 +703,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     # user message."). Insert a persisted user message so the list ends on a user turn. It is
     # stored as hidden_text so it stays out of the chat UI while remaining visible to the LLM,
     # and it is a permanent part of the conversation history (DB + Redis), not a temporary patch.
-    if messages and messages[-1].get('role') == 'assistant':
+    # A relocated trailing search turn legitimately ends the list on an assistant
+    # message (a valid server-tool resume shape); don't append a user filler over it.
+    if (messages and messages[-1].get('role') == 'assistant'
+            and not relocated_search_turn):
         filler_text = "[system: previous tool result returned above; no new message from the user]"
         logger.warning(
             f"[CLAUDE_CONTEXT] Context for session {session_id} ends on an assistant message "
@@ -626,12 +716,19 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         # reloads stay valid) and mirror it into the live Redis context so both stores agree.
         # request_id is intentionally omitted so this filler is never pulled into another
         # request's timestamp window when that request's trailing assistant text is saved.
+        # Reuse the DB-chosen timestamp for the Redis mirror so both stores score the
+        # filler identically; add_chat_message raises MissingTimestampError without one.
+        filler_timestamp = None
         if conversation_id and user_id:
             try:
-                save_message_to_db(user_id, conversation_id, filler_text, "USER", content_type="hidden_text")
+                filler_result = save_message_to_db(user_id, conversation_id, filler_text, "USER", content_type="hidden_text")
+                if filler_result:
+                    filler_timestamp = filler_result[3]
             except Exception as filler_err:
                 logger.error(f"[CLAUDE_CONTEXT] Failed to persist hidden_text filler: {filler_err}")
-        await add_chat_message(session_id, {"role": "user", "content": filler_text})
+        if not filler_timestamp:
+            filler_timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        await add_chat_message(session_id, {"role": "user", "content": filler_text}, timestamp=filler_timestamp)
         # End THIS call's outgoing message list on the user turn.
         messages.append({"role": "user", "content": filler_text})
 
