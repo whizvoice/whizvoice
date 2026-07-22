@@ -9,7 +9,7 @@ import traceback
 import logging
 import time
 from fastapi.responses import JSONResponse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -716,12 +716,19 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         # reloads stay valid) and mirror it into the live Redis context so both stores agree.
         # request_id is intentionally omitted so this filler is never pulled into another
         # request's timestamp window when that request's trailing assistant text is saved.
+        # Reuse the DB-chosen timestamp for the Redis mirror so both stores score the
+        # filler identically; add_chat_message raises MissingTimestampError without one.
+        filler_timestamp = None
         if conversation_id and user_id:
             try:
-                save_message_to_db(user_id, conversation_id, filler_text, "USER", content_type="hidden_text")
+                filler_result = save_message_to_db(user_id, conversation_id, filler_text, "USER", content_type="hidden_text")
+                if filler_result:
+                    filler_timestamp = filler_result[3]
             except Exception as filler_err:
                 logger.error(f"[CLAUDE_CONTEXT] Failed to persist hidden_text filler: {filler_err}")
-        await add_chat_message(session_id, {"role": "user", "content": filler_text})
+        if not filler_timestamp:
+            filler_timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        await add_chat_message(session_id, {"role": "user", "content": filler_text}, timestamp=filler_timestamp)
         # End THIS call's outgoing message list on the user turn.
         messages.append({"role": "user", "content": filler_text})
 
