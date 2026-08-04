@@ -10,11 +10,19 @@ import time
 # Module-level caches for performance
 _asana_client_cache = {}  # user_id -> (client, timestamp)
 _user_gid_cache = {}  # user_id -> asana_gid
+_user_task_list_cache = {}  # (user_id, workspace_gid) -> My Tasks list gid
 _workspace_pref_cache = {}  # user_id -> (workspace_gid, timestamp)
 CACHE_TTL = 300  # 5 minutes
 
 # Redis client for shared caching across workers
 _redis_client = None
+
+# Fields requested on every task read. assignee_section is the section of the
+# user's My Tasks list ("Recently assigned", "Today", ...) — distinct from the
+# project sections exposed via memberships, which we don't use.
+_TASK_FIELDS = 'name,due_on,completed,projects.name,assignee_section.name'
+_TASK_OPT_FIELDS = 'gid,' + _TASK_FIELDS
+_PARENT_TASK_FIELDS = _TASK_FIELDS + ',num_subtasks'
 
 def init_redis_client(client):
     """Set the Redis client for shared caching."""
@@ -51,6 +59,42 @@ def get_asana_user_gid(user_id, api_client):
         me = users_api.get_user("me", {})
         _user_gid_cache[user_id] = me['gid']
     return _user_gid_cache[user_id]
+
+def get_user_task_list_gid(user_id, api_client, workspace_gid):
+    """Get the gid of the user's My Tasks list for a workspace, cached per user+workspace."""
+    key = (user_id, workspace_gid)
+    if key not in _user_task_list_cache:
+        user_gid = get_asana_user_gid(user_id, api_client)
+        user_task_lists_api = asana.UserTaskListsApi(api_client)
+        user_task_list = user_task_lists_api.get_user_task_list_for_user(
+            user_gid, workspace_gid, opts={})
+        _user_task_list_cache[key] = user_task_list['gid']
+    return _user_task_list_cache[key]
+
+def _get_my_tasks_sections(user_id, api_client, workspace_gid):
+    """Fetch the sections of the user's My Tasks list as a list of {gid, name}."""
+    user_task_list_gid = get_user_task_list_gid(user_id, api_client, workspace_gid)
+    sections_api = asana.SectionsApi(api_client)
+    return list(sections_api.get_sections_for_project(
+        user_task_list_gid, opts={'opt_fields': 'name'}))
+
+def get_asana_sections(user_id: str):
+    """Get the sections of the user's My Tasks list (Recently assigned, Today, ...)."""
+    workspace_gid = get_workspace_preference(user_id)
+    if not workspace_gid:
+        return "Error identifying user's preferred workspace to get sections from. Please set a preferred workspace using the manage_workspace_preference tool."
+    try:
+        api_client = get_asana_client(user_id)
+        return _get_my_tasks_sections(user_id, api_client, workspace_gid)
+    except ValueError as e:
+        # Re-raise the token error to be handled by the WebSocket endpoint
+        raise
+    except AsanaError as e:
+        status_code = e.status if hasattr(e, 'status') else 500
+        if status_code == 401:
+            return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        else:
+            return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
 def get_workspace_preference(user_id):
     """Get workspace preference with in-memory caching."""
@@ -150,7 +194,7 @@ def get_asana_tasks(user_id: str, start_date=None, end_date=None):
             'workspace': workspace_gid,
             'assignee': user_gid,
             'completed_since': 'now',
-            'opt_fields': 'name,due_on,completed,projects.name'
+            'opt_fields': _TASK_FIELDS
         }))
 
         # Filter out any tasks that don't have a due date
@@ -216,7 +260,7 @@ def get_parent_tasks(user_id: str):
             'workspace': workspace_gid,
             'assignee': user_gid,
             'completed_since': 'now',
-            'opt_fields': 'name,due_on,completed,projects.name,num_subtasks'
+            'opt_fields': _PARENT_TASK_FIELDS
         }))
         
         # Filter tasks to only those with subtasks and not completed
@@ -269,9 +313,9 @@ async def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, p
             
         # Create the task
         if parent_task_gid is None:
-            new_task = tasks_api.create_task(body={'data': task_data}, opts={'opt_fields': 'gid,name,due_on,completed,projects.name'})
+            new_task = tasks_api.create_task(body={'data': task_data}, opts={'opt_fields': _TASK_OPT_FIELDS})
         else:
-            new_task = tasks_api.create_subtask_for_task(body={'data': task_data}, task_gid=parent_task_gid, opts={'opt_fields': 'gid,name,due_on,completed,projects.name'})
+            new_task = tasks_api.create_subtask_for_task(body={'data': task_data}, task_gid=parent_task_gid, opts={'opt_fields': _TASK_OPT_FIELDS})
 
         # Convert to dict and add reminder message
         result = dict(new_task)
@@ -287,7 +331,32 @@ async def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, p
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
-def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=None, completed=None, parent_gid=None):
+def _resolve_section_gid(user_id, api_client, workspace_gid, section_name):
+    """
+    Resolve a My Tasks section name to its gid.
+
+    Matches case-insensitively: an exact name wins, otherwise a substring match
+    is accepted only when exactly one section contains it (so a rough voice
+    transcript like "recently" still lands). Returns (gid, None) on success or
+    (None, error_dict) when the name is unknown or ambiguous.
+    """
+    sections = _get_my_tasks_sections(user_id, api_client, workspace_gid)
+    target = section_name.strip().lower()
+
+    exact = [s for s in sections if s['name'].strip().lower() == target]
+    if len(exact) == 1:
+        return exact[0]['gid'], None
+
+    partial = [s for s in sections if target in s['name'].strip().lower()]
+    if len(partial) == 1:
+        return partial[0]['gid'], None
+
+    available = ', '.join(s['name'] for s in sections)
+    if len(partial) > 1:
+        return None, {"error": f"Section '{section_name}' is ambiguous — it matches more than one of your My Tasks sections. Available sections: {available}."}
+    return None, {"error": f"Section '{section_name}' not found in your My Tasks. Available sections: {available}."}
+
+def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=None, completed=None, parent_gid=None, section=None):
     """
     Update one or more fields of an Asana task. Only provided fields will be updated.
 
@@ -298,6 +367,7 @@ def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=No
         notes: New task notes/description (optional)
         completed: Boolean to mark task as complete/incomplete (optional)
         parent_gid: New parent task GID, or None to remove parent (optional)
+        section: Name of the My Tasks section to move the task into (optional)
     """
     try:
         api_client = get_asana_client(user_id)
@@ -305,6 +375,18 @@ def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=No
 
         # Build update data for regular fields
         update_data = {}
+
+        # Resolve the section before applying anything else, so an unrecognized
+        # name doesn't half-apply the rest of the update.
+        if section is not None:
+            workspace_gid = get_workspace_preference(user_id)
+            if not workspace_gid:
+                return {"error": "Error identifying user's preferred workspace to look up sections. Please set a preferred workspace using the manage_workspace_preference tool."}
+            section_gid, error = _resolve_section_gid(user_id, api_client, workspace_gid, section)
+            if error:
+                return error
+            update_data['assignee_section'] = section_gid
+
         if name is not None:
             update_data['name'] = name
         if due_date is not None:
@@ -320,7 +402,7 @@ def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=No
             updated_task = tasks_api.update_task(
                 body={'data': update_data},
                 task_gid=task_gid,
-                opts={'opt_fields': 'gid,name,due_on,completed,projects.name'}
+                opts={'opt_fields': _TASK_OPT_FIELDS}
             )
 
         # Handle parent separately (uses different API endpoint)
@@ -328,12 +410,12 @@ def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=No
             updated_task = tasks_api.set_parent_for_task(
                 body={'data': {'parent': parent_gid}},
                 task_gid=task_gid,
-                opts={'opt_fields': 'gid,name,due_on,completed,projects.name'}
+                opts={'opt_fields': _TASK_OPT_FIELDS}
             )
 
         # If no updates were provided, fetch the current task
         if updated_task is None:
-            updated_task = tasks_api.get_task(task_gid, opts={'opt_fields': 'gid,name,due_on,completed,projects.name'})
+            updated_task = tasks_api.get_task(task_gid, opts={'opt_fields': _TASK_OPT_FIELDS})
 
         return dict(updated_task)
     except ValueError as e:
@@ -343,6 +425,11 @@ def update_asana_task(user_id: str, task_gid, name=None, due_date=None, notes=No
         status_code = e.status if hasattr(e, 'status') else 500
         if status_code == 401:
             return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        elif status_code == 400 and section is not None:
+            # My Tasks sections belong to the assignee, so Asana rejects the move
+            # when the task is assigned to someone else. That's the likeliest
+            # cause of a 400 here, and the raw error doesn't say so.
+            return {"error": "Could not move the task to that section. My Tasks sections only work on tasks assigned to you, so this can happen when the task belongs to someone else.", "detail": str(e), "status_code": 400}
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
@@ -475,7 +562,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "update_asana_task",
-        "description": "Update an existing Asana task. You can update the task name, due date, notes, completion status, and/or parent in a single call. Only provide the fields you want to change - all parameters are optional. If the user specifies a specific due date (e.g. two weeks from now), you MUST use the get_current_datetime tool to calculate the due date in YYYY-MM-DD format. To mark a task as complete, set completed to true. To remove a parent (make it a standalone task), set parent_gid to null.",
+        "description": "Update an existing Asana task. You can update the task name, due date, notes, completion status, parent, and/or My Tasks section in a single call. Only provide the fields you want to change - all parameters are optional. If the user specifies a specific due date (e.g. two weeks from now), you MUST use the get_current_datetime tool to calculate the due date in YYYY-MM-DD format. To mark a task as complete, set completed to true. To remove a parent (make it a standalone task), set parent_gid to null.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -502,9 +589,23 @@ asana_tools = [
                 "parent_gid": {
                     "type": "string",
                     "description": "New parent task GID. Set to null to remove parent and make it a standalone task (optional)"
+                },
+                "section": {
+                    "type": "string",
+                    "description": "Name of the My Tasks section to move the task into, e.g. 'Today', 'Upcoming', 'Later', or 'Recently assigned'. Use get_asana_sections if you need the exact names. Omit this to leave the task's section unchanged - never pass it unless the user asked to move the task."
                 }
             },
             "required": ["task_gid"]
+        }
+    },
+    {
+        "type": "custom",
+        "name": "get_asana_sections",
+        "description": "Get the sections of the user's My Tasks list, such as 'Recently assigned', 'Today', 'Upcoming' and 'Later'. Use this when the user asks what sections they have, or when you need the exact name of a section before moving a task with update_asana_task.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     },
     {

@@ -182,5 +182,48 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIsInstance(validation_result, dict)
         self.assertIn("error", validation_result)
 
+class TestSectionToolWiring(unittest.TestCase):
+    """The My Tasks section tools are reachable through the registry and schemas."""
+
+    def test_get_asana_sections_is_registered(self):
+        """get_asana_sections is dispatchable and requires auth"""
+        self.assertIn("get_asana_sections", TOOL_REGISTRY)
+        self.assertTrue(TOOL_REGISTRY["get_asana_sections"]["requires_auth"])
+        self.assertEqual(
+            TOOL_REGISTRY["get_asana_sections"]["args_mapping"]({}, "user1"),
+            ("user1",))
+
+    def test_update_asana_task_forwards_section(self):
+        """A section name from the model reaches update_asana_task"""
+        mapping = TOOL_REGISTRY["update_asana_task"]["args_mapping"]
+        args = mapping({"task_gid": "task1", "section": "Today"}, "user1")
+        self.assertEqual(args[-1], "Today")
+
+    def test_update_asana_task_omits_section_by_default(self):
+        """No section in the tool call means None, so the section is left alone"""
+        mapping = TOOL_REGISTRY["update_asana_task"]["args_mapping"]
+        args = mapping({"task_gid": "task1"}, "user1")
+        self.assertIsNone(args[-1])
+
+    def test_section_tools_exposed_to_the_model(self):
+        """Both the sections tool and the section param are in the schemas sent to Claude"""
+        from asana_tools import asana_tools
+
+        by_name = {t["name"]: t for t in asana_tools}
+        self.assertIn("get_asana_sections", by_name)
+        self.assertIn(
+            "section",
+            by_name["update_asana_task"]["input_schema"]["properties"])
+
+    def test_task_creation_has_no_section_param(self):
+        """Creation stays on Asana's default section, so it exposes no section knob"""
+        from asana_tools import asana_tools
+
+        by_name = {t["name"]: t for t in asana_tools}
+        self.assertNotIn(
+            "section",
+            by_name["get_new_asana_task_id"]["input_schema"]["properties"])
+
+
 if __name__ == '__main__':
     unittest.main() 
