@@ -18,6 +18,7 @@ from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_sections, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
+import tool_dedupe
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_log_health_data, agent_open_health_app_settings, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
 from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
@@ -913,6 +914,10 @@ async def init_redis():
         
         # Share Redis client with asana_tools for cross-worker caching
         init_redis_client(redis_client)
+
+        # Share Redis client with tool_dedupe. REQUIRED: uvicorn runs 4 workers,
+        # so recent-call state must live in Redis to be visible across processes.
+        tool_dedupe.init_redis_client(redis_client)
 
         # Initialize Redis managers for distributed session state
         redis_managers = create_managers(redis_client)
@@ -2362,7 +2367,8 @@ async def execute_tool(tool_name, tool_args, user_id: Optional[str] = None, **co
         raise e
 
 
-async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] = None, **context):
+async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] = None,
+                                  request_id: Optional[str] = None, **context):
     """
     Execute a tool, routing screen agent tools through the queue.
 
@@ -2376,6 +2382,26 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
         user_id: User ID if authenticated
         **context: Additional context (websocket, tool_result_handler, conversation_id, session_id, device_id, etc.)
     """
+    # ===== Pre-execution duplicate guard =====
+    # Concurrent requests in one conversation run independent agent loops and can
+    # each decide on the same mutation before either result exists in shared
+    # context. The model decides on stale context; we re-check here, where the
+    # earlier call's result is already committed. See tool_dedupe for rationale.
+    if tool_dedupe.is_guarded(tool_name):
+        confirmed = bool(tool_args.get("confirm_duplicate"))
+        # Never forward the guard flag to the tool function itself.
+        tool_args = {k: v for k, v in tool_args.items() if k != "confirm_duplicate"}
+        if confirmed:
+            logger.info(f"Duplicate guard bypassed by confirm_duplicate for {tool_name}")
+        else:
+            recent = await tool_dedupe.find_recent_similar(tool_name, tool_args, user_id)
+            if recent:
+                logger.info(
+                    f"Duplicate guard triggered for {tool_name}: similar call from "
+                    f"request {recent.get('request_id')} at {recent.get('ts')}"
+                )
+                return tool_dedupe.build_duplicate_warning(tool_name, recent, time.time())
+
     # Check if this is a screen agent tool that needs queuing
     if screen_agent_queue.is_screen_agent_tool(tool_name):
         device_id = context.get("device_id")
@@ -2387,7 +2413,7 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
             }
 
         # Route through queue using device_id
-        return await screen_agent_queue.enqueue(
+        result = await screen_agent_queue.enqueue(
             device_id=device_id,
             tool_name=tool_name,
             tool_args=tool_args,
@@ -2395,7 +2421,10 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
         )
     else:
         # Non-screen agent tools execute directly
-        return await execute_tool(tool_name, tool_args, user_id, **context)
+        result = await execute_tool(tool_name, tool_args, user_id, **context)
+
+    await tool_dedupe.record_call(tool_name, tool_args, user_id, result, request_id)
+    return result
 
 
 @app.get("/")
@@ -6096,6 +6125,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         tb.name,
                         tb.input,
                         user_id,
+                        request_id=request_id,
                         websocket=websocket,
                         tool_result_handler=tool_result_handler,
                         conversation_id=session_conversation_id,

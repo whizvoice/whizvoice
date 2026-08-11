@@ -554,6 +554,10 @@ asana_tools = [
                 "is_parent_task": {
                     "type": "boolean",
                     "description": "Set to true only when the user explicitly asks to create a new parent/top-level task. Skips the parent task requirement when the user's preference requires parent tasks."
+                },
+                "confirm_duplicate": {
+                    "type": "boolean",
+                    "description": "Leave this out on a normal call. Only set it to true after a previous call returned duplicate_warning and you are confident the user genuinely wants this as a separate, additional task alongside the existing one."
                 }
             },
             "required": ["name"]
