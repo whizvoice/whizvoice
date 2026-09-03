@@ -301,7 +301,7 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_set_alarm",
-        "description": "Set an alarm on the user's Android device. Use this when the user asks to set an alarm, wake-up alarm, etc. Use the get_current_datetime tool to get the current date time, in order to calculate the date time the alarm needs to be set for. If the user asks you to set an alarm for a relative time less than three minutes from now , use agent_set_timer instead so that it's more accurate .",
+        "description": "Set an alarm on the user's Android device. Use this when the user asks to set an alarm, wake-up alarm, etc. Use the current date and time (already provided in your context, or via get_current_datetime) to calculate the time the alarm needs to be set for. AM/PM DISAMBIGUATION: if the user gives a time without AM or PM (e.g. '5 30', 'five thirty'), choose whichever interpretation comes soonest in the future relative to the current time (at 3 PM, '5 30' means 5:30 PM; at 11 PM, '6 30' means 6:30 AM). Exceptions: a leading zero or 24-hour phrasing ('05:30', 'oh five thirty', 'seventeen thirty') is already 24-hour time, so use it literally; and wake-up context ('wake me up at 5 30') means the morning. State the resolved AM/PM after setting the alarm so the user can correct it. If the user asks you to set an alarm for a relative time less than three minutes from now, use agent_set_timer instead so that it's more accurate.",
         "input_schema": {
             "type": "object",
             "properties": {
