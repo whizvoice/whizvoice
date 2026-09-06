@@ -33,7 +33,7 @@ from contacts_tools import contacts_tools, add_contact_preference, get_contact_p
 from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
-from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
+from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token, refresh_session_expired
 from supabase_client import supabase
 from redis_managers import create_managers, MissingTimestampError
 import stripe
@@ -2757,6 +2757,8 @@ class RefreshTokenRequest(BaseModel):
 class NewAccessTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    # Rotated refresh token. Optional so older app builds that ignore it keep working.
+    refresh_token: Optional[str] = None
 
 @app.post("/auth/refresh", response_model=NewAccessTokenResponse)
 async def refresh_access_token(request_data: RefreshTokenRequest):
@@ -2784,6 +2786,9 @@ async def refresh_access_token(request_data: RefreshTokenRequest):
 
         # For stateless refresh, we assume if it decodes and is type 'refresh', it's valid.
         # If we had a revocation list or stored refresh tokens, we'd check that here.
+        if refresh_session_expired(payload):
+            logger.info(f"Refresh session for user {user_id} passed the absolute cap; requiring re-sign-in")
+            raise HTTPException(status_code=401, detail="Session expired, please sign in again")
 
         # Fetch user details from database to include in the new access token
         # This ensures the refreshed token has all the necessary fields (email, name, etc.)
@@ -2810,9 +2815,15 @@ async def refresh_access_token(request_data: RefreshTokenRequest):
             raise HTTPException(status_code=500, detail="Failed to fetch user data")
 
         new_access_token = create_access_token(new_access_token_data)
-        
+        # Rotate the refresh token, carrying the original sign-in time forward so the
+        # sliding window stays bounded by the absolute session cap.
+        new_refresh_token = create_refresh_token({
+            "sub": user_id,
+            "session_start": payload.get("session_start"),
+        })
+
         logger.info(f"Successfully refreshed access token for user {user_id}.")
-        return NewAccessTokenResponse(access_token=new_access_token)
+        return NewAccessTokenResponse(access_token=new_access_token, refresh_token=new_refresh_token)
 
     except JWTError as e:
         logger.warning(f"JWTError during refresh token validation: {str(e)}")

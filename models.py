@@ -46,6 +46,8 @@ class RefreshTokenRequest(BaseModel):
 class NewAccessTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    # Rotated refresh token. Optional so older app builds that ignore it keep working.
+    refresh_token: Optional[str] = None
 
 
 # API key and token models
