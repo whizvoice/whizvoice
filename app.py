@@ -9,7 +9,7 @@ import traceback
 import logging
 import time
 from fastapi.responses import JSONResponse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,7 +17,8 @@ import redis.asyncio as redis
 from redis.asyncio.client import PubSub
 
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
-from asana_tools import asana_tools, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
+from asana_tools import asana_tools, get_asana_sections, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
+import tool_dedupe
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_log_health_data, agent_open_health_app_settings, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
 from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
@@ -32,7 +33,7 @@ from contacts_tools import contacts_tools, add_contact_preference, get_contact_p
 from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
-from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token
+from auth import verify_google_token, create_access_token, get_current_user, AuthError, SECRET_KEY as AUTH_SECRET_KEY, ALGORITHM as AUTH_ALGORITHM, create_refresh_token, refresh_session_expired
 from supabase_client import supabase
 from redis_managers import create_managers, MissingTimestampError
 import stripe
@@ -107,18 +108,9 @@ stripe.api_key = STRIPE_SECRET_KEY
 set_stripe_config(STRIPE_SECRET_KEY, STRIPE_PRICE_ID)
 
 # System prompt for Claude
-CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can help with anything. You have access to various tools that you MUST use when appropriate:
+CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can help with anything. You have access to various tools that you MUST use when appropriate. Each tool's description explains when and how to use it — follow those. A couple of things the tool descriptions don't cover:
 
-1. When the user asks to open/launch an app (like WhatsApp, YouTube, Maps, etc.), you MUST use the 'launch_app' tool
-2. For WhatsApp messaging, use the WhatsApp-specific tools (whatsapp_select_chat, whatsapp_draft_message, whatsapp_send_message)
-3. For SMS texting, use the SMS-specific tools (sms_select_chat, sms_draft_message, sms_send_message)
-4. For Asana/task management, use the Asana tools
-   - remember to use update_asana_task instead of get_new_asana_task_id if you are changing a task, to avoid creating duplicates.
-   - Before creating a new task, check the parent task preference using get_parent_task_preference. If it returns 'true', you MUST always assign a parent task — ask the user if you're unsure which parent to use.
-5. For app information, use the get_app_info tool
-6. For music playback, use the agent_youtube_music tool (currently we only support YouTube Music, not Spotify).
-7. For deciding on a random color when a list of colors isn't specified, ALWAYS use the pick_random_color tool
-8. For weather, use the get_weather tool with the appropriate days_ahead parameter (0 = today, 1 = tomorrow, etc.)
+- For music playback, we currently only support YouTube Music, not Spotify.
 
 IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather than just describing what you would do.
 
@@ -133,6 +125,8 @@ FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *
 DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. PLEASE CHECK THE HISTORY. Often multiple Asana tasks will be created as different versions of the same user intent, and YOU NEED TO PROACTIVELY DELETE THE OLD ONES.
 
 PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
+
+ACT FIRST CLARIFY LATER: Users are multitasking, and if you ask for clarification without executing, the user may not see it and what they wanted is dropped. For bug reports, message drafts, and to-do list items, you MUST ALWAYS attempt the action IMMEDIATELY with the appropriate tool, using your best guess to fill in anything ambiguous or missing — NEVER respond with only text, and NEVER wait for more details first. The result the user sees (the draft overlay, the created task, the filed report) IS the clarification step — they can review, and you can always adjust what you did later.
 
 SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result.
 
@@ -436,6 +430,92 @@ def _fix_orphaned_tool_uses(messages: List[Dict]) -> None:
         i += 1
 
 
+def _relocate_orphaned_server_tool_uses(messages: List[Dict]) -> bool:
+    """Recover unresolved web_search server_tool_use blocks by moving them to a
+    trailing assistant turn. Returns True if a trailing search turn was appended.
+
+    A web_search server_tool_use runs only while it is the trailing open turn. If the
+    turn that emitted it is closed before the deferred search runs (a concurrent
+    request flow or a user interjection appends later turns), the search is left
+    buried and unpaired, and every replay 400s:
+      `web_search tool use with id ... was found without a corresponding
+       web_search_tool_result block`.
+
+    Verified against the API (2026-07-18): extracting the orphaned server_tool_use and
+    re-appending it as a trailing assistant turn makes the API resume and complete the
+    deferred search and return the real result on the next response. Pairing is by
+    tool_use_id, not position; multiple orphans can share one trailing turn. The
+    legitimate still-open trailing search (its assistant turn followed only by
+    tool_result user messages) is left in place.
+    """
+    # tool_use_ids that already have their result block anywhere in the history.
+    resolved_ids = set()
+    for msg in messages:
+        content = msg.get('content')
+        if isinstance(content, list):
+            for b in content:
+                if (isinstance(b, dict) and b.get('type') == 'web_search_tool_result'
+                        and b.get('tool_use_id')):
+                    resolved_ids.add(b['tool_use_id'])
+
+    def _is_legit_open(idx: int) -> bool:
+        # Leave in place iff every message after this assistant turn is a user message
+        # containing only tool_result blocks (the in-flight continuation the API runs).
+        for j in range(idx + 1, len(messages)):
+            m = messages[j]
+            if m.get('role') != 'user':
+                return False
+            c = m.get('content')
+            if not isinstance(c, list) or not all(
+                    isinstance(b, dict) and b.get('type') == 'tool_result' for b in c):
+                return False
+        return True
+
+    relocated = []
+    empty_assistant_indices = []
+    for i, msg in enumerate(messages):
+        if msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content')
+        if not isinstance(content, list):
+            continue
+        has_unpaired = any(
+            isinstance(b, dict) and b.get('type') == 'server_tool_use'
+            and b.get('id') and b['id'] not in resolved_ids
+            for b in content
+        )
+        if not has_unpaired or _is_legit_open(i):
+            continue
+        kept = []
+        for b in content:
+            if (isinstance(b, dict) and b.get('type') == 'server_tool_use'
+                    and b.get('id') and b['id'] not in resolved_ids):
+                relocated.append(b)
+            else:
+                kept.append(b)
+        msg['content'] = kept
+        if not kept:
+            empty_assistant_indices.append(i)
+
+    if not relocated:
+        return False
+
+    # Drop any assistant message left empty by the extraction (an empty content list
+    # is not a valid message).
+    if empty_assistant_indices:
+        drop = set(empty_assistant_indices)
+        messages[:] = [m for k, m in enumerate(messages) if k not in drop]
+
+    ids = [b.get('id') for b in relocated]
+    logger.warning(
+        f"[_relocate_orphaned_server_tool_uses] Recovering {len(relocated)} buried "
+        f"web_search server_tool_use block(s) by relocating to a trailing assistant "
+        f"turn so the API completes them: {ids}"
+    )
+    messages.append({"role": "assistant", "content": relocated})
+    return True
+
+
 class _SafetyNetSkip(Exception):
     """Raised when the empty-context safety-net can't resolve a conversation and should skip silently."""
     pass
@@ -607,6 +687,14 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         logger.warning(f"[CLAUDE_CONTEXT] Orphaned tool_use detected but no conversation_id, inserting synthetic tool_results")
         _fix_orphaned_tool_uses(messages)
 
+    # Recover any buried, unresolved web_search server_tool_use (its turn was closed
+    # before the deferred search ran — concurrent flow or user interjection) by
+    # relocating it to a trailing assistant turn. The API then resumes and completes
+    # the search and returns the real result. Without this, the orphaned block 400s on
+    # every replay and permanently bricks the conversation. Runs on the final outgoing
+    # list, so it covers the initial request, tool-loop continuations, and retries.
+    relocated_search_turn = _relocate_orphaned_server_tool_uses(messages)
+
     # GUARD: the context must never end on an assistant message.
     # Under concurrent requests on one conversation, a sibling request can finish and append its
     # final assistant turn to the shared (per-conversation) context while THIS request is still
@@ -616,7 +704,10 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     # user message."). Insert a persisted user message so the list ends on a user turn. It is
     # stored as hidden_text so it stays out of the chat UI while remaining visible to the LLM,
     # and it is a permanent part of the conversation history (DB + Redis), not a temporary patch.
-    if messages and messages[-1].get('role') == 'assistant':
+    # A relocated trailing search turn legitimately ends the list on an assistant
+    # message (a valid server-tool resume shape); don't append a user filler over it.
+    if (messages and messages[-1].get('role') == 'assistant'
+            and not relocated_search_turn):
         filler_text = "[system: previous tool result returned above; no new message from the user]"
         logger.warning(
             f"[CLAUDE_CONTEXT] Context for session {session_id} ends on an assistant message "
@@ -626,12 +717,19 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
         # reloads stay valid) and mirror it into the live Redis context so both stores agree.
         # request_id is intentionally omitted so this filler is never pulled into another
         # request's timestamp window when that request's trailing assistant text is saved.
+        # Reuse the DB-chosen timestamp for the Redis mirror so both stores score the
+        # filler identically; add_chat_message raises MissingTimestampError without one.
+        filler_timestamp = None
         if conversation_id and user_id:
             try:
-                save_message_to_db(user_id, conversation_id, filler_text, "USER", content_type="hidden_text")
+                filler_result = save_message_to_db(user_id, conversation_id, filler_text, "USER", content_type="hidden_text")
+                if filler_result:
+                    filler_timestamp = filler_result[3]
             except Exception as filler_err:
                 logger.error(f"[CLAUDE_CONTEXT] Failed to persist hidden_text filler: {filler_err}")
-        await add_chat_message(session_id, {"role": "user", "content": filler_text})
+        if not filler_timestamp:
+            filler_timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        await add_chat_message(session_id, {"role": "user", "content": filler_text}, timestamp=filler_timestamp)
         # End THIS call's outgoing message list on the user turn.
         messages.append({"role": "user", "content": filler_text})
 
@@ -816,6 +914,10 @@ async def init_redis():
         
         # Share Redis client with asana_tools for cross-worker caching
         init_redis_client(redis_client)
+
+        # Share Redis client with tool_dedupe. REQUIRED: uvicorn runs 4 workers,
+        # so recent-call state must live in Redis to be visible across processes.
+        tool_dedupe.init_redis_client(redis_client)
 
         # Initialize Redis managers for distributed session state
         redis_managers = create_managers(redis_client)
@@ -1139,6 +1241,12 @@ TOOL_REGISTRY = {
         "args_mapping": lambda args, user_id: (user_id, args.get('start_date'), args.get('end_date')),
         "validation": None
     },
+    "get_asana_sections": {
+        "function_name": "get_asana_sections",
+        "requires_auth": True,
+        "args_mapping": lambda args, user_id: (user_id,),
+        "validation": None
+    },
     "get_current_date": {
         "function_name": "get_current_date",
         "requires_auth": False,
@@ -1231,7 +1339,8 @@ TOOL_REGISTRY = {
             args.get('due_date'),
             args.get('notes'),
             args.get('completed'),
-            args.get('parent_gid')
+            args.get('parent_gid'),
+            args.get('section')
         ),
         "validation": lambda args: (
             {"error": "Task GID is required."} if not args.get('task_gid') else None
@@ -2258,7 +2367,8 @@ async def execute_tool(tool_name, tool_args, user_id: Optional[str] = None, **co
         raise e
 
 
-async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] = None, **context):
+async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] = None,
+                                  request_id: Optional[str] = None, **context):
     """
     Execute a tool, routing screen agent tools through the queue.
 
@@ -2272,6 +2382,26 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
         user_id: User ID if authenticated
         **context: Additional context (websocket, tool_result_handler, conversation_id, session_id, device_id, etc.)
     """
+    # ===== Pre-execution duplicate guard =====
+    # Concurrent requests in one conversation run independent agent loops and can
+    # each decide on the same mutation before either result exists in shared
+    # context. The model decides on stale context; we re-check here, where the
+    # earlier call's result is already committed. See tool_dedupe for rationale.
+    if tool_dedupe.is_guarded(tool_name):
+        confirmed = bool(tool_args.get("confirm_duplicate"))
+        # Never forward the guard flag to the tool function itself.
+        tool_args = {k: v for k, v in tool_args.items() if k != "confirm_duplicate"}
+        if confirmed:
+            logger.info(f"Duplicate guard bypassed by confirm_duplicate for {tool_name}")
+        else:
+            recent = await tool_dedupe.find_recent_similar(tool_name, tool_args, user_id)
+            if recent:
+                logger.info(
+                    f"Duplicate guard triggered for {tool_name}: similar call from "
+                    f"request {recent.get('request_id')} at {recent.get('ts')}"
+                )
+                return tool_dedupe.build_duplicate_warning(tool_name, recent, time.time())
+
     # Check if this is a screen agent tool that needs queuing
     if screen_agent_queue.is_screen_agent_tool(tool_name):
         device_id = context.get("device_id")
@@ -2283,7 +2413,7 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
             }
 
         # Route through queue using device_id
-        return await screen_agent_queue.enqueue(
+        result = await screen_agent_queue.enqueue(
             device_id=device_id,
             tool_name=tool_name,
             tool_args=tool_args,
@@ -2291,7 +2421,10 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
         )
     else:
         # Non-screen agent tools execute directly
-        return await execute_tool(tool_name, tool_args, user_id, **context)
+        result = await execute_tool(tool_name, tool_args, user_id, **context)
+
+    await tool_dedupe.record_call(tool_name, tool_args, user_id, result, request_id)
+    return result
 
 
 @app.get("/")
@@ -2624,6 +2757,8 @@ class RefreshTokenRequest(BaseModel):
 class NewAccessTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    # Rotated refresh token. Optional so older app builds that ignore it keep working.
+    refresh_token: Optional[str] = None
 
 @app.post("/auth/refresh", response_model=NewAccessTokenResponse)
 async def refresh_access_token(request_data: RefreshTokenRequest):
@@ -2651,6 +2786,9 @@ async def refresh_access_token(request_data: RefreshTokenRequest):
 
         # For stateless refresh, we assume if it decodes and is type 'refresh', it's valid.
         # If we had a revocation list or stored refresh tokens, we'd check that here.
+        if refresh_session_expired(payload):
+            logger.info(f"Refresh session for user {user_id} passed the absolute cap; requiring re-sign-in")
+            raise HTTPException(status_code=401, detail="Session expired, please sign in again")
 
         # Fetch user details from database to include in the new access token
         # This ensures the refreshed token has all the necessary fields (email, name, etc.)
@@ -2677,9 +2815,15 @@ async def refresh_access_token(request_data: RefreshTokenRequest):
             raise HTTPException(status_code=500, detail="Failed to fetch user data")
 
         new_access_token = create_access_token(new_access_token_data)
-        
+        # Rotate the refresh token, carrying the original sign-in time forward so the
+        # sliding window stays bounded by the absolute session cap.
+        new_refresh_token = create_refresh_token({
+            "sub": user_id,
+            "session_start": payload.get("session_start"),
+        })
+
         logger.info(f"Successfully refreshed access token for user {user_id}.")
-        return NewAccessTokenResponse(access_token=new_access_token)
+        return NewAccessTokenResponse(access_token=new_access_token, refresh_token=new_refresh_token)
 
     except JWTError as e:
         logger.warning(f"JWTError during refresh token validation: {str(e)}")
@@ -5992,6 +6136,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         tb.name,
                         tb.input,
                         user_id,
+                        request_id=request_id,
                         websocket=websocket,
                         tool_result_handler=tool_result_handler,
                         conversation_id=session_conversation_id,

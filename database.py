@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from typing import Optional, List, Dict, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from supabase_client import supabase
 from redis_managers import MissingTimestampError
@@ -226,6 +226,30 @@ def get_non_cancelled_bot_message_ids(conversation_id: int) -> List[int]:
     except Exception as e:
         logger.error(f"Error getting bot message IDs for conversation {conversation_id}: {e}")
         return []
+
+
+def _bump_timestamp_1ms(raw_timestamp: str) -> str:
+    """Return an ISO-8601 timestamp exactly 1ms after the given one.
+
+    Supabase returns timestamps with varying microsecond precision (4-6 digits) and a 'Z'
+    or +00:00 suffix; Python's fromisoformat needs exactly 6 fractional digits. Normalize
+    then add 1ms so the result sorts strictly after the input.
+    """
+    timestamp_str = raw_timestamp.replace('Z', '+00:00')
+    # Normalize fractional seconds to exactly 6 digits (fromisoformat requirement).
+    if '.' in timestamp_str:
+        parts = timestamp_str.split('.')
+        if len(parts) == 2:
+            if '+' in parts[1]:
+                frac, tz = parts[1].split('+')
+                frac = frac.ljust(6, '0')[:6]
+                timestamp_str = f"{parts[0]}.{frac}+{tz}"
+            elif '-' in parts[1]:
+                frac, tz = parts[1].split('-')
+                frac = frac.ljust(6, '0')[:6]
+                timestamp_str = f"{parts[0]}.{frac}-{tz}"
+    bumped = datetime.fromisoformat(timestamp_str) + timedelta(milliseconds=1)
+    return bumped.isoformat().replace('+00:00', 'Z')
 
 
 def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_conversation_id: Optional[int] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None) -> Optional[Tuple[int, int, List[int], str]]:
@@ -465,6 +489,27 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             message_data["timestamp"] = client_timestamp
             logger.info(f"Using client-provided timestamp for USER message: {client_timestamp}")
 
+        # Server-generated hidden_text USER fillers (e.g. the concurrent-request-lap guard in app.py)
+        # have no client_timestamp. Anchor them 1ms after the latest message in the conversation so they
+        # sort STRICTLY after the trailing assistant turn they are meant to follow. A plain now() could
+        # sort before that assistant message under client/server clock skew (assistant timestamps are
+        # derived from client timestamps), which would leave the context still ending on an assistant
+        # message and re-trigger the guard on every reload.
+        elif message_sender == "USER" and content_type == "hidden_text" and not client_timestamp and conversation_id:
+            latest_result = supabase.table("messages")\
+                .select("timestamp")\
+                .eq("conversation_id", conversation_id)\
+                .order("timestamp", desc=True)\
+                .limit(1)\
+                .execute()
+            if latest_result.data:
+                message_data["timestamp"] = _bump_timestamp_1ms(latest_result.data[0]["timestamp"])
+                logger.info(f"Setting hidden_text USER filler timestamp to {message_data['timestamp']} (1ms after latest message in conversation {conversation_id})")
+            else:
+                # No prior messages to anchor against (not expected for a filler) — use current time.
+                message_data["timestamp"] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+                logger.info(f"Setting hidden_text USER filler timestamp to now() {message_data['timestamp']} (no prior messages in conversation {conversation_id})")
+
         # For ASSISTANT messages with request_id, set timestamp to be right after all other messages in this request
         # This ensures proper message ordering: text_before -> tool_use -> tool_result -> text_after
         if message_sender == "ASSISTANT" and request_id:
@@ -476,35 +521,10 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 .execute()
 
             if all_msgs_result.data:
-                # Find the maximum timestamp among all messages in this request
+                # Find the maximum timestamp among all messages in this request, then sort 1ms after it
+                # so ordering stays text_before -> tool_use -> tool_result -> text_after.
                 max_timestamp = max(msg["timestamp"] for msg in all_msgs_result.data)
-                # Parse the timestamp and add 1ms
-
-                # Fix: Normalize timestamp format from Supabase
-                # Supabase sometimes returns timestamps with varying microsecond precision (4-6 digits)
-                # Python's fromisoformat expects exactly 6 digits for microseconds
-                timestamp_str = max_timestamp.replace('Z', '+00:00')
-
-                # Check if timestamp has microseconds and normalize to 6 digits
-                if '.' in timestamp_str:
-                    # Split into main part and fractional seconds + timezone
-                    parts = timestamp_str.split('.')
-                    if len(parts) == 2:
-                        # Further split fractional part from timezone
-                        if '+' in parts[1]:
-                            frac, tz = parts[1].split('+')
-                            # Pad or truncate fractional seconds to exactly 6 digits
-                            frac = frac.ljust(6, '0')[:6]
-                            timestamp_str = f"{parts[0]}.{frac}+{tz}"
-                        elif '-' in parts[1]:
-                            frac, tz = parts[1].split('-')
-                            frac = frac.ljust(6, '0')[:6]
-                            timestamp_str = f"{parts[0]}.{frac}-{tz}"
-
-                max_dt = datetime.fromisoformat(timestamp_str)
-                assistant_dt = max_dt + timedelta(milliseconds=1)
-                # Format as ISO string with timezone
-                message_data["timestamp"] = assistant_dt.isoformat().replace('+00:00', 'Z')
+                message_data["timestamp"] = _bump_timestamp_1ms(max_timestamp)
                 logger.info(f"Setting ASSISTANT message timestamp to {message_data['timestamp']} (1ms after max timestamp {max_timestamp} in request)")
             else:
                 raise MissingTimestampError(f"No messages found with request_id {request_id} to calculate ASSISTANT timestamp")

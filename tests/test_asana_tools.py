@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from unittest.mock import patch, MagicMock
+from asana.rest import ApiException as AsanaError
 from datetime import datetime, timedelta
 import sys
 import os
@@ -11,7 +12,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from asana_tools import (
     get_asana_workspaces, get_asana_tasks, get_date_range, get_current_date,
     get_parent_tasks, get_new_asana_task_id, delete_asana_task,
-    _asana_client_cache, _user_gid_cache, _workspace_pref_cache
+    get_asana_sections, update_asana_task,
+    _asana_client_cache, _user_gid_cache, _workspace_pref_cache,
+    _user_task_list_cache
 )
 
 class TestAsanaTools(unittest.TestCase):
@@ -21,6 +24,7 @@ class TestAsanaTools(unittest.TestCase):
         _asana_client_cache.clear()
         _user_gid_cache.clear()
         _workspace_pref_cache.clear()
+        _user_task_list_cache.clear()
         # Mock datetime to control time-based tests
         self.fixed_date = datetime(2024, 3, 15, 10, 0, 0)
         self.today = '2024-03-15'
@@ -112,7 +116,7 @@ class TestAsanaTools(unittest.TestCase):
             'workspace': 'workspace1',
             'assignee': 'user1',
             'completed_since': 'now',
-            'opt_fields': 'name,due_on,completed,projects.name'
+            'opt_fields': 'name,due_on,completed,projects.name,assignee_section.name'
         })
 
     @patch('asana_tools.get_preference')
@@ -249,7 +253,7 @@ class TestAsanaTools(unittest.TestCase):
             'workspace': 'workspace1',
             'assignee': 'user1',
             'completed_since': 'now',
-            'opt_fields': 'name,due_on,completed,projects.name,num_subtasks'
+            'opt_fields': 'name,due_on,completed,projects.name,assignee_section.name,num_subtasks'
         })
 
     @patch('asana_tools.get_parent_task_preference')
@@ -294,7 +298,7 @@ class TestAsanaTools(unittest.TestCase):
                 'due_on': '2024-03-20',
                 'notes': 'Task notes'
             }},
-            opts={'opt_fields': 'gid,name,due_on,completed,projects.name'}
+            opts={'opt_fields': 'gid,name,due_on,completed,projects.name,assignee_section.name'}
         )
 
     @patch('asana_tools.get_parent_task_preference')
@@ -340,7 +344,7 @@ class TestAsanaTools(unittest.TestCase):
                 'notes': 'Subtask notes'
             }},
             task_gid='parent_task1',
-            opts={'opt_fields': 'gid,name,due_on,completed,projects.name'}
+            opts={'opt_fields': 'gid,name,due_on,completed,projects.name,assignee_section.name'}
         )
 
     @patch('asana_tools.get_decrypted_preference_key')
@@ -382,5 +386,197 @@ class TestAsanaTools(unittest.TestCase):
         # Assert error message (from asana_tools.py:27)
         self.assertEqual(str(context.exception), "Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
 
+class TestAsanaSections(unittest.TestCase):
+    """My Tasks sections: reading the section list and moving tasks between sections."""
+
+    MY_TASKS_SECTIONS = [
+        {'gid': 'sec_recent', 'name': 'Recently assigned'},
+        {'gid': 'sec_today', 'name': 'Today'},
+        {'gid': 'sec_upcoming', 'name': 'Upcoming'},
+        {'gid': 'sec_later', 'name': 'Later'},
+    ]
+
+    def setUp(self):
+        self.test_user_id = "test_user_123"
+        _asana_client_cache.clear()
+        _user_gid_cache.clear()
+        _workspace_pref_cache.clear()
+        _user_task_list_cache.clear()
+
+    def _wire(self, mock_get_client, mock_users_api, mock_utl_api, mock_sections_api,
+              sections=None):
+        """Wire up the mocks shared by every section test. Returns the sections API mock."""
+        mock_get_client.return_value = MagicMock()
+
+        mock_user_api = MagicMock()
+        mock_users_api.return_value = mock_user_api
+        mock_user_api.get_user.return_value = {'gid': 'user1'}
+
+        mock_utl = MagicMock()
+        mock_utl_api.return_value = mock_utl
+        mock_utl.get_user_task_list_for_user.return_value = {'gid': 'utl1'}
+
+        mock_sections = MagicMock()
+        mock_sections_api.return_value = mock_sections
+        mock_sections.get_sections_for_project.return_value = (
+            self.MY_TASKS_SECTIONS if sections is None else sections
+        )
+        return mock_sections
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_get_sections_returns_my_tasks_sections(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_get_client, mock_get_pref):
+        """get_asana_sections lists the sections of the user's My Tasks list"""
+        mock_get_pref.return_value = "workspace1"
+        mock_sections = self._wire(mock_get_client, mock_users_api, mock_utl_api, mock_sections_api)
+
+        result = get_asana_sections(self.test_user_id)
+
+        self.assertEqual(result, self.MY_TASKS_SECTIONS)
+        mock_sections.get_sections_for_project.assert_called_once_with(
+            'utl1', opts={'opt_fields': 'name'})
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_decrypted_preference_key')
+    def test_get_sections_no_workspace_preference(self, mock_get_token, mock_get_pref):
+        """get_asana_sections reports the missing workspace preference"""
+        mock_get_token.return_value = "fake_token"
+        mock_get_pref.return_value = None
+
+        result = get_asana_sections(self.test_user_id)
+
+        self.assertIn("preferred workspace", result)
+
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_move_matches_section_name_ignoring_case(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_tasks_api,
+            mock_get_client, mock_get_pref):
+        """A section name is matched case-insensitively and sent as assignee_section"""
+        mock_get_pref.return_value = "workspace1"
+        self._wire(mock_get_client, mock_users_api, mock_utl_api, mock_sections_api)
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.update_task.return_value = {'gid': 'task1'}
+
+        update_asana_task(self.test_user_id, 'task1', section='today')
+
+        body = mock_task_api.update_task.call_args.kwargs['body']
+        self.assertEqual(body['data']['assignee_section'], 'sec_today')
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_move_matches_unique_substring(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_tasks_api,
+            mock_get_client, mock_get_pref):
+        """A partial name resolves when exactly one section contains it"""
+        mock_get_pref.return_value = "workspace1"
+        self._wire(mock_get_client, mock_users_api, mock_utl_api, mock_sections_api)
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.update_task.return_value = {'gid': 'task1'}
+
+        update_asana_task(self.test_user_id, 'task1', section='recently')
+
+        body = mock_task_api.update_task.call_args.kwargs['body']
+        self.assertEqual(body['data']['assignee_section'], 'sec_recent')
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_move_rejects_ambiguous_substring(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_tasks_api,
+            mock_get_client, mock_get_pref):
+        """An ambiguous partial name errors instead of guessing, and updates nothing"""
+        mock_get_pref.return_value = "workspace1"
+        self._wire(mock_get_client, mock_users_api, mock_utl_api, mock_sections_api, sections=[
+            {'gid': 'sec_a', 'name': 'Work Today'},
+            {'gid': 'sec_b', 'name': 'Home Today'},
+        ])
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+
+        result = update_asana_task(self.test_user_id, 'task1', name='Renamed', section='today')
+
+        self.assertIn('Work Today', result['error'])
+        self.assertIn('Home Today', result['error'])
+        mock_task_api.update_task.assert_not_called()
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_move_rejects_unknown_section(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_tasks_api,
+            mock_get_client, mock_get_pref):
+        """An unknown section errors, lists the real sections, and updates nothing"""
+        mock_get_pref.return_value = "workspace1"
+        self._wire(mock_get_client, mock_users_api, mock_utl_api, mock_sections_api)
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+
+        result = update_asana_task(self.test_user_id, 'task1', name='Renamed', section='In Review')
+
+        self.assertIn('In Review', result['error'])
+        self.assertIn('Recently assigned', result['error'])
+        mock_task_api.update_task.assert_not_called()
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_move_on_someone_elses_task_explains_why(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_tasks_api,
+            mock_get_client, mock_get_pref):
+        """A rejected section move explains that My Tasks sections are per-assignee"""
+        mock_get_pref.return_value = "workspace1"
+        self._wire(mock_get_client, mock_users_api, mock_utl_api, mock_sections_api)
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        error = AsanaError(status=400, reason='Bad Request')
+        mock_task_api.update_task.side_effect = error
+
+        result = update_asana_task(self.test_user_id, 'task1', section='Today')
+
+        self.assertIn('assigned to you', result['error'])
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    def test_update_without_section_sends_no_assignee_section(
+            self, mock_tasks_api, mock_get_client, mock_get_pref):
+        """Omitting section leaves the task's section untouched"""
+        mock_get_pref.return_value = "workspace1"
+        mock_get_client.return_value = MagicMock()
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.update_task.return_value = {'gid': 'task1'}
+
+        update_asana_task(self.test_user_id, 'task1', name='Renamed')
+
+        body = mock_task_api.update_task.call_args.kwargs['body']
+        self.assertNotIn('assignee_section', body['data'])
+
+
 if __name__ == '__main__':
-    unittest.main() 
+    unittest.main()
