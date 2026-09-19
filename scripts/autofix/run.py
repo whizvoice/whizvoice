@@ -25,7 +25,7 @@ Usage:
 
 Environment variables:
     SUPABASE_URL          - Supabase project URL
-    SUPABASE_SERVICE_ROLE - Supabase service role key
+    SUPABASE_SECRET_KEY   - Supabase secret key (formerly service_role)
     ANTHROPIC_API_KEY     - Anthropic API key for Claude Code
     WHIZVOICEAPP_REPO     - (optional) Git repo URL, default: git@github.com:whizvoice/whizvoiceapp.git
 """
@@ -229,7 +229,7 @@ def shutdown_emulator():
 def load_supabase():
     """Load Supabase client, trying env vars first, then constants.py."""
     url = os.getenv("SUPABASE_URL", "")
-    key = os.getenv("SUPABASE_SERVICE_ROLE", os.getenv("SUPABASE_KEY", ""))
+    key = os.getenv("SUPABASE_SECRET_KEY", os.getenv("SUPABASE_SERVICE_ROLE", os.getenv("SUPABASE_KEY", "")))
 
     if not url or not key:
         try:
@@ -237,12 +237,12 @@ def load_supabase():
             scripts_dir = os.path.dirname(os.path.abspath(__file__))
             whizvoice_dir = os.path.join(scripts_dir, "..", "..")
             sys.path.insert(0, whizvoice_dir)
-            from constants import SUPABASE_URL, SUPABASE_SERVICE_ROLE
+            from constants import SUPABASE_URL, SUPABASE_SECRET_KEY
             url = SUPABASE_URL
-            key = SUPABASE_SERVICE_ROLE
+            key = SUPABASE_SECRET_KEY
         except ImportError:
             log.error(
-                "SUPABASE_URL and SUPABASE_SERVICE_ROLE env vars not set, "
+                "SUPABASE_URL and SUPABASE_SECRET_KEY env vars not set, "
                 "and constants.py not found"
             )
             sys.exit(1)
