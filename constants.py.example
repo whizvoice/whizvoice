@@ -3,9 +3,9 @@
 
 GOOGLE_WEB_CLIENT_SECRET = "your-google-oauth-client-secret"
 SUPABASE_PASSWORD = "your-supabase-password"
-SUPABASE_KEY = "your-supabase-anon-key"
+SUPABASE_PUBLIC_KEY = "sb_publishable_your-supabase-publishable-key"
+SUPABASE_SECRET_KEY = "sb_secret_your-supabase-secret-key"
 SUPABASE_URL = "https://your-project.supabase.co"
-SUPABASE_SERVICE_ROLE = "your-supabase-service-role-key"
 PGCRYPTO_KEY = "your-pgcrypto-encryption-key"
 
 # Stripe configuration

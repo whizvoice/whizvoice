@@ -18,6 +18,8 @@ class TestColorTools(unittest.TestCase):
             "Blue",
             "Purple",
             "Black",
+            "White",
+            "Neutral",
             "Pink",
             "Multi-color"
         ]

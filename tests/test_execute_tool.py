@@ -165,7 +165,7 @@ class TestExecuteTool(unittest.TestCase):
         result = asyncio.run(execute_tool("update_asana_task", args, self.test_user_id))
 
         self.assertEqual(result, mock_response)
-        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, None, None, None, 'parent456')
+        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, None, None, None, 'parent456', None)
 
     @patch('app.update_asana_task')
     def test_execute_tool_update_task_due_date(self, mock_update_task):
@@ -177,7 +177,7 @@ class TestExecuteTool(unittest.TestCase):
         result = asyncio.run(execute_tool("update_asana_task", args, self.test_user_id))
 
         self.assertEqual(result, mock_response)
-        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, '2024-03-25', None, None, None)
+        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, '2024-03-25', None, None, None, None)
 
     def test_execute_tool_update_task_due_date_missing_task_gid(self):
         """Test execute_tool with update_asana_task missing task_gid"""
