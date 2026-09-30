@@ -498,7 +498,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "get_asana_tasks",
-        "description": "Get tasks within a date range. By default these are the current user's own tasks. If the user doesn't specify the date, no need to include start_date or end_date; it will default to today. To see what is on another person's list (e.g. 'what's on my husband's to-do list'), first use get_contact_preference to look up their email, then pass it as assignee_email. Another person's tasks can be updated, completed, and deleted with update_asana_task and delete_asana_task just like the user's own, and new tasks can be added to their list with get_new_asana_task_id and assignee_email. Only tasks that person has made visible to the current user are included, so their private tasks may be missing.",
+        "description": "Get tasks within a date range. By default these are the current user's own tasks. If the user doesn't specify the date, no need to include start_date or end_date; it will default to today. To see what is on another person's list (e.g. 'what's on my husband's to-do list'), first use get_contact_preference to look up their email, then pass it as assignee_email. Only tasks that person has made visible to the current user are included, so their private tasks may be missing.",
         "input_schema": {
             "type": "object",
             "properties": {
