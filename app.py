@@ -1238,7 +1238,7 @@ TOOL_REGISTRY = {
     "get_asana_tasks": {
         "function_name": "get_asana_tasks", 
         "requires_auth": True,
-        "args_mapping": lambda args, user_id: (user_id, args.get('start_date'), args.get('end_date')),
+        "args_mapping": lambda args, user_id: (user_id, args.get('start_date'), args.get('end_date'), args.get('assignee_email')),
         "validation": None
     },
     "get_asana_sections": {

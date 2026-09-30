@@ -75,8 +75,13 @@ class TestToolRegistry(unittest.TestCase):
         test_args = {"start_date": "2024-01-01", "end_date": "2024-01-31"}
         mapped_args = tool_config["args_mapping"](test_args, self.test_user_id)
         
-        expected = (self.test_user_id, "2024-01-01", "2024-01-31")
+        expected = (self.test_user_id, "2024-01-01", "2024-01-31", None)
         self.assertEqual(mapped_args, expected)
+
+        # Asking for another person's tasks passes their email through
+        mapped_args = tool_config["args_mapping"](
+            {"assignee_email": "robin@example.com"}, self.test_user_id)
+        self.assertEqual(mapped_args, (self.test_user_id, None, None, "robin@example.com"))
         
         # Test get_new_asana_task_id args mapping
         tool_config = TOOL_REGISTRY["get_new_asana_task_id"]

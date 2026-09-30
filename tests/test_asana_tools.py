@@ -150,6 +150,74 @@ class TestAsanaTools(unittest.TestCase):
         # Assert error message (from asana_tools.py:27)
         self.assertEqual(str(context.exception), "Asana access token not found. Please go to Settings and add your Asana access token to use Asana features.")
 
+    def _read_other_persons_tasks(self, tasks_from_asana=None, asana_error=None, **kwargs):
+        """Call get_asana_tasks for robin@example.com with Asana mocked at the API boundary."""
+        with patch('asana_tools.get_current_date', return_value=self.today), \
+             patch('asana_tools.get_preference', return_value='workspace1'), \
+             patch('asana_tools.get_asana_client', return_value=MagicMock()), \
+             patch('asana.UsersApi') as mock_users_api, \
+             patch('asana.TasksApi') as mock_tasks_api:
+            mock_users_api.return_value.get_user.return_value = {'gid': 'user1'}
+            mock_task_api = mock_tasks_api.return_value
+            if asana_error is not None:
+                mock_task_api.get_tasks.side_effect = asana_error
+            else:
+                mock_task_api.get_tasks.return_value = tasks_from_asana
+            result = get_asana_tasks(self.test_user_id, assignee_email='robin@example.com', **kwargs)
+            return result, mock_task_api
+
+    def test_get_tasks_for_other_person_asks_asana_for_their_email(self):
+        """Passing assignee_email reads that person's tasks, not the caller's"""
+        _, mock_task_api = self._read_other_persons_tasks(tasks_from_asana=[])
+
+        mock_task_api.get_tasks.assert_called_once_with({
+            'workspace': 'workspace1',
+            'assignee': 'robin@example.com',
+            'completed_since': 'now',
+            'opt_fields': 'name,due_on,completed,projects.name,assignee_section.name'
+        })
+
+    def test_get_tasks_for_other_person_omits_task_ids(self):
+        """Another person's tasks come back without gids, so they cannot be edited or deleted"""
+        result, _ = self._read_other_persons_tasks(tasks_from_asana=[
+            {'gid': 'robin_task_1', 'name': 'Book flights', 'due_on': '2024-03-15',
+             'completed': False, 'projects': [], 'assignee_section': {'gid': 's1', 'name': 'Today'}},
+        ])
+
+        self.assertEqual(result, [
+            {'name': 'Book flights', 'due_on': '2024-03-15',
+             'completed': False, 'projects': [], 'assignee_section': {'gid': 's1', 'name': 'Today'}},
+        ])
+
+    def test_get_tasks_for_other_person_uses_same_date_filter(self):
+        """Another person's list is filtered to the requested dates and skips undated tasks"""
+        result, _ = self._read_other_persons_tasks(
+            tasks_from_asana=[
+                {'gid': 'a', 'name': 'Due in range', 'due_on': '2024-03-16'},
+                {'gid': 'b', 'name': 'Due later', 'due_on': '2024-03-20'},
+                {'gid': 'c', 'name': 'No due date', 'due_on': None},
+            ],
+            start_date='2024-03-15', end_date='2024-03-17')
+
+        self.assertEqual(result, [{'name': 'Due in range', 'due_on': '2024-03-16'}])
+
+    def test_get_tasks_for_other_person_rejected_by_asana_names_the_person(self):
+        """When Asana rejects the email, the error says whose tasks could not be read"""
+        result, _ = self._read_other_persons_tasks(
+            asana_error=AsanaError(status=400, reason='Bad Request'))
+
+        self.assertEqual(result['status_code'], 400)
+        self.assertIn('robin@example.com', result['error'])
+        self.assertIn('workspace', result['error'])
+
+    def test_get_tasks_schema_offers_assignee_email(self):
+        """Claude can only ask for another person's tasks if the tool schema exposes the parameter"""
+        from asana_tools import asana_tools
+        schema = next(t for t in asana_tools if t['name'] == 'get_asana_tasks')
+
+        self.assertIn('assignee_email', schema['input_schema']['properties'])
+        self.assertNotIn('assignee_email', schema['input_schema']['required'])
+
     def test_get_date_range(self):
         """Test date range parsing"""
         with patch('asana_tools.datetime') as mock_datetime:

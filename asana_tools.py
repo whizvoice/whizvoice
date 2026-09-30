@@ -172,13 +172,21 @@ def get_asana_workspaces(user_id):
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
-def get_asana_tasks(user_id: str, start_date=None, end_date=None):
+def get_asana_tasks(user_id: str, start_date=None, end_date=None, assignee_email=None):
+    """
+    Get tasks due in a date range. Defaults to the calling user's own tasks.
+
+    When assignee_email is given, reads that person's tasks instead, using the
+    calling user's token, so only tasks visible to the caller are returned.
+    Those tasks are returned without gids: another person's list is read-only,
+    and the update/delete tools cannot act without a gid.
+    """
     workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
         return "Error identifying user's preferred workspace to get tasks from. Please set a preferred workspace using the manage_workspace_preference tool."
     try:
         api_client = get_asana_client(user_id)
-        user_gid = get_asana_user_gid(user_id, api_client)
+        assignee = assignee_email if assignee_email else get_asana_user_gid(user_id, api_client)
 
         # Handle date defaults
         today = get_current_date()
@@ -192,7 +200,7 @@ def get_asana_tasks(user_id: str, start_date=None, end_date=None):
         # Get tasks using the regular Tasks API
         tasks = list(tasks_api.get_tasks({
             'workspace': workspace_gid,
-            'assignee': user_gid,
+            'assignee': assignee,
             'completed_since': 'now',
             'opt_fields': _TASK_FIELDS
         }))
@@ -202,7 +210,10 @@ def get_asana_tasks(user_id: str, start_date=None, end_date=None):
         
         # Filter tasks by date range
         tasks = [task for task in tasks if start_date <= task['due_on'] <= end_date]
-        
+
+        if assignee_email:
+            tasks = [{k: v for k, v in dict(task).items() if k != 'gid'} for task in tasks]
+
         return tasks
     except ValueError as e:
         # Re-raise the token error to be handled by the WebSocket endpoint
@@ -211,6 +222,10 @@ def get_asana_tasks(user_id: str, start_date=None, end_date=None):
         status_code = e.status if hasattr(e, 'status') else 500
         if status_code == 401:
             return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        elif assignee_email and status_code in (400, 403, 404):
+            # Asana doesn't say why it rejected the assignee. The likeliest cause
+            # is an email that isn't a member of this workspace.
+            return {"error": f"Could not read tasks for {assignee_email}. They may not be a member of your Asana workspace, or the email may be wrong.", "detail": str(e), "status_code": status_code}
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
@@ -487,7 +502,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "get_asana_tasks",
-        "description": "Get tasks assigned to the current user within a date range. If the user doesn't specify the date, no need to include start_date or end_date; it will default to today.",
+        "description": "Get tasks within a date range. By default these are the current user's own tasks. If the user doesn't specify the date, no need to include start_date or end_date; it will default to today. To see another person's tasks (e.g. 'what's on my husband's to-do list'), first use get_contact_preference to look up their email, then pass it as assignee_email. Another person's tasks are read-only: they are returned without task IDs and cannot be updated, completed, or deleted. Only tasks that person has made visible to the current user are included, so their private tasks will be missing.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -498,6 +513,10 @@ asana_tools = [
                 "end_date": {
                     "type": "string",
                     "description": "End date in YYYY-MM-DD format. Defaults to start_date."
+                },
+                "assignee_email": {
+                    "type": "string",
+                    "description": "Email address of another person whose tasks to read. Leave this out for the current user's own tasks. Use get_contact_preference to look up a contact's email first."
                 }
             },
             "required": []
