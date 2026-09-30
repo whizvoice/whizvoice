@@ -56,7 +56,7 @@ class TestExecuteTool(unittest.TestCase):
         result = asyncio.run(execute_tool("get_asana_tasks", args, self.test_user_id))
         
         self.assertEqual(result, mock_tasks)
-        mock_get_tasks.assert_called_once_with(self.test_user_id, '2024-03-15', '2024-03-20')
+        mock_get_tasks.assert_called_once_with(self.test_user_id, '2024-03-15', '2024-03-20', None)
 
     @patch('app.get_asana_tasks')
     def test_execute_tool_get_asana_tasks_no_dates(self, mock_get_tasks):
@@ -67,7 +67,7 @@ class TestExecuteTool(unittest.TestCase):
         result = asyncio.run(execute_tool("get_asana_tasks", {}, self.test_user_id))
         
         self.assertEqual(result, mock_tasks)
-        mock_get_tasks.assert_called_once_with(self.test_user_id, None, None)
+        mock_get_tasks.assert_called_once_with(self.test_user_id, None, None, None)
 
     @patch('app.get_current_date')
     def test_execute_tool_get_current_date(self, mock_get_date):
@@ -106,7 +106,8 @@ class TestExecuteTool(unittest.TestCase):
             'Test notes',
             'parent123',
             None,
-            False
+            False,
+            None
         )
 
     def test_execute_tool_get_new_asana_task_id_missing_name(self):
@@ -165,7 +166,7 @@ class TestExecuteTool(unittest.TestCase):
         result = asyncio.run(execute_tool("update_asana_task", args, self.test_user_id))
 
         self.assertEqual(result, mock_response)
-        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, None, None, None, 'parent456')
+        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, None, None, None, 'parent456', None)
 
     @patch('app.update_asana_task')
     def test_execute_tool_update_task_due_date(self, mock_update_task):
@@ -177,7 +178,7 @@ class TestExecuteTool(unittest.TestCase):
         result = asyncio.run(execute_tool("update_asana_task", args, self.test_user_id))
 
         self.assertEqual(result, mock_response)
-        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, '2024-03-25', None, None, None)
+        mock_update_task.assert_called_once_with(self.test_user_id, 'task123', None, '2024-03-25', None, None, None, None)
 
     def test_execute_tool_update_task_due_date_missing_task_gid(self):
         """Test execute_tool with update_asana_task missing task_gid"""
