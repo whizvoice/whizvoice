@@ -29,9 +29,9 @@ def init_redis_client(client):
     global _redis_client
     _redis_client = client
 
-_CREATE_TASK_DESC_PARENT_REQUIRED = "Create a new task in Asana. This task MUST be a subtask of a parent task — never create a standalone task unless the user explicitly asks you to create a new parent task (use is_parent_task=true for that). Before using this tool, determine the appropriate parent task based on the task name and existing parent tasks. TAKE YOUR BEST GUESS at the appropriate parent and MAKE THE TASK RIGHT AWAY so it does not get dropped. Tell the user what parent task you used so they can correct it if they need to. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_datetime tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person or add something to their to-do list (e.g. 'add X to my husband's list'), first use get_contact_preference to look up their email, then pass it as assignee_email. This is always allowed, even though you cannot edit that person's existing tasks."
+_CREATE_TASK_DESC_PARENT_REQUIRED = "Create a new task in Asana. This task MUST be a subtask of a parent task — never create a standalone task unless the user explicitly asks you to create a new parent task (use is_parent_task=true for that). Before using this tool, determine the appropriate parent task based on the task name and existing parent tasks. TAKE YOUR BEST GUESS at the appropriate parent and MAKE THE TASK RIGHT AWAY so it does not get dropped. Tell the user what parent task you used so they can correct it if they need to. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_datetime tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person or add something to their to-do list (e.g. 'add X to my husband's list'), first use get_contact_preference to look up their email, then pass it as assignee_email."
 
-_CREATE_TASK_DESC_DEFAULT = "Create a new task in Asana. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_datetime tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person or add something to their to-do list (e.g. 'add X to my husband's list'), first use get_contact_preference to look up their email, then pass it as assignee_email. This is always allowed, even though you cannot edit that person's existing tasks."
+_CREATE_TASK_DESC_DEFAULT = "Create a new task in Asana. DO NOT use this tool when you can update a task with update_asana_task instead. If the user specifies a specific due date (e.g. two weeks from now), you MUST ALWAYS use the get_current_datetime tool before calculating the due_date. Otherwise, don't include the due_date parameter as it defaults to today. Never create a new parent task without being explicitly asked. No need to tell the user the ID of the task unless they ask. If the user wants to assign a task to another person or add something to their to-do list (e.g. 'add X to my husband's list'), first use get_contact_preference to look up their email, then pass it as assignee_email."
 
 def get_asana_client(user_id):
     """Get an Asana client configured with the user's access token. Cached per user."""
@@ -178,8 +178,7 @@ def get_asana_tasks(user_id: str, start_date=None, end_date=None, assignee_email
 
     When assignee_email is given, reads that person's tasks instead, using the
     calling user's token, so only tasks visible to the caller are returned.
-    Those tasks are returned without gids: another person's list is read-only,
-    and the update/delete tools cannot act without a gid.
+    Their gids are returned like any other task, so update/delete work on them.
     """
     workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
@@ -210,9 +209,6 @@ def get_asana_tasks(user_id: str, start_date=None, end_date=None, assignee_email
         
         # Filter tasks by date range
         tasks = [task for task in tasks if start_date <= task['due_on'] <= end_date]
-
-        if assignee_email:
-            tasks = [{k: v for k, v in dict(task).items() if k != 'gid'} for task in tasks]
 
         return tasks
     except ValueError as e:
@@ -502,7 +498,7 @@ asana_tools = [
     {
         "type": "custom",
         "name": "get_asana_tasks",
-        "description": "Get tasks within a date range. By default these are the current user's own tasks. If the user doesn't specify the date, no need to include start_date or end_date; it will default to today. To SEE what is on another person's list (e.g. 'what's on my husband's to-do list'), first use get_contact_preference to look up their email, then pass it as assignee_email. Existing tasks belonging to another person are returned without task IDs and cannot be updated, completed, or deleted. This does NOT stop you from ADDING a task to their list: to add a task for someone else, use get_new_asana_task_id with assignee_email, which works exactly as before. Only tasks that person has made visible to the current user are included, so their private tasks will be missing.",
+        "description": "Get tasks within a date range. By default these are the current user's own tasks. If the user doesn't specify the date, no need to include start_date or end_date; it will default to today. To see what is on another person's list (e.g. 'what's on my husband's to-do list'), first use get_contact_preference to look up their email, then pass it as assignee_email. Another person's tasks can be updated, completed, and deleted with update_asana_task and delete_asana_task just like the user's own, and new tasks can be added to their list with get_new_asana_task_id and assignee_email. Only tasks that person has made visible to the current user are included, so their private tasks may be missing.",
         "input_schema": {
             "type": "object",
             "properties": {

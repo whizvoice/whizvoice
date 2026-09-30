@@ -177,15 +177,15 @@ class TestAsanaTools(unittest.TestCase):
             'opt_fields': 'name,due_on,completed,projects.name,assignee_section.name'
         })
 
-    def test_get_tasks_for_other_person_omits_task_ids(self):
-        """Another person's tasks come back without gids, so they cannot be edited or deleted"""
+    def test_get_tasks_for_other_person_keeps_task_ids(self):
+        """Another person's tasks keep their gids so they can be updated, completed, or deleted"""
         result, _ = self._read_other_persons_tasks(tasks_from_asana=[
             {'gid': 'robin_task_1', 'name': 'Book flights', 'due_on': '2024-03-15',
              'completed': False, 'projects': [], 'assignee_section': {'gid': 's1', 'name': 'Today'}},
         ])
 
         self.assertEqual(result, [
-            {'name': 'Book flights', 'due_on': '2024-03-15',
+            {'gid': 'robin_task_1', 'name': 'Book flights', 'due_on': '2024-03-15',
              'completed': False, 'projects': [], 'assignee_section': {'gid': 's1', 'name': 'Today'}},
         ])
 
@@ -199,7 +199,7 @@ class TestAsanaTools(unittest.TestCase):
             ],
             start_date='2024-03-15', end_date='2024-03-17')
 
-        self.assertEqual(result, [{'name': 'Due in range', 'due_on': '2024-03-16'}])
+        self.assertEqual(result, [{'gid': 'a', 'name': 'Due in range', 'due_on': '2024-03-16'}])
 
     def test_get_tasks_for_other_person_rejected_by_asana_names_the_person(self):
         """When Asana rejects the email, the error says whose tasks could not be read"""
