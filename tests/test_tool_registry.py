@@ -93,8 +93,13 @@ class TestToolRegistry(unittest.TestCase):
         }
         mapped_args = tool_config["args_mapping"](test_args, self.test_user_id)
         
-        expected = (self.test_user_id, "Test Task", "2024-03-15", "Test notes", "parent123", None, False)
+        expected = (self.test_user_id, "Test Task", "2024-03-15", "Test notes", "parent123", None, False, None)
         self.assertEqual(mapped_args, expected)
+
+        # A section name is passed through to task creation
+        mapped_args = tool_config["args_mapping"](
+            {"name": "Coursework", "section": "Priority"}, self.test_user_id)
+        self.assertEqual(mapped_args[-1], "Priority")
 
     def test_validation_functionality(self):
         """Test that validation functions work correctly"""
@@ -220,14 +225,16 @@ class TestSectionToolWiring(unittest.TestCase):
             "section",
             by_name["update_asana_task"]["input_schema"]["properties"])
 
-    def test_task_creation_has_no_section_param(self):
-        """Creation stays on Asana's default section, so it exposes no section knob"""
+    def test_task_creation_exposes_section_param(self):
+        """Creation can place a task straight into a My Tasks section, in both description variants"""
         from asana_tools import asana_tools
+        from app import tools_parent_required
 
-        by_name = {t["name"]: t for t in asana_tools}
-        self.assertNotIn(
-            "section",
-            by_name["get_new_asana_task_id"]["input_schema"]["properties"])
+        for tool_list in (asana_tools, tools_parent_required):
+            by_name = {t["name"]: t for t in tool_list}
+            self.assertIn(
+                "section",
+                by_name["get_new_asana_task_id"]["input_schema"]["properties"])
 
 
 if __name__ == '__main__':

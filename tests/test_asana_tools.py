@@ -645,6 +645,107 @@ class TestAsanaSections(unittest.TestCase):
         body = mock_task_api.update_task.call_args.kwargs['body']
         self.assertNotIn('assignee_section', body['data'])
 
+    def _create_with_mocks(self, mock_get_client, mock_users_api, mock_utl_api,
+                           mock_sections_api, mock_tasks_api, **kwargs):
+        """Create a task with the section machinery wired. Returns (result, tasks API mock)."""
+        self._wire(mock_get_client, mock_users_api, mock_utl_api, mock_sections_api)
+        mock_task_api = MagicMock()
+        mock_tasks_api.return_value = mock_task_api
+        mock_task_api.create_task.return_value = {'gid': 'new1', 'name': 'Coursework'}
+        mock_task_api.create_subtask_for_task.return_value = {'gid': 'new2', 'name': 'Coursework'}
+        with patch('asana_tools.get_parent_task_preference', return_value='false'), \
+             patch('asana_tools.get_current_date', return_value='2024-03-15'):
+            result = asyncio.run(get_new_asana_task_id(self.test_user_id, 'Coursework', **kwargs))
+        return result, mock_task_api
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_create_with_section_places_task_in_that_section(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_tasks_api,
+            mock_get_client, mock_get_pref):
+        """A section name on create is resolved and sent as assignee_section in the create body"""
+        mock_get_pref.return_value = "workspace1"
+
+        result, mock_task_api = self._create_with_mocks(
+            mock_get_client, mock_users_api, mock_utl_api, mock_sections_api, mock_tasks_api,
+            section='today')
+
+        body = mock_task_api.create_task.call_args.kwargs['body']
+        self.assertEqual(body['data']['assignee_section'], 'sec_today')
+        self.assertEqual(result['gid'], 'new1')
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_create_subtask_with_section_places_it_in_that_section(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_tasks_api,
+            mock_get_client, mock_get_pref):
+        """A subtask created with a section name also carries assignee_section"""
+        mock_get_pref.return_value = "workspace1"
+
+        _, mock_task_api = self._create_with_mocks(
+            mock_get_client, mock_users_api, mock_utl_api, mock_sections_api, mock_tasks_api,
+            section='Upcoming', parent_task_gid='parent1')
+
+        body = mock_task_api.create_subtask_for_task.call_args.kwargs['body']
+        self.assertEqual(body['data']['assignee_section'], 'sec_upcoming')
+        mock_task_api.create_task.assert_not_called()
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_create_with_unknown_section_creates_nothing(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_tasks_api,
+            mock_get_client, mock_get_pref):
+        """An unknown section name returns the real section names and no task is created"""
+        mock_get_pref.return_value = "workspace1"
+
+        result, mock_task_api = self._create_with_mocks(
+            mock_get_client, mock_users_api, mock_utl_api, mock_sections_api, mock_tasks_api,
+            section='Priority')
+
+        self.assertIn('Priority', result['error'])
+        self.assertIn('Today', result['error'])
+        mock_task_api.create_task.assert_not_called()
+        mock_task_api.create_subtask_for_task.assert_not_called()
+
+    @patch('asana_tools.get_preference')
+    @patch('asana_tools.get_asana_client')
+    @patch('asana.TasksApi')
+    @patch('asana.UsersApi')
+    @patch('asana.UserTaskListsApi')
+    @patch('asana.SectionsApi')
+    def test_create_without_section_sends_no_assignee_section(
+            self, mock_sections_api, mock_utl_api, mock_users_api, mock_tasks_api,
+            mock_get_client, mock_get_pref):
+        """Omitting section leaves the create body untouched so Asana applies its default"""
+        mock_get_pref.return_value = "workspace1"
+
+        _, mock_task_api = self._create_with_mocks(
+            mock_get_client, mock_users_api, mock_utl_api, mock_sections_api, mock_tasks_api)
+
+        body = mock_task_api.create_task.call_args.kwargs['body']
+        self.assertNotIn('assignee_section', body['data'])
+        mock_sections_api.return_value.get_sections_for_project.assert_not_called()
+
+    def test_create_schema_offers_section(self):
+        """Claude can only place a new task in a section if the create schema exposes it"""
+        from asana_tools import asana_tools
+        schema = next(t for t in asana_tools if t['name'] == 'get_new_asana_task_id')
+
+        self.assertIn('section', schema['input_schema']['properties'])
+        self.assertNotIn('section', schema['input_schema']['required'])
+
 
 if __name__ == '__main__':
     unittest.main()

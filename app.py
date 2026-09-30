@@ -1276,7 +1276,8 @@ TOOL_REGISTRY = {
             args.get('notes'),
             args.get('parent_task_gid'),
             args.get('assignee_email'),
-            args.get('is_parent_task', False)
+            args.get('is_parent_task', False),
+            args.get('section')
         ),
         "validation": lambda args: {"error": "Task name is required."} if not args.get('name') else None
     },

@@ -290,7 +290,7 @@ def get_parent_tasks(user_id: str):
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
-async def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None, assignee_email=None, is_parent_task=False):
+async def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, parent_task_gid=None, assignee_email=None, is_parent_task=False, section=None):
     workspace_gid = get_workspace_preference(user_id)
     if not workspace_gid:
         return "Error identifying user's preferred workspace that the new Asana task should be created in. Please set a preferred workspace using the manage_workspace_preference tool."
@@ -306,6 +306,14 @@ async def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, p
 
         tasks_api = asana.TasksApi(api_client)
 
+        # Resolve the section before creating anything, so an unrecognized
+        # name doesn't leave a task behind in the wrong place.
+        section_gid = None
+        if section is not None:
+            section_gid, error = _resolve_section_gid(user_id, api_client, workspace_gid, section)
+            if error:
+                return error
+
         # Set due_date to today if not provided
         if due_date is None:
             due_date = get_current_date()
@@ -317,6 +325,8 @@ async def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, p
             'assignee': assignee_email if assignee_email else user_gid,
             'due_on': due_date
         }
+        if section_gid:
+            task_data['assignee_section'] = section_gid
 
         # Add optional fields if provided
         if notes:
@@ -339,6 +349,10 @@ async def get_new_asana_task_id(user_id: str, name, due_date=None, notes=None, p
         status_code = e.status if hasattr(e, 'status') else 500
         if status_code == 401:
             return {"error": "Asana authentication failed. Please check your Asana Access Token in settings.", "detail": str(e), "status_code": 401}
+        elif status_code == 400 and section is not None:
+            # My Tasks sections belong to the assignee, so Asana rejects a
+            # section on a task assigned to someone else.
+            return {"error": "Could not create the task in that section. My Tasks sections only apply to tasks assigned to you, so a section can't be set on a task assigned to someone else. Retry without the section.", "detail": str(e), "status_code": 400}
         else:
             return {"error": "Asana API error.", "detail": str(e), "status_code": status_code}
 
@@ -573,6 +587,10 @@ asana_tools = [
                 "confirm_duplicate": {
                     "type": "boolean",
                     "description": "Leave this out on a normal call. Only set it to true after a previous call returned duplicate_warning and you are confident the user genuinely wants this as a separate, additional task alongside the existing one."
+                },
+                "section": {
+                    "type": "string",
+                    "description": "Name of the My Tasks section to put the new task in, e.g. 'Priority' when the user says to add something as a priority. Use get_asana_sections if you need the exact names. Omit this to let Asana use its default section. Only applies to tasks assigned to the current user, not to tasks assigned to someone else via assignee_email."
                 }
             },
             "required": ["name"]
