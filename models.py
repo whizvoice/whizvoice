@@ -1,7 +1,7 @@
 """
 Pydantic models for API request/response schemas.
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, Dict, Any, List
 
 
@@ -54,6 +54,13 @@ class NewAccessTokenResponse(BaseModel):
 class UserApiKeySetRequest(BaseModel):
     key_name: str
     key_value: Optional[str]  # Allow None to potentially clear a key
+
+    @field_validator("key_value")
+    @classmethod
+    def strip_key_value(cls, v: Optional[str]) -> Optional[str]:
+        # Keys pasted from a file/terminal often carry a trailing newline; a newline
+        # in an HTTP header makes every Anthropic call fail with a "connection error".
+        return v.strip() if v is not None else None
 
 
 class TokenUpdateRequest(BaseModel):

@@ -2654,19 +2654,17 @@ async def set_user_api_key(
     if not user_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
     
-    # Log the raw request body to debug 422 errors from Android app
+    # Parse the body manually so 422s from the Android app are diagnosable.
+    # Never log body contents here: the body contains the user's secret API key.
     try:
         body = await request.body()
         logger.info(f"📱 /user/api_key request from user {user_id}")
-        logger.info(f"  Raw body bytes: {body}")
         logger.info(f"  Body length: {len(body)} bytes")
         
         body_str = body.decode('utf-8')
-        logger.info(f"  Decoded body string: '{body_str}'")
         
         # Parse the body as JSON
         body_json = json.loads(body_str)
-        logger.info(f"  Parsed JSON: {body_json}")
         logger.info(f"  JSON keys: {list(body_json.keys())}")
         
         # Validate against our expected model
@@ -2675,12 +2673,11 @@ async def set_user_api_key(
         
     except json.JSONDecodeError as e:
         logger.error(f"  ❌ JSON decode error: {e}")
-        logger.error(f"  Body was: '{body_str}'")
         raise HTTPException(status_code=422, detail=f"Invalid JSON: {str(e)}")
     except ValidationError as e:
         logger.error(f"  ❌ Pydantic validation error: {e}")
         logger.error(f"  Expected fields: key_name (str), key_value (Optional[str])")
-        logger.error(f"  Received: {body_json}")
+        logger.error(f"  Received keys: {list(body_json.keys())}")
         raise HTTPException(status_code=422, detail=f"Validation error: {str(e.errors())}")
     except Exception as e:
         logger.error(f"  ❌ Unexpected error parsing request: {type(e).__name__}: {e}")
