@@ -16,7 +16,7 @@ asana==5.1.0
 coverage>=7.8.0
 pre-commit>=3.6.0
 httpx==0.28.1
-supabase==2.15.1
+supabase==2.16.0
 pytz==2025.2
 redis==5.0.1
 aioredis==2.0.1

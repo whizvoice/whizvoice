@@ -447,7 +447,7 @@ music_tools = [
     {
         "type": "custom",
         "name": "agent_youtube_music",
-        "description": "Play, queue, or insert a song to play next on YouTube Music. This tool automatically opens YouTube Music, searches for the query, and plays/queues/plays-next the first matching result. Use action 'play' to play immediately, 'queue' to add to the END of the queue, or 'play_next' to insert the song to play IMMEDIATELY AFTER the current song. Only set content_type when the user's request is clearly NOT a single song — e.g. an album, artist, podcast, or playlist. For ordinary song requests, omit it.",
+        "description": "Play, queue, or insert to play next a song, album, artist, playlist, or podcast on YouTube Music. This tool automatically opens YouTube Music, searches for the query, and plays/queues/plays-next the first matching result. Use action 'play' to play immediately, 'queue' to add to the END of the queue, or 'play_next' to insert the song to play IMMEDIATELY AFTER the current song. Only set content_type when the user's request is clearly NOT a single song — e.g. an album, artist, podcast, or playlist. For ordinary song requests, omit it.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -458,7 +458,7 @@ music_tools = [
                 },
                 "query": {
                     "type": "string",
-                    "description": "The song name, artist, album, or playlist. Examples: 'Bohemian Rhapsody', 'Taylor Swift', 'Abbey Road', 'Chill vibes'"
+                    "description": "The song name, artist, album, playlist, or podcast."
                 },
                 "content_type": {
                     "type": "string",

@@ -75,8 +75,13 @@ class TestToolRegistry(unittest.TestCase):
         test_args = {"start_date": "2024-01-01", "end_date": "2024-01-31"}
         mapped_args = tool_config["args_mapping"](test_args, self.test_user_id)
         
-        expected = (self.test_user_id, "2024-01-01", "2024-01-31")
+        expected = (self.test_user_id, "2024-01-01", "2024-01-31", None)
         self.assertEqual(mapped_args, expected)
+
+        # Asking for another person's tasks passes their email through
+        mapped_args = tool_config["args_mapping"](
+            {"assignee_email": "robin@example.com"}, self.test_user_id)
+        self.assertEqual(mapped_args, (self.test_user_id, None, None, "robin@example.com"))
         
         # Test get_new_asana_task_id args mapping
         tool_config = TOOL_REGISTRY["get_new_asana_task_id"]
@@ -88,8 +93,13 @@ class TestToolRegistry(unittest.TestCase):
         }
         mapped_args = tool_config["args_mapping"](test_args, self.test_user_id)
         
-        expected = (self.test_user_id, "Test Task", "2024-03-15", "Test notes", "parent123", None, False)
+        expected = (self.test_user_id, "Test Task", "2024-03-15", "Test notes", "parent123", None, False, None)
         self.assertEqual(mapped_args, expected)
+
+        # A section name is passed through to task creation
+        mapped_args = tool_config["args_mapping"](
+            {"name": "Coursework", "section": "Priority"}, self.test_user_id)
+        self.assertEqual(mapped_args[-1], "Priority")
 
     def test_validation_functionality(self):
         """Test that validation functions work correctly"""
@@ -181,6 +191,51 @@ class TestToolRegistry(unittest.TestCase):
         validation_result = new_tool_config["validation"]({})
         self.assertIsInstance(validation_result, dict)
         self.assertIn("error", validation_result)
+
+class TestSectionToolWiring(unittest.TestCase):
+    """The My Tasks section tools are reachable through the registry and schemas."""
+
+    def test_get_asana_sections_is_registered(self):
+        """get_asana_sections is dispatchable and requires auth"""
+        self.assertIn("get_asana_sections", TOOL_REGISTRY)
+        self.assertTrue(TOOL_REGISTRY["get_asana_sections"]["requires_auth"])
+        self.assertEqual(
+            TOOL_REGISTRY["get_asana_sections"]["args_mapping"]({}, "user1"),
+            ("user1",))
+
+    def test_update_asana_task_forwards_section(self):
+        """A section name from the model reaches update_asana_task"""
+        mapping = TOOL_REGISTRY["update_asana_task"]["args_mapping"]
+        args = mapping({"task_gid": "task1", "section": "Today"}, "user1")
+        self.assertEqual(args[-1], "Today")
+
+    def test_update_asana_task_omits_section_by_default(self):
+        """No section in the tool call means None, so the section is left alone"""
+        mapping = TOOL_REGISTRY["update_asana_task"]["args_mapping"]
+        args = mapping({"task_gid": "task1"}, "user1")
+        self.assertIsNone(args[-1])
+
+    def test_section_tools_exposed_to_the_model(self):
+        """Both the sections tool and the section param are in the schemas sent to Claude"""
+        from asana_tools import asana_tools
+
+        by_name = {t["name"]: t for t in asana_tools}
+        self.assertIn("get_asana_sections", by_name)
+        self.assertIn(
+            "section",
+            by_name["update_asana_task"]["input_schema"]["properties"])
+
+    def test_task_creation_exposes_section_param(self):
+        """Creation can place a task straight into a My Tasks section, in both description variants"""
+        from asana_tools import asana_tools
+        from app import tools_parent_required
+
+        for tool_list in (asana_tools, tools_parent_required):
+            by_name = {t["name"]: t for t in tool_list}
+            self.assertIn(
+                "section",
+                by_name["get_new_asana_task_id"]["input_schema"]["properties"])
+
 
 if __name__ == '__main__':
     unittest.main() 

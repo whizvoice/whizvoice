@@ -5,6 +5,7 @@ from jwt.exceptions import InvalidTokenError, ExpiredSignatureError
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 import os
+import time
 
 try:
     from constants import GOOGLE_WEB_CLIENT_SECRET
@@ -27,7 +28,8 @@ security = HTTPBearer(auto_error=False)
 SECRET_KEY = GOOGLE_WEB_CLIENT_SECRET
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
-REFRESH_TOKEN_EXPIRE_DAYS = 7  # Example: 7 days for refresh token
+REFRESH_TOKEN_EXPIRE_DAYS = 7  # Sliding window: each refresh issues a new token good for 7 days
+REFRESH_SESSION_MAX_DAYS = 30  # Absolute cap: a session cannot be extended past 30 days from sign-in
 GOOGLE_CLIENT_IDS = [
     "2815827813-se3l1u83nqbtda59dtplcbbjsr38oqln.apps.googleusercontent.com",  # Web client ID
     "2815827813-kdkrisushm16fsi95533kmll1usm3uco.apps.googleusercontent.com"   # Android client ID
@@ -54,13 +56,38 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
 
 def create_refresh_token(data: Dict, expires_delta: Optional[timedelta] = None) -> str:
     """
-    Create a JWT refresh token with the specified data and expiration
+    Create a JWT refresh token.
+
+    The token carries a `session_start` Unix timestamp (the original sign-in time).
+    Callers rotating an existing token pass the prior `session_start` through in
+    `data`; sign-in callers omit it and it defaults to now. Expiry is the earlier
+    of now + REFRESH_TOKEN_EXPIRE_DAYS and session_start + REFRESH_SESSION_MAX_DAYS,
+    so the sliding window can never extend a session past the absolute cap.
     """
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
-    to_encode.update({"exp": expire, "type": "refresh"})
+    now = int(time.time())
+    session_start = int(to_encode.get("session_start") or now)
+    sliding_expire = now + int((expires_delta or timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).total_seconds())
+    absolute_expire = session_start + REFRESH_SESSION_MAX_DAYS * 24 * 60 * 60
+    to_encode.update({
+        "exp": min(sliding_expire, absolute_expire),
+        "type": "refresh",
+        "session_start": session_start,
+    })
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+
+def refresh_session_expired(payload: Dict) -> bool:
+    """True if the refresh token's session has passed the absolute cap.
+
+    Tokens issued before `session_start` existed have no claim; they are treated
+    as still within the cap so existing users are not logged out by the upgrade.
+    """
+    session_start = payload.get("session_start")
+    if session_start is None:
+        return False
+    return time.time() > int(session_start) + REFRESH_SESSION_MAX_DAYS * 24 * 60 * 60
 
 def verify_token(token: str, logger=None):
     current_logger = logger if logger else logging.getLogger(__name__)
