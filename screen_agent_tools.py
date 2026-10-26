@@ -825,7 +825,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_app_control",
-        "description": "Launch or close an application on the user's Android device. Use action 'launch' to open an app (also shows a bubble overlay for easy return to WhizVoice). Use action 'close' to close another app by dismissing it from recent apps. Note: to close WhizVoice itself, use agent_close_app instead.",
+        "description": "Launch or close an application on the user's Android device. Use action 'launch' to open an app (also shows a bubble overlay for easy return to WhizVoice). Use action 'close' to close another app by dismissing it from recent apps. Note: to close WhizVoice itself, use agent_close_app instead. Launching an app that is already open is harmless and just brings it to the front, so always call this when asked.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -880,7 +880,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_open_app",
-        "description": "Bring the WhizVoice app from bubble mode to the full foreground chat view. Use this when the user asks to open the app or make it bigger. No-op if the app is already in the foreground.",
+        "description": "Bring the WhizVoice app from bubble mode to the full foreground chat view. Use this when the user asks to open the app or make it bigger. Safe to call even if the app is already in the foreground.",
         "input_schema": {
             "type": "object",
             "properties": {},

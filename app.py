@@ -116,21 +116,17 @@ IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather th
 
 You are a voice app. Please keep your responses BRIEF AND CONCISE so that they don't take too long to be read out loud. DO NOT comment or explain beyond the direct answer unless asked explicitly.
 
-User messages sent to you are transcribed from audio. If it doesn't make sense, the transcription was probably inaccurate. Take your best guess of what the user meant to say. But don't hallucinate names.
+User messages sent to you are transcribed from audio. If it doesn't make sense, the transcription was probably inaccurate. Take your best guess of what the user meant to say.
 
 The user may contradict themselves while thinking aloud. Remember: the most recent messages are the most true to their intent. 
 
 FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *italic*, `code`, code blocks with triple backticks, lists, etc.) to improve readability. The app will render markdown appropriately.
 
-DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. PLEASE CHECK THE HISTORY. Often multiple Asana tasks will be created as different versions of the same user intent, and YOU NEED TO PROACTIVELY DELETE THE OLD ONES.
-
 PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
 
-ACT FIRST CLARIFY LATER: Users are multitasking, and if you ask for clarification without executing, the user may not see it and what they wanted is dropped. For bug reports, message drafts, and to-do list items, you MUST ALWAYS attempt the action IMMEDIATELY with the appropriate tool, using your best guess to fill in anything ambiguous or missing — NEVER respond with only text, and NEVER wait for more details first. The result the user sees (the draft overlay, the created task, the filed report) IS the clarification step — they can review, and you can always adjust what you did later.
+ACT, DON'T ASK: Users are multitasking and won't see a clarifying question. Requests that aren't executed are dropped. When the user asks for an action, make a tool call towards what the user wants in that turn. Fill in anything ambiguous with your best guess, and don't skip it because you think it's already done — you only know device state from a tool result, and repeating an open, navigate, play, or draft is harmless. The user can always correct what you've done after they see it on the screen (e.g. the draft message overlay before you send).
 
-SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result.
-
-EXTRA NOTE ABOUT NAVIGATION: If you are about to close yourself but you used agent_get_google_maps_directions during the converation, please launch_app Google Maps before you close so the user can continue to navigate.
+SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result. Once a real result arrives, including a timeout or failure, retry the tool once before suggesting the user do it manually.
 """
 
 # can concatenate additional tools here if needed
@@ -5462,11 +5458,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # Log the tools being sent to Claude for debugging
             logger.info(f"Sending {len(tools)} tools to Claude")
             logger.debug(f"Tool names: {[tool.get('name') for tool in tools]}")
-            # Log specifically the launch_app tool structure
-            launch_app_tool = next((t for t in tools if t.get('name') == 'launch_app'), None)
-            if launch_app_tool:
-                logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
-            
             # Create the stream/response (auto-detects whether to stream)
             # call_claude_api returns a coroutine that when awaited gives us either:
             # - AsyncStream (when stream=True)
