@@ -7,6 +7,7 @@ import json
 import uuid
 from typing import Dict, Any, Optional
 from preferences import get_preference, set_preference
+import contact_import
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -56,6 +57,41 @@ def _load_contacts(user_id: str) -> dict:
 
 def _save_contacts(user_id: str, data: dict) -> bool:
     return set_preference(user_id, 'contacts', json.dumps(data))
+
+
+def is_import_declined(user_id: str, candidate_id: str) -> bool:
+    """True if the user previously declined importing this phone/Google candidate."""
+    data = _load_contacts(user_id)
+    return candidate_id in data.get("import_declined", {})
+
+
+def import_offer_blocked(user_id: str, candidate_id: str, display_name: Optional[str]) -> bool:
+    """True if offering to import this candidate would be wrong: the user declined
+    it before, or a Whiz contact with that name already exists."""
+    data = _load_contacts(user_id)
+    if candidate_id in data.get("import_declined", {}):
+        return True
+    if display_name:
+        _, existing = _find_contact_by_name(data, normalize_nickname(display_name))
+        if existing:
+            return True
+    return False
+
+
+def _contact_result(contact: dict) -> dict:
+    """The saved-contact shape returned to the model."""
+    return {
+        "found": True,
+        "nicknames": contact.get("nicknames", []),
+        "real_name": contact.get("real_name"),
+        "preferred_app": contact.get("preferred_app"),
+        "phone_numbers": contact.get("phone_numbers", {}),
+        "primary_phone": contact.get("primary_phone"),
+        "emails": contact.get("emails", {}),
+        "primary_email": contact.get("primary_email"),
+        "addresses": contact.get("addresses", {}),
+        "primary_address": contact.get("primary_address")
+    }
 
 
 def _find_contact_by_name(data: dict, normalized_name: str):
@@ -205,7 +241,8 @@ _DEFAULT_ENRICH_FIELDS = ["email", "address"]
 async def get_contact_preference(user_id: str, name: str,
                                   websocket=None, tool_result_handler=None,
                                   conversation_id: str = None,
-                                  needed_fields=None) -> Dict[str, Any]:
+                                  needed_fields=None,
+                                  tracking_conversation_id=None) -> Dict[str, Any]:
     """
     Look up a contact by name (can be nickname or real name) to get their details.
     If not found in saved preferences, automatically falls back to searching the
@@ -225,6 +262,9 @@ async def get_contact_preference(user_id: str, name: str,
         needed_fields: Optional list of the detail(s) the caller needs right now,
             any of 'phone' / 'email' / 'address'. Drives Google-Contacts enrichment
             of an otherwise-incomplete match. Defaults to email+address when omitted.
+        tracking_conversation_id: The real (database) conversation id, used to key
+            import-candidate tracking. conversation_id may be the client's optimistic
+            id on a chat's first turn and is still what the device tool needs.
 
     Returns:
         Dictionary with found status and contact details if found
@@ -234,20 +274,8 @@ async def get_contact_preference(user_id: str, name: str,
         logger.info(f"Looking up contact '{normalized_name}' for user {user_id}")
 
         data = _load_contacts(user_id)
-
-        def _build_result(contact):
-            return {
-                "found": True,
-                "nicknames": contact.get("nicknames", []),
-                "real_name": contact.get("real_name"),
-                "preferred_app": contact.get("preferred_app"),
-                "phone_numbers": contact.get("phone_numbers", {}),
-                "primary_phone": contact.get("primary_phone"),
-                "emails": contact.get("emails", {}),
-                "primary_email": contact.get("primary_email"),
-                "addresses": contact.get("addresses", {}),
-                "primary_address": contact.get("primary_address")
-            }
+        _build_result = _contact_result
+        tracking_id = tracking_conversation_id or conversation_id
 
         async def _ensure_google_token(prompt):
             """Return True if Google Contacts can be queried for this user.
@@ -311,8 +339,10 @@ async def get_contact_preference(user_id: str, name: str,
             """Build a saved-contact result and attach Google matches if it's missing
             a needed field."""
             res = _build_result(contact)
+            await contact_import.record_resolved(user_id, tracking_id, name, contact)
             matches = await _google_matches_if_missing(res)
             if matches:
+                # Enrichment only: the contact IS saved, so these are never import candidates.
                 res["google_contacts"] = matches
             return res
 
@@ -359,6 +389,7 @@ async def get_contact_preference(user_id: str, name: str,
                 device_contacts = device_result.get("contacts", [])
                 if device_contacts:
                     logger.info(f"Found {len(device_contacts)} device contact(s) for '{name}'")
+                    await contact_import.record_candidates(user_id, tracking_id, name, "phone", device_contacts)
                     response = {
                         "found": False,
                         "device_contacts": device_contacts,
@@ -370,6 +401,7 @@ async def get_contact_preference(user_id: str, name: str,
                     if len(device_contacts) == 1:
                         matches = await _google_matches_if_missing(device_contacts[0])
                         if matches:
+                            await contact_import.record_candidates(user_id, tracking_id, name, "google", matches)
                             response["google_contacts"] = matches
                     return response
                 elif device_result.get("permission_denied"):
@@ -390,6 +422,7 @@ async def get_contact_preference(user_id: str, name: str,
                 google_contacts = []
             if google_contacts:
                 logger.info(f"Found {len(google_contacts)} Google contact(s) for '{name}'")
+                await contact_import.record_candidates(user_id, tracking_id, name, "google", google_contacts)
                 return {
                     "found": False,
                     "google_contacts": google_contacts,
@@ -603,6 +636,118 @@ def remove_contact_nickname(user_id: str, nickname: str) -> Dict[str, Any]:
         return {"success": False, "error": f"Error removing nickname: {str(e)}"}
 
 
+def _normalized_unique(names) -> list:
+    out = []
+    for n in names or []:
+        norm = normalize_nickname(n) if n else ""
+        if norm and norm not in out:
+            out.append(norm)
+    return out
+
+
+async def import_contact(user_id: str, candidate_id: str, preferred_app: Optional[str] = None,
+                         nicknames: Optional[list] = None, never_ask_again: bool = False,
+                         tracking_conversation_id=None) -> Dict[str, Any]:
+    """
+    Copy a phone/Google contact (found earlier by get_contact_preference and
+    snapshotted by contact_import) into the Whiz contacts store, or, with
+    never_ask_again, record that the user does not want to be offered it again.
+
+    A plain "no" needs no call: the per-conversation offered flag already stops
+    the question from repeating until the next conversation.
+
+    Merges into an existing Whiz contact with the same real name: existing
+    fields win, missing ones are filled from the candidate.
+    """
+    try:
+        data = _load_contacts(user_id)
+
+        if never_ask_again:
+            from datetime import datetime, timezone
+            data.setdefault("import_declined", {})[candidate_id] = datetime.now(timezone.utc).isoformat()
+            if not _save_contacts(user_id, data):
+                return {"success": False, "error": "Failed to save the decline."}
+            logger.info(f"User {user_id} permanently declined importing contact {candidate_id}")
+            return {"success": True, "declined": True,
+                    "message": "Noted. This contact will not be offered for saving again."}
+
+        if preferred_app not in ("whatsapp", "sms"):
+            return {"success": False, "error": "preferred_app must be 'whatsapp' or 'sms'."}
+
+        candidate = await contact_import.get_candidate(user_id, tracking_conversation_id, candidate_id)
+        if not candidate:
+            return {"success": False,
+                    "error": "Contact candidate expired or unknown. Call get_contact_preference "
+                             "again and use the new candidate_id."}
+
+        real_name = candidate.get("display_name")
+        if not real_name:
+            return {"success": False, "error": "Candidate has no display name to save under."}
+        normalized_real = normalize_nickname(real_name)
+
+        contact_id, contact = _find_contact_by_name(data, normalized_real)
+        merged = contact is not None
+        if not merged:
+            contact_id = str(uuid.uuid4())
+            contact = {
+                "nicknames": [normalized_real],
+                "real_name": real_name,
+                "preferred_app": preferred_app,
+                "phone_numbers": {},
+                "primary_phone": None,
+                "emails": {},
+                "primary_email": None,
+                "addresses": {},
+                "primary_address": None,
+            }
+            data["contacts"][contact_id] = contact
+            data["nickname_index"][normalized_real] = contact_id
+
+        contact["preferred_app"] = preferred_app
+        contact["source"] = candidate.get("source")
+        contact["source_id"] = candidate.get("source_id")
+
+        for bucket, primary_key in (("phone_numbers", "primary_phone"),
+                                    ("emails", "primary_email"),
+                                    ("addresses", "primary_address")):
+            values = contact.setdefault(bucket, {})
+            for label, value in (candidate.get(bucket) or {}).items():
+                values.setdefault(label, value)
+            if not contact.get(primary_key) and values:
+                contact[primary_key] = candidate.get(primary_key) if candidate.get(primary_key) in values \
+                    else next(iter(values))
+
+        skipped = []
+        wanted = _normalized_unique(list(nicknames or []) + list(candidate.get("queried_as") or []))
+        for nick in wanted:
+            if nick == normalized_real:
+                continue
+            owner = data["nickname_index"].get(nick)
+            if owner and owner != contact_id:
+                skipped.append(nick)
+                continue
+            if nick not in contact.setdefault("nicknames", []):
+                contact["nicknames"].append(nick)
+            data["nickname_index"][nick] = contact_id
+
+        if not _save_contacts(user_id, data):
+            return {"success": False, "error": "Failed to save contact."}
+
+        action = "Merged into existing" if merged else "Saved"
+        logger.info(f"{action} contact '{real_name}' from {candidate_id} for user {user_id}")
+        return {
+            "success": True,
+            "merged": merged,
+            "contact": _contact_result(contact),
+            "skipped_nicknames": skipped,
+            "message": f"{action} contact '{real_name}' ({preferred_app}). Nicknames: {contact['nicknames']}"
+                       + (f". Skipped nicknames already used by other contacts: {skipped}" if skipped else ""),
+        }
+    except Exception as e:
+        logger.error(f"Error importing contact {candidate_id} for user {user_id}: {e}", exc_info=True)
+        return {"success": False, "error": f"Error importing contact: {str(e)}"}
+
+
 # Define the contact tools for Claude
 contacts_tools = [
     {
@@ -656,7 +801,7 @@ contacts_tools = [
     {
         "type": "custom",
         "name": "get_contact_preference",
-        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. Do NOT use this for searching addresses for agent_get_google_maps_directions unless the query involves someone's name. If you need a specific detail (an email to send a message, an address for directions, a number to call), pass 'needed_fields'. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), continue to complete the task. If the contact IS found, make SURE you have used the correct contact name (not the nickname) for sending messages. Note that people may call different types of addresses different things, for example someone's home or house refers to the same address, and someone's office or work or workplace refer to the same address.",
+        "description": "Look up a contact by name to get their real name, preferred messaging app, phone numbers, email addresses, and postal addresses. Use this BEFORE sending messages. Do NOT use this for searching addresses for agent_get_google_maps_directions unless the query involves someone's name. If you need a specific detail (an email to send a message, an address for directions, a number to call), pass 'needed_fields'. If the contact isn't found anywhere and you have the info you need (e.g. name and messaging app), continue to complete the task. If the contact IS found, make SURE you have used the correct contact name (not the nickname) for sending messages. Note that people may call different types of addresses different things, for example someone's home or house refers to the same address, and someone's office or work or workplace refer to the same address. Phone and Google matches carry a candidate_id for import_contact.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -731,5 +876,34 @@ contacts_tools = [
             },
             "required": ["nickname"]
         }
-    }
+    },
+    {
+        "type": "custom",
+        "name": "import_contact",
+        "description": "Save a phone or Google contact into Whiz, copying all its phone numbers, emails and addresses. Use the candidate_id from get_contact_preference or from a suggest_import hint on a send result.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "candidate_id": {
+                    "type": "string",
+                    "description": "The candidate_id from get_contact_preference's device_contacts/google_contacts or from a suggest_import hint (e.g. 'phone:1234r5-...' or 'google:people/c123')."
+                },
+                "preferred_app": {
+                    "type": "string",
+                    "enum": ["whatsapp", "sms"],
+                    "description": "The preferred messaging app for this contact. Required unless never_ask_again=true."
+                },
+                "nicknames": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional extra nicknames (e.g. 'mom', 'boss'). The spellings the user already used in this conversation are added automatically."
+                },
+                "never_ask_again": {
+                    "type": "boolean",
+                    "description": "Set true only when the user explicitly says never to ask about saving this contact again. A plain 'no' needs no call."
+                }
+            },
+            "required": ["candidate_id"]
+        }
+    },
 ]

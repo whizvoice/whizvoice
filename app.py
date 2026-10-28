@@ -29,7 +29,8 @@ from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtu
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
-from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference, add_contact_nickname, remove_contact_nickname
+from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference, add_contact_nickname, remove_contact_nickname, import_contact
+import contact_import
 from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
@@ -157,7 +158,7 @@ async def startup_event():
     asyncio.create_task(cleanup_abandoned_tool_executions())
     logger.info("Started abandoned tool execution cleanup task")
     # Initialize screen agent queue with execute_tool function
-    screen_agent_queue.set_execute_tool_func(execute_tool)
+    screen_agent_queue.set_execute_tool_func(_execute_tool_observed)
     screen_agent_queue.set_redis_managers(redis_managers)
     logger.info("Initialized screen agent queue")
 
@@ -914,6 +915,9 @@ async def init_redis():
         # Share Redis client with tool_dedupe. REQUIRED: uvicorn runs 4 workers,
         # so recent-call state must live in Redis to be visible across processes.
         tool_dedupe.init_redis_client(redis_client)
+        # Contact-import candidates/hints are per conversation and must also be
+        # visible across workers.
+        contact_import.init_redis_client(redis_client)
 
         # Initialize Redis managers for distributed session state
         redis_managers = create_managers(redis_client)
@@ -2178,9 +2182,30 @@ TOOL_REGISTRY = {
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id'),
-            args.get('needed_fields')
+            args.get('needed_fields'),
+            kwargs.get('tracking_conversation_id'),
         ),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
+    },
+    "import_contact": {
+        "function_name": "import_contact",
+        "requires_auth": True,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            args.get('candidate_id'),
+            args.get('preferred_app'),
+            args.get('nicknames'),
+            bool(args.get('never_ask_again')),
+            kwargs.get('tracking_conversation_id') or kwargs.get('conversation_id'),
+        ),
+        "validation": lambda args: (
+            {"error": "candidate_id is required."} if not args.get('candidate_id') else
+            {"error": "preferred_app must be 'whatsapp' or 'sms' unless never_ask_again is true."}
+            if not args.get('never_ask_again') and args.get('preferred_app') not in ['whatsapp', 'sms'] else
+            None
+        )
     },
     "list_contact_preferences": {
         "function_name": "list_contact_preferences",
@@ -2366,6 +2391,19 @@ async def execute_tool(tool_name, tool_args, user_id: Optional[str] = None, **co
     except Exception as e:
         logger.error(f"Error executing tool {tool_name}: {str(e)}")
         raise e
+
+
+async def _execute_tool_observed(tool_name, tool_args, user_id: Optional[str] = None, **context):
+    """execute_tool plus contact-import observation.
+
+    This is the executor the screen-agent queue runs, both for immediate and
+    deferred (queued) tools, so a send that was queued behind another tool still
+    gets its suggest_import hint. Tracking is keyed on the real conversation id;
+    `conversation_id` may be the client's optimistic id on a chat's first turn.
+    """
+    result = await execute_tool(tool_name, tool_args, user_id, **context)
+    tracking_id = context.get("tracking_conversation_id") or context.get("conversation_id")
+    return await contact_import.observe(tool_name, tool_args, user_id, tracking_id, result)
 
 
 async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] = None,
@@ -6133,6 +6171,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         websocket=websocket,
                         tool_result_handler=tool_result_handler,
                         conversation_id=session_conversation_id,
+                        # Real DB id for server-side tracking (session id may be optimistic)
+                        tracking_conversation_id=processing_conversation_id,
                         session_id=session_id,
                         device_id=device_id
                     )

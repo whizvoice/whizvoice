@@ -720,7 +720,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_send_message",
-        "description": "Send a previously drafted message. When app is 'whatsapp' or 'sms', opens that messaging app if needed and taps its send button. When app is omitted, taps the send button in whatever app is currently in the foreground (works for Signal, Telegram, Discord, Slack, and any other compose field). IMPORTANT: You MUST have already: 1) Drafted the message (agent_draft_message), 2) Received explicit user confirmation that they are ready to send.",
+        "description": "Send a previously drafted message. When app is 'whatsapp' or 'sms', opens that messaging app if needed and taps its send button. When app is omitted, taps the send button in whatever app is currently in the foreground (works for Signal, Telegram, Discord, Slack, and any other compose field). IMPORTANT: You MUST have already: 1) Drafted the message (agent_draft_message), 2) Received explicit user confirmation that they are ready to send. If the result contains suggest_import or suggest_update_preferred_app, follow its instruction after confirming the send.",
         "input_schema": {
             "type": "object",
             "properties": {
