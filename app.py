@@ -5,6 +5,7 @@ from pydantic import BaseModel, ValidationError
 from typing import List, Optional, Dict, Any, Union, Set, Tuple
 import json
 import os
+import re
 import traceback
 import logging
 import time
@@ -200,6 +201,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Claude BadRequest (400) classification -----------------------------------
+# Anthropic returns spend-limit exhaustion as a generic invalid_request_error;
+# the message text is the only distinguishing signal.
+_USAGE_LIMIT_PHRASE = "reached your specified API usage limits"
+_USAGE_LIMIT_RESET_RE = re.compile(r"regain access on (\d{4}-\d{2}-\d{2} at \d{2}:\d{2} UTC)")
+_GENERIC_BAD_REQUEST_MESSAGE = (
+    "I encountered an error processing your message. This might be due to a "
+    "technical issue with the conversation history. Please try starting a new conversation."
+)
+_HISTORY_ERROR_MESSAGE = (
+    "I'm sorry, but this conversation has encountered a technical issue with the "
+    "message history that prevents me from continuing. Please start a new conversation."
+)
+
+
+def classify_claude_bad_request(error_text: str) -> Tuple[str, str]:
+    """Map a Claude 400 error string to (error_code, user_facing_message)."""
+    lowered = error_text.lower()
+    if _USAGE_LIMIT_PHRASE.lower() in lowered:
+        message = "Your Claude API key has reached its monthly spending limit."
+        match = _USAGE_LIMIT_RESET_RE.search(error_text)
+        if match:
+            message += f" Access resumes {match.group(1)}."
+        message += " Raise the limit in the Anthropic Console or switch keys in Settings."
+        return "CLAUDE_USAGE_LIMIT", message
+    if "tool_use_id" in lowered:
+        return "CONVERSATION_HISTORY_ERROR", _HISTORY_ERROR_MESSAGE
+    return "CLAUDE_API_ERROR", _GENERIC_BAD_REQUEST_MESSAGE
+
 
 # Placeholder for the actual preference key name for Claude API key
 
@@ -5666,13 +5697,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": str(api_error)
                 })
 
-                # Create user-friendly error message
-                error_message = "I encountered an error processing your message. This might be due to a technical issue with the conversation history. Please try starting a new conversation."
+                # Classify the 400 (usage limit vs history corruption vs generic)
+                error_code, error_message = classify_claude_bad_request(str(api_error))
 
                 # Create error payload
                 error_payload = {
                     "type": "error",
-                    "code": "CLAUDE_API_ERROR",
+                    "code": error_code,
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
@@ -6311,22 +6342,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             except Exception as tool_api_error:
                 # Check if this is a BadRequestError (400) from Claude API during tool use
                 if isinstance(tool_api_error, BadRequestError):
-                    # Check if this is specifically a tool_use_id mismatch error
-                    is_tool_use_id_error = (
-                        "tool_use_id" in str(tool_api_error).lower() or
-                        "unexpected tool_use_id" in str(tool_api_error).lower()
-                    )
-
-                    if is_tool_use_id_error:
-                        logger.error(f"Claude API tool_use_id mismatch error during tool use for request {request_id}: {str(tool_api_error)}")
-                        logger.error(f"Conversation history corrupted - cannot continue")
-                        error_message = "I'm sorry, but this conversation has encountered a technical issue with the message history that prevents me from continuing. Please start a new conversation."
-                        error_code = "CONVERSATION_HISTORY_ERROR"
-                    else:
-                        # General BadRequestError during tool use (e.g., duplicate content, invalid format)
-                        logger.error(f"Claude API BadRequest (400) during tool use for request {request_id}: {str(tool_api_error)}")
-                        error_message = "I encountered an error processing your message. This might be due to a technical issue with the conversation history. Please try starting a new conversation."
-                        error_code = "CLAUDE_API_ERROR"
+                    # Classify the 400 (usage limit vs tool_use_id history corruption vs generic)
+                    error_code, error_message = classify_claude_bad_request(str(tool_api_error))
+                    logger.error(f"Claude API BadRequest (400) during tool use for request {request_id} [{error_code}]: {str(tool_api_error)}")
+                    if error_code == "CONVERSATION_HISTORY_ERROR":
+                        logger.error("Conversation history corrupted - cannot continue")
 
                     await set_request_state(request_id, "bad_request_error", {
                         "session_id": session_id,
