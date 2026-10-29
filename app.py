@@ -20,6 +20,7 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_sections, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 import tool_dedupe
+import send_gate
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_log_health_data, agent_open_health_app_settings, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
 from device_control_tools import device_control_tools, RAGE_SHAKE_MODES, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
@@ -134,6 +135,9 @@ SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can
 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools + screen_agent_tools + device_control_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
+# Every tool in tool_dedupe.GUARDS must accept confirm_duplicate, or the model
+# cannot act on the guard's "call again with confirm_duplicate=true" instruction.
+tool_dedupe.advertise_confirm_duplicate(tools)
 
 # Pre-build variant with parent-required description for get_new_asana_task_id
 tools_parent_required = []
@@ -2453,6 +2457,22 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
         user_id: User ID if authenticated
         **context: Additional context (websocket, tool_result_handler, conversation_id, session_id, device_id, etc.)
     """
+    # ===== Pre-execution send confirmation gate =====
+    # A send with no user message after the draft overlay appeared is never
+    # legitimate (bug 1543: draft and send in the same turn). Checked against the
+    # conversation as the model sees it; degrades open if history is unavailable.
+    if tool_name in send_gate.SEND_TOOLS and context.get("session_id"):
+        try:
+            history = await get_chat_messages_for_claude(context["session_id"])
+            if not send_gate.send_is_confirmed(history):
+                logger.warning(
+                    f"Send gate refused {tool_name} for request {request_id}: "
+                    f"no user message since the last draft overlay"
+                )
+                return send_gate.build_refusal(tool_name)
+        except Exception as e:
+            logger.warning(f"Send gate could not read history for {tool_name}, allowing: {e}")
+
     # ===== Pre-execution duplicate guard =====
     # Concurrent requests in one conversation run independent agent loops and can
     # each decide on the same mutation before either result exists in shared
