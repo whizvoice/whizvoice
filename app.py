@@ -3330,14 +3330,21 @@ async def websocket_endpoint(websocket: WebSocket):
                         status = message_data.get("status", "")
                         status_message = message_data.get("message", "")
                         logger.info(f"Received tool_status: request_id={tool_request_id}, status={status}")
-                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_contacts_permission", "waiting_for_calendar_permission", "waiting_for_google_contacts_consent"):
+                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_accessibility", "waiting_for_contacts_permission", "waiting_for_calendar_permission", "waiting_for_google_contacts_consent", "running"):
                             # The Google consent UI (full Google screen + unverified warning)
                             # takes longer than a one-tap permission grant, so extend further.
-                            extension = 130.0 if status == "waiting_for_google_contacts_consent" else 65.0
+                            # "running" = a parked tool has resumed (phone unlocked / service connected):
+                            # give it a fresh budget for its own work rather than a long user-action wait.
+                            extension = (130.0 if status == "waiting_for_google_contacts_consent"
+                                         else 30.0 if status == "running"
+                                         else 65.0)
                             metadata = tool_result_handler.extend_deadline(tool_request_id, extension)
-                            # Update the Redis placeholder so Claude sees why the tool is waiting
+                            # Update the Redis placeholder so Claude sees the tool's CURRENT state
+                            # (it answers mid-tool interjections from this text)
                             if metadata and metadata.get('tool_use_id') and metadata.get('session_id'):
                                 placeholder = ("Waiting for user to unlock phone..." if status == "waiting_for_unlock"
+                                               else (status_message or "Phone unlocked; tool is running...") if status == "running"
+                                               else (status_message or "Waiting for user to enable the Whiz accessibility service...") if status == "waiting_for_accessibility"
                                                else "Waiting for user to grant calendar permission..." if status == "waiting_for_calendar_permission"
                                                else "Waiting for user to grant Google Contacts access..." if status == "waiting_for_google_contacts_consent"
                                                else "Waiting for user to grant contacts permission...")
