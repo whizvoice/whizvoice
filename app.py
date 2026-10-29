@@ -5,6 +5,7 @@ from pydantic import BaseModel, ValidationError
 from typing import List, Optional, Dict, Any, Union, Set, Tuple
 import json
 import os
+import re
 import traceback
 import logging
 import time
@@ -19,9 +20,10 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_sections, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 import tool_dedupe
+import send_gate
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_log_health_data, agent_open_health_app_settings, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
-from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
+from device_control_tools import device_control_tools, RAGE_SHAKE_MODES, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
@@ -29,7 +31,8 @@ from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtu
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
-from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference, add_contact_nickname, remove_contact_nickname
+from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference, add_contact_nickname, remove_contact_nickname, import_contact
+import contact_import
 from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
@@ -111,30 +114,30 @@ set_stripe_config(STRIPE_SECRET_KEY, STRIPE_PRICE_ID)
 CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can help with anything. You have access to various tools that you MUST use when appropriate. Each tool's description explains when and how to use it — follow those. A couple of things the tool descriptions don't cover:
 
 - For music playback, we currently only support YouTube Music, not Spotify.
+- Apps without dedicated tools are still fully usable via agent_get_ui / agent_click / agent_insert_text, and agent_peek_app can read what's on screen in a backgrounded app.
 
 IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather than just describing what you would do.
 
 You are a voice app. Please keep your responses BRIEF AND CONCISE so that they don't take too long to be read out loud. DO NOT comment or explain beyond the direct answer unless asked explicitly.
 
-User messages sent to you are transcribed from audio. If it doesn't make sense, the transcription was probably inaccurate. Take your best guess of what the user meant to say. But don't hallucinate names.
+User messages sent to you are transcribed from audio. If it doesn't make sense, the transcription was probably inaccurate. Take your best guess of what the user meant to say.
 
 The user may contradict themselves while thinking aloud. Remember: the most recent messages are the most true to their intent. 
 
 FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *italic*, `code`, code blocks with triple backticks, lists, etc.) to improve readability. The app will render markdown appropriately.
 
-DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. PLEASE CHECK THE HISTORY. Often multiple Asana tasks will be created as different versions of the same user intent, and YOU NEED TO PROACTIVELY DELETE THE OLD ONES.
-
 PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
 
-ACT FIRST CLARIFY LATER: Users are multitasking, and if you ask for clarification without executing, the user may not see it and what they wanted is dropped. For bug reports, message drafts, and to-do list items, you MUST ALWAYS attempt the action IMMEDIATELY with the appropriate tool, using your best guess to fill in anything ambiguous or missing — NEVER respond with only text, and NEVER wait for more details first. The result the user sees (the draft overlay, the created task, the filed report) IS the clarification step — they can review, and you can always adjust what you did later.
+ACT, DON'T ASK: Users are multitasking and won't see a clarifying question. Requests that aren't executed are dropped. When the user asks for an action, make a tool call towards what the user wants in that turn. Fill in anything ambiguous with your best guess, and don't skip it because you think it's already done — you only know device state from a tool result, and repeating an open, navigate, play, or draft is harmless. The user can always correct what you've done after they see it on the screen (e.g. the draft message overlay before you send).
 
-SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result.
-
-EXTRA NOTE ABOUT NAVIGATION: If you are about to close yourself but you used agent_get_google_maps_directions during the converation, please launch_app Google Maps before you close so the user can continue to navigate.
+SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result. Once a real result arrives, including a timeout or failure, retry the tool once before suggesting the user do it manually.
 """
 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools + screen_agent_tools + device_control_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
+# Every tool in tool_dedupe.GUARDS must accept confirm_duplicate, or the model
+# cannot act on the guard's "call again with confirm_duplicate=true" instruction.
+tool_dedupe.advertise_confirm_duplicate(tools)
 
 # Pre-build variant with parent-required description for get_new_asana_task_id
 tools_parent_required = []
@@ -161,7 +164,7 @@ async def startup_event():
     asyncio.create_task(cleanup_abandoned_tool_executions())
     logger.info("Started abandoned tool execution cleanup task")
     # Initialize screen agent queue with execute_tool function
-    screen_agent_queue.set_execute_tool_func(execute_tool)
+    screen_agent_queue.set_execute_tool_func(_execute_tool_observed)
     screen_agent_queue.set_redis_managers(redis_managers)
     logger.info("Initialized screen agent queue")
 
@@ -203,6 +206,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Claude BadRequest (400) classification -----------------------------------
+# Anthropic returns spend-limit exhaustion as a generic invalid_request_error;
+# the message text is the only distinguishing signal.
+_USAGE_LIMIT_PHRASE = "reached your specified API usage limits"
+_USAGE_LIMIT_RESET_RE = re.compile(r"regain access on (\d{4}-\d{2}-\d{2} at \d{2}:\d{2} UTC)")
+_GENERIC_BAD_REQUEST_MESSAGE = (
+    "I encountered an error processing your message. This might be due to a "
+    "technical issue with the conversation history. Please try starting a new conversation."
+)
+_HISTORY_ERROR_MESSAGE = (
+    "I'm sorry, but this conversation has encountered a technical issue with the "
+    "message history that prevents me from continuing. Please start a new conversation."
+)
+
+
+def classify_claude_bad_request(error_text: str) -> Tuple[str, str]:
+    """Map a Claude 400 error string to (error_code, user_facing_message)."""
+    lowered = error_text.lower()
+    if _USAGE_LIMIT_PHRASE.lower() in lowered:
+        message = "Your Claude API key has reached its monthly spending limit."
+        match = _USAGE_LIMIT_RESET_RE.search(error_text)
+        if match:
+            message += f" Access resumes {match.group(1)}."
+        message += " Raise the limit in the Anthropic Console or switch keys in Settings."
+        return "CLAUDE_USAGE_LIMIT", message
+    if "tool_use_id" in lowered:
+        return "CONVERSATION_HISTORY_ERROR", _HISTORY_ERROR_MESSAGE
+    return "CLAUDE_API_ERROR", _GENERIC_BAD_REQUEST_MESSAGE
+
 
 # Placeholder for the actual preference key name for Claude API key
 
@@ -918,6 +951,9 @@ async def init_redis():
         # Share Redis client with tool_dedupe. REQUIRED: uvicorn runs 4 workers,
         # so recent-call state must live in Redis to be visible across processes.
         tool_dedupe.init_redis_client(redis_client)
+        # Contact-import candidates/hints are per conversation and must also be
+        # visible across workers.
+        contact_import.init_redis_client(redis_client)
 
         # Initialize Redis managers for distributed session state
         redis_managers = create_managers(redis_client)
@@ -1694,12 +1730,16 @@ TOOL_REGISTRY = {
         "is_async": True,
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('mode') or 'snooze',
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id')
         ),
-        "validation": None
+        "validation": lambda args: (
+            {"error": f"mode must be one of {list(RAGE_SHAKE_MODES)}."}
+            if (args.get('mode') or 'snooze') not in RAGE_SHAKE_MODES else None
+        )
     },
     "agent_submit_bug_report": {
         "function_name": "agent_submit_bug_report",
@@ -2178,9 +2218,30 @@ TOOL_REGISTRY = {
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id'),
-            args.get('needed_fields')
+            args.get('needed_fields'),
+            kwargs.get('tracking_conversation_id'),
         ),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
+    },
+    "import_contact": {
+        "function_name": "import_contact",
+        "requires_auth": True,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            args.get('candidate_id'),
+            args.get('preferred_app'),
+            args.get('nicknames'),
+            bool(args.get('never_ask_again')),
+            kwargs.get('tracking_conversation_id') or kwargs.get('conversation_id'),
+        ),
+        "validation": lambda args: (
+            {"error": "candidate_id is required."} if not args.get('candidate_id') else
+            {"error": "preferred_app must be 'whatsapp' or 'sms' unless never_ask_again is true."}
+            if not args.get('never_ask_again') and args.get('preferred_app') not in ['whatsapp', 'sms'] else
+            None
+        )
     },
     "list_contact_preferences": {
         "function_name": "list_contact_preferences",
@@ -2368,6 +2429,19 @@ async def execute_tool(tool_name, tool_args, user_id: Optional[str] = None, **co
         raise e
 
 
+async def _execute_tool_observed(tool_name, tool_args, user_id: Optional[str] = None, **context):
+    """execute_tool plus contact-import observation.
+
+    This is the executor the screen-agent queue runs, both for immediate and
+    deferred (queued) tools, so a send that was queued behind another tool still
+    gets its suggest_import hint. Tracking is keyed on the real conversation id;
+    `conversation_id` may be the client's optimistic id on a chat's first turn.
+    """
+    result = await execute_tool(tool_name, tool_args, user_id, **context)
+    tracking_id = context.get("tracking_conversation_id") or context.get("conversation_id")
+    return await contact_import.observe(tool_name, tool_args, user_id, tracking_id, result)
+
+
 async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] = None,
                                   request_id: Optional[str] = None, **context):
     """
@@ -2383,6 +2457,22 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
         user_id: User ID if authenticated
         **context: Additional context (websocket, tool_result_handler, conversation_id, session_id, device_id, etc.)
     """
+    # ===== Pre-execution send confirmation gate =====
+    # A send with no user message after the draft overlay appeared is never
+    # legitimate (bug 1543: draft and send in the same turn). Checked against the
+    # conversation as the model sees it; degrades open if history is unavailable.
+    if tool_name in send_gate.SEND_TOOLS and context.get("session_id"):
+        try:
+            history = await get_chat_messages_for_claude(context["session_id"])
+            if not send_gate.send_is_confirmed(history):
+                logger.warning(
+                    f"Send gate refused {tool_name} for request {request_id}: "
+                    f"no user message since the last draft overlay"
+                )
+                return send_gate.build_refusal(tool_name)
+        except Exception as e:
+            logger.warning(f"Send gate could not read history for {tool_name}, allowing: {e}")
+
     # ===== Pre-execution duplicate guard =====
     # Concurrent requests in one conversation run independent agent loops and can
     # each decide on the same mutation before either result exists in shared
@@ -3260,14 +3350,21 @@ async def websocket_endpoint(websocket: WebSocket):
                         status = message_data.get("status", "")
                         status_message = message_data.get("message", "")
                         logger.info(f"Received tool_status: request_id={tool_request_id}, status={status}")
-                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_contacts_permission", "waiting_for_calendar_permission", "waiting_for_google_contacts_consent"):
+                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_accessibility", "waiting_for_contacts_permission", "waiting_for_calendar_permission", "waiting_for_google_contacts_consent", "running"):
                             # The Google consent UI (full Google screen + unverified warning)
                             # takes longer than a one-tap permission grant, so extend further.
-                            extension = 130.0 if status == "waiting_for_google_contacts_consent" else 65.0
+                            # "running" = a parked tool has resumed (phone unlocked / service connected):
+                            # give it a fresh budget for its own work rather than a long user-action wait.
+                            extension = (130.0 if status == "waiting_for_google_contacts_consent"
+                                         else 30.0 if status == "running"
+                                         else 65.0)
                             metadata = tool_result_handler.extend_deadline(tool_request_id, extension)
-                            # Update the Redis placeholder so Claude sees why the tool is waiting
+                            # Update the Redis placeholder so Claude sees the tool's CURRENT state
+                            # (it answers mid-tool interjections from this text)
                             if metadata and metadata.get('tool_use_id') and metadata.get('session_id'):
                                 placeholder = ("Waiting for user to unlock phone..." if status == "waiting_for_unlock"
+                                               else (status_message or "Phone unlocked; tool is running...") if status == "running"
+                                               else (status_message or "Waiting for user to enable the Whiz accessibility service...") if status == "waiting_for_accessibility"
                                                else "Waiting for user to grant calendar permission..." if status == "waiting_for_calendar_permission"
                                                else "Waiting for user to grant Google Contacts access..." if status == "waiting_for_google_contacts_consent"
                                                else "Waiting for user to grant contacts permission...")
@@ -5458,11 +5555,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # Log the tools being sent to Claude for debugging
             logger.info(f"Sending {len(tools)} tools to Claude")
             logger.debug(f"Tool names: {[tool.get('name') for tool in tools]}")
-            # Log specifically the launch_app tool structure
-            launch_app_tool = next((t for t in tools if t.get('name') == 'launch_app'), None)
-            if launch_app_tool:
-                logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
-            
             # Create the stream/response (auto-detects whether to stream)
             # call_claude_api returns a coroutine that when awaited gives us either:
             # - AsyncStream (when stream=True)
@@ -5633,13 +5725,13 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": str(api_error)
                 })
 
-                # Create user-friendly error message
-                error_message = "I encountered an error processing your message. This might be due to a technical issue with the conversation history. Please try starting a new conversation."
+                # Classify the 400 (usage limit vs history corruption vs generic)
+                error_code, error_message = classify_claude_bad_request(str(api_error))
 
                 # Create error payload
                 error_payload = {
                     "type": "error",
-                    "code": "CLAUDE_API_ERROR",
+                    "code": error_code,
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
@@ -6138,6 +6230,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         websocket=websocket,
                         tool_result_handler=tool_result_handler,
                         conversation_id=session_conversation_id,
+                        # Real DB id for server-side tracking (session id may be optimistic)
+                        tracking_conversation_id=processing_conversation_id,
                         session_id=session_id,
                         device_id=device_id
                     )
@@ -6276,22 +6370,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             except Exception as tool_api_error:
                 # Check if this is a BadRequestError (400) from Claude API during tool use
                 if isinstance(tool_api_error, BadRequestError):
-                    # Check if this is specifically a tool_use_id mismatch error
-                    is_tool_use_id_error = (
-                        "tool_use_id" in str(tool_api_error).lower() or
-                        "unexpected tool_use_id" in str(tool_api_error).lower()
-                    )
-
-                    if is_tool_use_id_error:
-                        logger.error(f"Claude API tool_use_id mismatch error during tool use for request {request_id}: {str(tool_api_error)}")
-                        logger.error(f"Conversation history corrupted - cannot continue")
-                        error_message = "I'm sorry, but this conversation has encountered a technical issue with the message history that prevents me from continuing. Please start a new conversation."
-                        error_code = "CONVERSATION_HISTORY_ERROR"
-                    else:
-                        # General BadRequestError during tool use (e.g., duplicate content, invalid format)
-                        logger.error(f"Claude API BadRequest (400) during tool use for request {request_id}: {str(tool_api_error)}")
-                        error_message = "I encountered an error processing your message. This might be due to a technical issue with the conversation history. Please try starting a new conversation."
-                        error_code = "CLAUDE_API_ERROR"
+                    # Classify the 400 (usage limit vs tool_use_id history corruption vs generic)
+                    error_code, error_message = classify_claude_bad_request(str(tool_api_error))
+                    logger.error(f"Claude API BadRequest (400) during tool use for request {request_id} [{error_code}]: {str(tool_api_error)}")
+                    if error_code == "CONVERSATION_HISTORY_ERROR":
+                        logger.error("Conversation history corrupted - cannot continue")
 
                     await set_request_state(request_id, "bad_request_error", {
                         "session_id": session_id,

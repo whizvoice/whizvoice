@@ -77,7 +77,7 @@ async def agent_search_google_maps_location(address_keyword: str, user_id: str =
                 # Wait for tool result with timeout (15 seconds for search operations)
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=15.0
+                    timeout=25.0
                 )
 
                 logger.info(f"Google Maps search result for {tool_request_id}: {result}")
@@ -169,7 +169,7 @@ async def agent_search_google_maps_phrase(search_phrase: str, user_id: str = Non
                 # Wait for tool result with timeout (15 seconds for search operations)
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=15.0
+                    timeout=25.0
                 )
 
                 logger.info(f"Google Maps phrase search result for {tool_request_id}: {result}")
@@ -359,7 +359,7 @@ async def agent_select_location_from_list(position: Optional[int] = None, fragme
                 # Wait for tool result with timeout (15 seconds for selection operations)
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=15.0
+                    timeout=25.0
                 )
 
                 logger.info(f"Location selection result for {tool_request_id}: {result}")
@@ -560,7 +560,7 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None,
                 # Wait for tool result with timeout (25 seconds for directions operations)
                 result = await tool_result_handler.wait_for_tool_result(
                     request_id=tool_request_id,
-                    timeout=25.0
+                    timeout=40.0
                 )
 
                 logger.info(f"Google Maps directions result for {tool_request_id}: {result}")

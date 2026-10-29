@@ -692,7 +692,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_draft_message",
-        "description": "Draft a message and show it in an overlay for user review. Three modes: (1) WhatsApp — set app='whatsapp' and provide contact_name; the app will be opened and navigated to that chat automatically. (2) SMS / Google Messages — set app='sms' and provide contact_name; same auto-navigation. (3) Generic — omit app to draft into whatever app is currently in the foreground (Signal, Telegram, Discord, Slack, brightwheel, any compose field, etc.); does NOT open or switch apps, just uses the current one and does not need contact_name. You MUST use this BEFORE sending any message, so the user can review and confirm. The message appears in a yellow overlay. If editing a previously drafted message, you MUST provide previous_text to show tracked changes (deletions in red strikethrough, additions in blue). If user gave you some instruction but you're not sure what the user wants to say exactly, just show the draft message with your best guess, so the user can see it and copy edit.",
+        "description": "Draft a message and show it in an overlay for user review. Three modes: (1) WhatsApp — set app='whatsapp' and provide contact_name; the app will be opened and navigated to that chat automatically. (2) SMS / Google Messages — set app='sms' and provide contact_name; same auto-navigation. (3) Generic — omit app to draft into whatever app is currently in the foreground (Signal, Telegram, Discord, Slack, brightwheel, any compose field, etc.); does NOT open or switch apps, just uses the current one and does not need contact_name. You MUST use this BEFORE sending any message, so the user can review and confirm. The message appears in an overlay. If editing a previously drafted message, you MUST provide previous_text to show tracked changes (deletions in red strikethrough, additions in blue). If the message or the contact name is unclear, draft anyway with your best guess (look up the closest contact with get_contact_preference); the user sees both on screen and can correct them.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -720,7 +720,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_send_message",
-        "description": "Send a previously drafted message. When app is 'whatsapp' or 'sms', opens that messaging app if needed and taps its send button. When app is omitted, taps the send button in whatever app is currently in the foreground (works for Signal, Telegram, Discord, Slack, and any other compose field). IMPORTANT: You MUST have already: 1) Drafted the message (agent_draft_message), 2) Received explicit user confirmation that they are ready to send.",
+        "description": "Send a previously drafted message. When app is 'whatsapp' or 'sms', opens that messaging app if needed and taps its send button. When app is omitted, taps the send button in whatever app is currently in the foreground (works for Signal, Telegram, Discord, Slack, and any other compose field). IMPORTANT: You MUST have already: 1) Drafted the message (agent_draft_message), 2) Received explicit user confirmation that they are ready to send. If the result contains suggest_import or suggest_update_preferred_app, follow its instruction after confirming the send.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -740,7 +740,7 @@ messaging_tools = [
     {
         "type": "custom",
         "name": "agent_dismiss_draft",
-        "description": "Dismiss the currently displayed message draft overlay. Use this when the user wants to cancel or discard a drafted message (WhatsApp or SMS) that is currently shown on screen for review. This removes the yellow draft overlay from the screen.",
+        "description": "Dismiss the currently displayed message draft overlay. Use this when the user wants to cancel or discard a drafted message (WhatsApp or SMS) that is currently shown on screen for review. This removes the draft overlay from the screen.",
         "input_schema": {
             "type": "object",
             "properties": {},

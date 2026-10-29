@@ -36,21 +36,6 @@ def main():
     print("TOOL SCHEMA VALIDATION")
     print("=" * 60)
     
-    # Find and validate launch_app tool
-    launch_app_tool = next((t for t in screen_agent_tools if t.get('name') == 'launch_app'), None)
-    
-    if launch_app_tool:
-        print("\n📱 launch_app tool found!")
-        print(json.dumps(launch_app_tool, indent=2))
-        
-        valid, message = validate_tool_schema(launch_app_tool)
-        if valid:
-            print("✅ Schema is valid!")
-        else:
-            print(f"❌ Schema validation failed: {message}")
-    else:
-        print("❌ launch_app tool not found in screen_agent_tools!")
-    
     # Compare with a working Asana tool
     print("\n" + "=" * 60)
     print("COMPARING WITH WORKING ASANA TOOL")

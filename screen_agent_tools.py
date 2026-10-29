@@ -825,7 +825,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_app_control",
-        "description": "Launch or close an application on the user's Android device. Use action 'launch' to open an app (also shows a bubble overlay for easy return to WhizVoice). Use action 'close' to close another app by dismissing it from recent apps. Note: to close WhizVoice itself, use agent_close_app instead.",
+        "description": "Launch or close an application on the user's Android device. Use action 'launch' to open an app (also shows a bubble overlay for easy return to WhizVoice). Use action 'close' to close another app by dismissing it from recent apps. Note: to close WhizVoice itself, use agent_close_app instead. Launching an app that is already open is harmless and just brings it to the front, so always call this when asked. If launch fails with a `candidates` list (closest installed app labels, e.g. the user said 'Google Keep' but the device label is 'Keep Notes'), retry once with the most plausible candidate's exact name rather than telling the user the app isn't installed; if none plausibly match, ask the user which app they meant.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -880,7 +880,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_open_app",
-        "description": "Bring the WhizVoice app from bubble mode to the full foreground chat view. Use this when the user asks to open the app or make it bigger. No-op if the app is already in the foreground.",
+        "description": "Bring the WhizVoice app from bubble mode to the full foreground chat view. Use this when the user asks to open the app or make it bigger. Safe to call even if the app is already in the foreground.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -934,7 +934,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_press_back",
-        "description": "Press the system back button on the user's Android device. Use this to dismiss a screen, close a keyboard, or go back to the previous screen.",
+        "description": "Works in ANY app. Press the system back button on the user's Android device. Use this to dismiss a screen, close a keyboard, or go back to the previous screen.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -944,7 +944,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_get_ui",
-        "description": "Dump the current on-screen UI so you can pick an element to click or type into. Returns a list where each interactable node has a stable element_id prefix like [3]. Call this before agent_click or agent_insert_text. Re-call it if the UI has changed since your last dump (e.g. after navigating, typing, or dismissing something).",
+        "description": "Works in ANY app. Dump the current on-screen UI so you can pick an element to click or type into. Returns a list where each interactable node has a stable element_id prefix like [3]. Call this before agent_click or agent_insert_text. Re-call it if the UI has changed since your last dump (e.g. after navigating, typing, or dismissing something).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -980,7 +980,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_click",
-        "description": "Click an on-screen element by its element_id. You MUST call agent_get_ui first to obtain valid element_ids. If the element is not itself clickable, the closest clickable ancestor is used. Fails with an error asking you to re-dump if the UI has changed since the last agent_get_ui.",
+        "description": "Works in ANY app. Click an on-screen element by its element_id. You MUST call agent_get_ui first to obtain valid element_ids. If the element is not itself clickable, the closest clickable ancestor is used. Fails with an error asking you to re-dump if the UI has changed since the last agent_get_ui.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -995,7 +995,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_insert_text",
-        "description": "Type text into an input field on the current screen. If element_id is provided, it must come from the most recent agent_get_ui call. If omitted, the focused input is used, falling back to the sole editable field on screen. The field is cleared before the new text is inserted. Set submit=true to press the keyboard's Enter/Search/Go action on the field after typing — use this to submit a search bar or send a query in one step instead of looking for a separate search button.",
+        "description": "Works in ANY app. Type text into an input field on the current screen. If element_id is provided, it must come from the most recent agent_get_ui call. If omitted, the focused input is used, falling back to the sole editable field on screen. The field is cleared before the new text is inserted. Set submit=true to press the keyboard's Enter/Search/Go action on the field after typing — use this to submit a search bar or send a query in one step instead of looking for a separate search button.",
         "input_schema": {
             "type": "object",
             "properties": {

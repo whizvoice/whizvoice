@@ -117,12 +117,15 @@ async def agent_stop_ringing(user_id: str = None, websocket=None,
     )
 
 
-async def agent_snooze_rage_shake(user_id: str = None, websocket=None,
+RAGE_SHAKE_MODES = ("snooze", "off", "on")
+
+
+async def agent_snooze_rage_shake(mode: str = "snooze", user_id: str = None, websocket=None,
                                   tool_result_handler=None, conversation_id: str = None) -> dict:
-    """Snooze the rage shake detector for 10 minutes."""
+    """Snooze (10 min), permanently disable, or re-enable the shake-to-report-a-bug feature."""
     return await _send_device_tool(
-        "agent_snooze_rage_shake", {}, user_id, websocket, tool_result_handler, conversation_id,
-        timeout=10.0
+        "agent_snooze_rage_shake", {"mode": mode or "snooze"}, user_id, websocket,
+        tool_result_handler, conversation_id, timeout=10.0
     )
 
 
@@ -353,10 +356,16 @@ device_control_tools = [
     {
         "type": "custom",
         "name": "agent_snooze_rage_shake",
-        "description": "Snooze the rage shake detector for 10 minutes. Use when the user wants to disable or turn off the shake-to-report-bug feature.",
+        "description": "Control the shake-to-report-a-bug feature (shaking the phone opens a bug report dialog). mode 'snooze' pauses it for 10 minutes; use for vague requests like 'stop the shake thing' or 'not now'. mode 'off' turns it off until the user turns it back on; use only when the user says forever, permanently, for good, or never again. mode 'on' turns it back on (also cancels a snooze); use when the user wants shake-to-report enabled again.",
         "input_schema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["snooze", "off", "on"],
+                    "description": "snooze = pause for 10 minutes (default); off = disable until re-enabled; on = re-enable."
+                }
+            },
             "required": []
         }
     },
