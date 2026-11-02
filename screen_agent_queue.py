@@ -160,24 +160,13 @@ class ScreenAgentQueueManager:
             f"looking up active connection (session={session_id}, conversation={conversation_id})"
         )
 
-        # Strategy 1: Session ids are stable (keyed by client_chat_id), so a reconnect
-        # re-registers a fresh WebSocket under the same session id.
         if not self._redis_managers:
             logger.warning("No redis_managers available for WebSocket refresh")
             return
         local_mgr = self._redis_managers["local_objects"]
 
-        if session_id:
-            try:
-                fresh_ws = await local_mgr.get_session_websocket(session_id)
-                if fresh_ws and fresh_ws is not websocket and fresh_ws.client_state == WebSocketState.CONNECTED:
-                    context["websocket"] = fresh_ws
-                    logger.info(f"Refreshed WebSocket via session lookup: {session_id}")
-                    return
-            except Exception as e:
-                logger.warning(f"Error looking up WebSocket by session: {e}")
-
-        # Strategy 2: Look up any socket registered for the conversation (keyed by client_chat_id)
+        # Look up any connected socket registered for the conversation (keyed by client_chat_id;
+        # sockets register under per-connection ids, so a reconnect shows up here)
         db_conversation_id = context.get("tracking_conversation_id") or conversation_id
         if isinstance(db_conversation_id, int) and db_conversation_id > 0:
             try:

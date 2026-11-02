@@ -3105,10 +3105,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     if legacy_id is not None and legacy_id < 0:
                         session_conversation_id = legacy_id
 
+                # Two ids per connection:
+                # - session_id: the chat's Redis context (and active requests), keyed by client_chat_id
+                #   and shared by every socket on the chat.
+                # - origin_session_id: this socket only. Socket registration, pubsub listener, activity
+                #   timestamp, user-session membership and broadcast exclude_session use it, so two
+                #   sockets on one chat never collide and a socket never receives its own broadcast.
                 session_id = conversation_keys.session_id(user_id, connection_chat_id)
+                origin_session_id = conversation_keys.connection_session_id(user_id, uuid.uuid4().hex)
 
                 # IMPORTANT: Track session immediately to ensure cleanup even if errors occur
-                await update_session_activity_redis(session_id)
+                await update_session_activity_redis(origin_session_id)
                 resources_allocated = True  # Mark that we've started allocating resources
 
                 conversation_history = load_conversation_history(user_id, actual_conversation_id)
@@ -3117,8 +3124,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # Register WebSocket and subscribe to the chat's channel for broadcasting
                 if connection_bound:
-                    await register_websocket_for_conversation(session_id, connection_chat_id, websocket)
-                    await subscribe_to_conversation(session_id, connection_chat_id, websocket)
+                    await register_websocket_for_conversation(origin_session_id, connection_chat_id, websocket)
+                    await subscribe_to_conversation(origin_session_id, connection_chat_id, websocket)
 
                 if actual_conversation_id is None:
                     # No row yet: the conversation is created on the first message
@@ -3132,25 +3139,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
                 
                 # Clean up any resources that may have been allocated
-                if resources_allocated and 'session_id' in locals():
-                    logger.info(f"Cleaning up resources for failed auth session {session_id}")
-                    
+                if resources_allocated and 'origin_session_id' in locals():
+                    logger.info(f"Cleaning up resources for failed auth session {origin_session_id}")
+
                     # Clean up session timestamp if it was set
-                    await remove_session_timestamp(session_id)
-                    
+                    await remove_session_timestamp(origin_session_id)
+
                     # Clean up chat messages if they were loaded
                     await clear_chat_session(session_id)
-                    
+
                     # Clean up any Redis subscriptions
-                    await unsubscribe_from_conversation(session_id)
+                    await unsubscribe_from_conversation(origin_session_id)
 
                     # Clean up conversation websockets
                     if redis_managers and "local_objects" in redis_managers:
-                        await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
+                        await redis_managers["local_objects"].unregister_conversation_websocket(origin_session_id)
 
                     # Clean up from user sessions if it was added
                     if 'user_id' in locals() and user_id:
-                        await remove_user_session(user_id, session_id)
+                        await remove_user_session(user_id, origin_session_id)
 
                 error_payload = {
                     "type": "error",
@@ -3165,25 +3172,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.error(traceback.format_exc())
                 
                 # Clean up any resources that may have been allocated
-                if resources_allocated and 'session_id' in locals():
-                    logger.info(f"Cleaning up resources for failed auth session {session_id}")
-                    
+                if resources_allocated and 'origin_session_id' in locals():
+                    logger.info(f"Cleaning up resources for failed auth session {origin_session_id}")
+
                     # Clean up session timestamp if it was set
-                    await remove_session_timestamp(session_id)
-                    
+                    await remove_session_timestamp(origin_session_id)
+
                     # Clean up chat messages if they were loaded
                     await clear_chat_session(session_id)
-                    
+
                     # Clean up any Redis subscriptions
-                    await unsubscribe_from_conversation(session_id)
+                    await unsubscribe_from_conversation(origin_session_id)
 
                     # Clean up conversation websockets
                     if redis_managers and "local_objects" in redis_managers:
-                        await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
-                    
+                        await redis_managers["local_objects"].unregister_conversation_websocket(origin_session_id)
+
                     # Clean up from user sessions if it was added
                     if 'user_id' in locals() and user_id:
-                        await remove_user_session(user_id, session_id)
+                        await remove_user_session(user_id, origin_session_id)
                 
                 error_payload = {
                     "type": "error",
@@ -3202,22 +3209,22 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Create a session ID (moved this up since we need it earlier)
         # Associate session with user
-        await add_user_session(user_id, session_id)
-        
+        await add_user_session(user_id, origin_session_id)
+
         # Check if user has exceeded session limit and evict old sessions if needed
         # IMPORTANT: Must happen AFTER adding new session to get accurate count
-        await evict_user_sessions_if_needed(user_id, session_id)
-        
+        await evict_user_sessions_if_needed(user_id, origin_session_id)
+
         try:
             while True:
                 try:
                     # Receive message from client
                     message_text = await websocket.receive_text()
-                    
+
                     # Update session timestamp on activity
                     # Update activity timestamp for receiving a message
-                    await update_session_activity_redis(session_id)
-                    logger.debug(f"Updated activity timestamp for session {session_id} (received message)")
+                    await update_session_activity_redis(origin_session_id)
+                    logger.debug(f"Updated activity timestamp for session {origin_session_id} (received message)")
                     
                     # Parse incoming message - support both structured JSON and legacy plain text
                     request_id = None
@@ -3252,15 +3259,19 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                             raise MissingTimestampError(error_msg)
 
-                        # A connection opened without naming a chat binds to the first chat a message names.
-                        if not connection_bound and client_chat_id is not None:
+                        # A connection opened without naming a chat binds on its first message: to the
+                        # chat that message names, or to the connection's own (minted) chat id if it
+                        # names none, since that is the chat the message will be saved under.
+                        if not connection_bound:
                             connection_bound = True
-                            connection_chat_id = client_chat_id
-                            session_conversation_id = conversation_id_for_chat(client_chat_id, user_id)
-                            logger.info(f"Binding connection session {session_id} to client_chat_id={client_chat_id} (conversation {session_conversation_id})")
+                            if client_chat_id is not None and client_chat_id != connection_chat_id:
+                                connection_chat_id = client_chat_id
+                                session_id = conversation_keys.session_id(user_id, connection_chat_id)
+                                session_conversation_id = conversation_id_for_chat(connection_chat_id, user_id)
+                            logger.info(f"Binding connection {origin_session_id} to client_chat_id={connection_chat_id} (conversation {session_conversation_id})")
                             # Register and subscribe so the WebSocket can receive broadcasts immediately
-                            await register_websocket_for_conversation(session_id, client_chat_id, websocket)
-                            await subscribe_to_conversation(session_id, client_chat_id, websocket)
+                            await register_websocket_for_conversation(origin_session_id, connection_chat_id, websocket)
+                            await subscribe_to_conversation(origin_session_id, connection_chat_id, websocket)
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -3364,7 +3375,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         # So we'll move the detection into process_message_task itself
                         
                         # Define a callback to handle task completion
-                        async def handle_task_completion(task_future):
+                        # request_id / session_id are parameters (not closure variables) so the cleanup
+                        # uses this message's values, not whatever the loop holds when the task ends.
+                        async def handle_task_completion(task_future, request_id, session_id):
                             try:
                                 # Sessions and channels are keyed by client_chat_id, which does not change
                                 # when the conversation row is created, so there is nothing to re-register.
@@ -3414,6 +3427,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 client_timestamp=client_timestamp,
                                 device_id=device_id,
                                 is_hidden=is_hidden,
+                                origin_session_id=origin_session_id,
                             )
                         )
                         
@@ -3426,7 +3440,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         # Create a separate task to handle completion without blocking
                         # This allows the WebSocket loop to continue receiving messages
-                        asyncio.create_task(handle_task_completion(task))
+                        asyncio.create_task(handle_task_completion(task, request_id, message_session_id))
                         
                         logger.info(f"Started background processing for request {request_id}, continuing to listen for messages")
 
@@ -3471,8 +3485,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if active_reqs:
                             logger.warning(f"Timed out waiting for {len(active_reqs)} tasks for session {session_id}")
                     
-                    await cleanup_session(session_id, user_id, session_conversation_id)
-                    logger.info(f"WebSocket cleanup completed for session {session_id}")
+                    await cleanup_session(origin_session_id, user_id, session_conversation_id)
+                    logger.info(f"WebSocket cleanup completed for session {origin_session_id}")
                     break
                 except Exception as e:
                     # Check if this is a WebSocket disconnection error FIRST
@@ -3496,8 +3510,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             if active_reqs:
                                 logger.warning(f"Timed out waiting for {len(active_reqs)} tasks for session {session_id}")
                         
-                        await cleanup_session(session_id, user_id, session_conversation_id)
-                        logger.info(f"WebSocket cleanup completed for session {session_id}")
+                        await cleanup_session(origin_session_id, user_id, session_conversation_id)
+                        logger.info(f"WebSocket cleanup completed for session {origin_session_id}")
                         break
                     
                     # For other errors, log and try to send error to client
@@ -3518,7 +3532,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     
         except Exception as e:
             # Handle any other errors that might occur
-            await cleanup_session(session_id, user_id, session_conversation_id)
+            await cleanup_session(origin_session_id, user_id, session_conversation_id)
             logger.error(f"WebSocket error: {str(e)}")
             logger.error(traceback.format_exc())
             raise
@@ -5035,8 +5049,11 @@ async def upload_wake_word_audio(
 async def catch_all(path: str, request: Request):
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_chat_id: str, client_message_id=None, client_timestamp=None, device_id=None, is_hidden=False):
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_chat_id: str, client_message_id=None, client_timestamp=None, device_id=None, is_hidden=False, origin_session_id: Optional[str] = None):
     """Process a single message in a cancellable task.
+
+    `origin_session_id` is the originating socket's per-connection id; it is used only as the
+    final broadcast's `exclude_session`, so that socket does not get its own reply twice.
 
     `session_id` is derived from `client_chat_id` (conversation_keys.session_id), which also keys
     the pub/sub channel and pending-tools counter; none of these change when the row is created.
@@ -5918,7 +5935,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # IMPORTANT: Only include text BEFORE tool_use, not after
             # 🔒 USE DISTRIBUTED REDIS LOCK to prevent race conditions across worker processes
             # Without this, concurrent requests can read incomplete conversation history
-            lock_key = f"conversation_lock:{client_chat_id}"
+            lock_key = conversation_keys.lock_key(client_chat_id)
             lock = None
 
             try:
@@ -5927,12 +5944,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     lock = redis_client.lock(lock_key, timeout=10, blocking_timeout=5)
                     acquired = await lock.acquire(blocking=True, blocking_timeout=5)
                     if not acquired:
-                        logger.error(f"Failed to acquire conversation lock for {session_conversation_id}, falling back to local lock")
+                        logger.error(f"Failed to acquire conversation lock for {client_chat_id}, falling back to local lock")
                         lock = None  # Fall back to local lock if Redis lock fails
 
                 # If Redis lock failed or unavailable, use local lock as fallback
                 if lock is None:
-                    logger.warning(f"Using local lock (not distributed) for conversation {session_conversation_id}")
+                    logger.warning(f"Using local lock (not distributed) for conversation {client_chat_id}")
                     await chat_sessions_lock.acquire()
 
                 # Build assistant content: text_before + web search blocks + ALL tool_uses (NO text_after)
@@ -6051,7 +6068,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         is_owned = await lock.owned()
                         if is_owned:
                             await lock.release()
-                            logger.debug(f"✅ Released distributed conversation lock for {session_conversation_id}")
+                            logger.debug(f"✅ Released distributed conversation lock for {client_chat_id}")
                     except Exception as e:
                         logger.error(f"Error releasing distributed lock: {e}")
                 elif lock is None and not redis_client:
@@ -6597,7 +6614,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Bot responses should go to ALL sessions - they originate from the server, not from any client session
                 # One channel per conversation, keyed by client_chat_id
                 # Only exclude session if direct send succeeded - if it failed, include it in broadcast so client can receive on reconnect
-                await broadcast_to_conversation(client_chat_id, broadcast_payload, exclude_session=session_id if direct_send_succeeded else None)
+                await broadcast_to_conversation(client_chat_id, broadcast_payload, exclude_session=origin_session_id if direct_send_succeeded else None)
                 logger.info(f"Broadcasted assistant message to all sessions for conversation {processing_conversation_id}")
             else:
                 logger.info(f"Skipping empty response broadcast for tool-only response (request {request_id})")
@@ -6729,15 +6746,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # If disconnected and no more active tasks for this session, clean up chat history
             if not websocket_connected:
-                # IMPORTANT: Check if a newer WebSocket has replaced ours before cleaning up.
-                # If a new connection re-registered this session while we were processing,
-                # cleaning up would destroy the new connection's Redis subscriptions.
-                current_ws = None
+                # IMPORTANT: The chat context is shared by every socket on this chat. If another
+                # socket (e.g. a reconnect) is registered for the chat, leave the context alone.
+                other_sockets = []
                 if redis_managers and "local_objects" in redis_managers:
-                    current_ws = await redis_managers["local_objects"].get_session_websocket(session_id)
+                    registrations = await redis_managers["local_objects"].get_conversation_websockets(client_chat_id)
+                    other_sockets = [sid for sid, ws in registrations if ws is not websocket]
 
-                if current_ws is not None and current_ws is not websocket:
-                    logger.info(f"Skipping cleanup for session {session_id}: a newer WebSocket has taken over")
+                if other_sockets:
+                    logger.info(f"Skipping cleanup for session {session_id}: other WebSocket(s) on the chat: {other_sockets}")
                 else:
                     active_reqs = await get_active_requests(session_id)
                     session_has_active_requests = bool(active_reqs)

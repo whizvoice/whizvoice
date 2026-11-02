@@ -27,6 +27,14 @@ def test_pending_tools_key_format():
     assert conversation_keys.pending_tools_key("abc-123") == "conversation:abc-123:pending_tools"
 
 
+def test_lock_key_format():
+    assert conversation_keys.lock_key("abc-123") == "conversation_lock:abc-123"
+
+
+def test_connection_session_id_format():
+    assert conversation_keys.connection_session_id("user-1", "c0ffee") == "ws_user-1_conn_c0ffee"
+
+
 # --- Wiring: live keys are built only from client_chat_id ---
 
 import unittest

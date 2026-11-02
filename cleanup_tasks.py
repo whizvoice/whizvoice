@@ -9,14 +9,12 @@ import traceback
 from typing import Optional
 
 from redis_helpers import (
-    get_chat_messages,
     get_user_sessions,
     remove_user_session,
     remove_session_timestamp,
     get_active_requests,
     get_stale_sessions,
     get_session_timestamp,
-    clear_chat_session,
     redis_managers
 )
 from tool_result_handler import tool_result_handler
@@ -102,12 +100,13 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
     if not current_sessions:
         return
 
-    # Check for dead sessions (sessions without chat history)
+    # Check for dead sessions. User sessions are per-connection ids (the chat history lives
+    # under the chat's own key), so a session is dead once cleanup_session removed its
+    # activity timestamp.
     dead_sessions = []
     for sess in current_sessions:
         if sess != new_session_id:
-            messages = await get_chat_messages(sess)
-            if not messages:
+            if await get_session_timestamp(sess) is None:
                 dead_sessions.append(sess)
 
     # Remove dead sessions
@@ -137,12 +136,10 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
             continue  # Don't evict the session we're trying to create
 
         # Skip sessions that are already cleaned up (disconnected)
-        messages = await get_chat_messages(sess_id)
-        if not messages:
+        last_activity = await get_session_timestamp(sess_id)
+        if last_activity is None:
             logger.debug(f"Skipping already-disconnected session {sess_id}")
             continue
-
-        last_activity = await get_session_timestamp(sess_id) or 0
 
         sessions_with_activity.append((sess_id, last_activity))
 
@@ -179,7 +176,8 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
                 logger.warning(f"Failed to notify evicted session: {e}")
 
         # Clean up the evicted session
-        await clear_chat_session(eviction_candidate)  # Clear Redis chat history
+        # The chat history is keyed by client_chat_id and may be shared with other sockets on
+        # the chat, so only the connection's own state is cleaned up.
         await cleanup_session(eviction_candidate, user_id)
 
 
