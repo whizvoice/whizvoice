@@ -1,0 +1,101 @@
+import unittest
+import sys
+import os
+from unittest.mock import patch, MagicMock
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import httpx
+
+import app as app_module
+
+UUID_REF = "7f3a0c2e-1b4d-4c55-9a77-0d1e2f3a4b5c"
+
+
+def _row(conv_id=19400, client_chat_id=UUID_REF):
+    return {
+        "id": conv_id,
+        "user_id": "user-1",
+        "title": "Hello",
+        "created_at": "2026-11-01T00:00:00+00:00",
+        "last_message_time": "2026-11-01T00:00:00+00:00",
+        "updated_at": "2026-11-01T00:00:00+00:00",
+        "source": "app",
+        "google_session_id": None,
+        "deleted_at": None,
+        "client_chat_id": client_chat_id,
+    }
+
+
+# Starlette's TestClient is incompatible with the pinned httpx 0.28 (it passes
+# the removed `app=` kwarg), so drive the app through httpx's ASGITransport.
+class TestConversationsRest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        app_module.app.dependency_overrides[app_module.get_current_user] = (
+            lambda: {"sub": "user-1"}
+        )
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_module.app), base_url="http://test"
+        )
+
+    async def asyncTearDown(self):
+        await self.client.aclose()
+        app_module.app.dependency_overrides.clear()
+
+    @patch("app.resolve_conversation_id", return_value=19400)
+    @patch("app.supabase")
+    async def test_get_conversation_by_uuid_path(self, mock_supabase, mock_resolve):
+        result = MagicMock()
+        result.data = [_row()]
+        (mock_supabase.table.return_value.select.return_value
+            .eq.return_value.eq.return_value.is_.return_value
+            .execute.return_value) = result
+
+        resp = await self.client.get(f"/conversations/{UUID_REF}")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["id"], 19400)
+        self.assertEqual(resp.json()["client_chat_id"], UUID_REF)
+        mock_resolve.assert_called_once_with(UUID_REF, "user-1")
+
+    @patch("app.resolve_conversation_id", return_value=None)
+    @patch("app.supabase")
+    async def test_get_conversation_unowned_uuid_404(self, mock_supabase, mock_resolve):
+        resp = await self.client.get(f"/conversations/{UUID_REF}")
+        self.assertEqual(resp.status_code, 404)
+
+    @patch("app.supabase")
+    async def test_get_conversations_pages_past_1000(self, mock_supabase):
+        page1 = MagicMock()
+        page1.data = [_row(i) for i in range(1000)]
+        page2 = MagicMock()
+        page2.data = [_row(1000 + i) for i in range(3)]
+        query = (mock_supabase.table.return_value.select.return_value
+                 .eq.return_value.order.return_value.is_.return_value)
+        query.range.return_value.execute.side_effect = [page1, page2]
+
+        resp = await self.client.get("/conversations")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["count"], 1003)
+        self.assertEqual(query.range.call_count, 2)
+        query.range.assert_any_call(0, 999)
+        query.range.assert_any_call(1000, 1999)
+
+    @patch("app.supabase")
+    async def test_create_conversation_stores_client_chat_id(self, mock_supabase):
+        result = MagicMock()
+        result.data = [_row()]
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = result
+
+        resp = await self.client.post(
+            "/conversations", json={"title": "Hello", "client_chat_id": UUID_REF}
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        inserted = mock_supabase.table.return_value.insert.call_args[0][0]
+        self.assertEqual(inserted["client_chat_id"], UUID_REF)
+
+
+if __name__ == "__main__":
+    unittest.main()

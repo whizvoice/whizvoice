@@ -61,6 +61,7 @@ from database import (
     save_message_to_db,
     update_tool_result_in_db,
     resolve_conversation_id,
+    invalidate_conversation_cache,
 )
 from cleanup_tasks import (
     cleanup_session,
@@ -4250,9 +4251,18 @@ async def get_conversations(
             query = query.is_('deleted_at', 'null')
             logger.debug(f"Full sync: excluding deleted conversations")
         
-        response = query.execute()
-        conversations = response.data if response.data else []
-        
+        # PostgREST caps a select at 1000 rows, so page until a short page arrives
+        page_size = 1000
+        conversations = []
+        start = 0
+        while True:
+            page = query.range(start, start + page_size - 1).execute()
+            page_rows = page.data if page.data else []
+            conversations.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            start += page_size
+
         # Log detailed information about what we're returning
         if conversations:
             logger.info(f"Found {len(conversations)} conversations for user {user_id}:")
@@ -4290,7 +4300,8 @@ async def create_conversation(
             "user_id": user_id,
             "title": conversation.title,
             "source": conversation.source,
-            "google_session_id": conversation.google_session_id
+            "google_session_id": conversation.google_session_id,
+            **({"client_chat_id": conversation.client_chat_id} if conversation.client_chat_id else {})
         }).execute()
         
         if not result.data:
@@ -4312,9 +4323,9 @@ async def create_conversation(
         logger.error(f"Error creating conversation for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to create conversation")
 
-@app.get("/conversations/{conversation_id}", response_model=ConversationResponse)
+@app.get("/conversations/{conversation_ref}", response_model=ConversationResponse)
 async def get_conversation(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Get a specific conversation by ID (user must own it)"""
@@ -4324,10 +4335,10 @@ async def get_conversation(
     
     try:
         # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Fetch the full conversation data
         result = supabase.table("conversations")\
             .select("*")\
@@ -4354,12 +4365,12 @@ async def get_conversation(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting conversation {conversation_id} for user {user_id}: {str(e)}")
+        logger.error(f"Error getting conversation {conversation_ref} for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get conversation")
 
-@app.put("/conversations/{conversation_id}", response_model=ConversationResponse)
+@app.put("/conversations/{conversation_ref}", response_model=ConversationResponse)
 async def update_conversation(
-    conversation_id: int,
+    conversation_ref: str,
     update_data: ConversationUpdate,
     current_user: Dict = Depends(get_current_user)
 ):
@@ -4376,10 +4387,10 @@ async def update_conversation(
         
         if not updates:
             # No updates provided, just return current conversation
-            return await get_conversation(conversation_id, current_user)
-        
+            return await get_conversation(conversation_ref, current_user)
+
         # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
@@ -4409,12 +4420,12 @@ async def update_conversation(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating conversation {conversation_id} for user {user_id}: {str(e)}")
+        logger.error(f"Error updating conversation {conversation_ref} for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to update conversation")
 
-@app.delete("/conversations/{conversation_id}")
+@app.delete("/conversations/{conversation_ref}")
 async def delete_conversation(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Delete a specific conversation by ID (user must own it) - uses soft delete with tombstone record"""
@@ -4424,10 +4435,10 @@ async def delete_conversation(
     
     try:
         # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Check if already deleted
         verify_result = supabase.table("conversations")\
             .select("deleted_at")\
@@ -4445,12 +4456,14 @@ async def delete_conversation(
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        logger.info(f"Successfully soft-deleted conversation {actual_conversation_id} (requested: {conversation_id}) for user {user_id}")
-        return {"message": "Conversation deleted successfully", "conversation_id": conversation_id}
+        invalidate_conversation_cache(actual_conversation_id)
+
+        logger.info(f"Successfully soft-deleted conversation {actual_conversation_id} (requested: {conversation_ref}) for user {user_id}")
+        return {"message": "Conversation deleted successfully", "conversation_id": conversation_ref}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting conversation {conversation_id} for user {user_id}: {str(e)}")
+        logger.error(f"Error deleting conversation {conversation_ref} for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete conversation")
 
 @app.delete("/conversations")
@@ -4468,6 +4481,8 @@ async def delete_all_conversations(current_user: Dict = Depends(get_current_user
         }).eq("user_id", user_id).is_("deleted_at", "null").execute()
 
         deleted_count = len(result.data) if result.data else 0
+        for deleted_row in (result.data or []):
+            invalidate_conversation_cache(deleted_row["id"])
         logger.info(f"Successfully soft-deleted {deleted_count} conversations for user {user_id}")
 
         return {"message": "All conversations deleted successfully", "deleted_count": deleted_count}
@@ -4475,9 +4490,9 @@ async def delete_all_conversations(current_user: Dict = Depends(get_current_user
         logger.error(f"Error deleting all conversations for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete conversations")
 
-@app.put("/conversations/{conversation_id}/last_message_time")
+@app.put("/conversations/{conversation_ref}/last_message_time")
 async def update_conversation_last_message_time(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Update the last_message_time for a conversation to now()"""
@@ -4487,10 +4502,10 @@ async def update_conversation_last_message_time(
     
     try:
         # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Update the last message time
         result = supabase.table("conversations").update({
             "last_message_time": "now()",
@@ -4504,14 +4519,14 @@ async def update_conversation_last_message_time(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating last message time for conversation {conversation_id}: {str(e)}")
+        logger.error(f"Error updating last message time for conversation {conversation_ref}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to update last message time")
 
 # ================== MESSAGE ENDPOINTS ==================
 
-@app.get("/conversations/{conversation_id}/messages")
+@app.get("/conversations/{conversation_ref}/messages")
 async def get_messages(
-    conversation_id: int,
+    conversation_ref: str,
     since_timestamp: Optional[float] = None,  # Unix timestamp for incremental sync
     current_user: Dict = Depends(get_current_user)
 ):
@@ -4523,12 +4538,12 @@ async def get_messages(
         if not user_id:
             raise HTTPException(status_code=401, detail="User not authenticated")
         
-        logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since_timestamp: {since_timestamp}")
-        
+        logger.info(f"Getting messages for conversation {conversation_ref}, user {user_id}, since_timestamp: {since_timestamp}")
+
         # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
-            logger.warning(f"No conversation found for conversation ID {conversation_id}")
+            logger.warning(f"No conversation found for conversation ref {conversation_ref}")
             raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Build the messages query - explicitly select fields including cancelled
@@ -4581,13 +4596,13 @@ async def get_messages(
             'includes_cancelled': True  # Signal to client that cancelled messages are included
         }
         
-        logger.info(f"Returning {len(messages)} messages for conversation {conversation_id} (incremental: {since_timestamp is not None})")
+        logger.info(f"Returning {len(messages)} messages for conversation {conversation_ref} (incremental: {since_timestamp is not None})")
         return result
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting messages for conversation {conversation_id}: {str(e)}")
+        logger.error(f"Error getting messages for conversation {conversation_ref}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get messages")
 
 @app.post("/messages", response_model=MessageResponse)
@@ -4667,9 +4682,9 @@ async def create_message(
         logger.error(f"Error creating message: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to create message")
 
-@app.get("/conversations/{conversation_id}/messages/count")
+@app.get("/conversations/{conversation_ref}/messages/count")
 async def get_message_count(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Get the count of messages in a conversation"""
@@ -4679,10 +4694,10 @@ async def get_message_count(
     
     try:
         # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Get message count
         result = supabase.table("messages").select("id", count="exact").eq("conversation_id", actual_conversation_id).execute()
         
@@ -4690,12 +4705,12 @@ async def get_message_count(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting message count for conversation {conversation_id}: {str(e)}")
+        logger.error(f"Error getting message count for conversation {conversation_ref}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get message count")
 
-@app.post("/conversations/{conversation_id}/check-retry")
+@app.post("/conversations/{conversation_ref}/check-retry")
 async def check_and_retry_failed_messages(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Check for error messages and retry getting assistant response from Claude"""
@@ -4705,10 +4720,10 @@ async def check_and_retry_failed_messages(
     
     try:
         # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Get all messages for this conversation
         result = supabase.table("messages")\
             .select("*")\
@@ -4905,7 +4920,7 @@ async def check_and_retry_failed_messages(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error checking for retry in conversation {conversation_id}: {str(e)}")
+        logger.error(f"Error checking for retry in conversation {conversation_ref}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to check for retry")
 
 @app.get("/requests/{request_id}/state")
@@ -4924,14 +4939,17 @@ async def get_request_state_endpoint(
     
     return state
 
-@app.get("/api/conversations/{conversation_id}/pending-requests")
+@app.get("/api/conversations/{conversation_ref}/pending-requests")
 async def get_conversation_pending_requests(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: dict = Depends(get_current_user)
 ):
     """Check if there are any in-flight requests for a conversation.
     Used by the Android client to restore the thinking indicator after navigation."""
     user_id = current_user.get("sub")
+    conversation_id = resolve_conversation_id(conversation_ref, user_id)
+    if conversation_id is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
     session_id = f"ws_{user_id}_conv_{conversation_id}"
 
     try:
