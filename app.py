@@ -4305,7 +4305,8 @@ async def create_conversation(
             last_message_time=row["last_message_time"],
             source=row["source"],
             google_session_id=row.get("google_session_id"),
-            deleted_at=row.get("deleted_at")
+            deleted_at=row.get("deleted_at"),
+            client_chat_id=row["client_chat_id"]
         )
     except Exception as e:
         logger.error(f"Error creating conversation for user {user_id}: {str(e)}")
@@ -4347,7 +4348,8 @@ async def get_conversation(
             last_message_time=row["last_message_time"],
             source=row["source"],
             google_session_id=row.get("google_session_id"),
-            deleted_at=row.get("deleted_at")
+            deleted_at=row.get("deleted_at"),
+            client_chat_id=row["client_chat_id"]
         )
     except HTTPException:
         raise
@@ -4401,7 +4403,8 @@ async def update_conversation(
             last_message_time=row["last_message_time"],
             source=row["source"],
             google_session_id=row.get("google_session_id"),
-            deleted_at=row.get("deleted_at")
+            deleted_at=row.get("deleted_at"),
+            client_chat_id=row["client_chat_id"]
         )
     except HTTPException:
         raise
