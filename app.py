@@ -241,6 +241,32 @@ def classify_claude_bad_request(error_text: str) -> Tuple[str, str]:
 
 # Placeholder for the actual preference key name for Claude API key
 
+def parse_client_chat_id(message_data: dict) -> Optional[str]:
+    """Extract the client-minted chat id from an inbound WebSocket message.
+
+    Prefers `client_chat_id`; falls back to the legacy negative-int
+    `client_conversation_id` (stringified). Fallback removed in Task 8.
+    """
+    client_chat_id = message_data.get("client_chat_id")
+    if client_chat_id:
+        return str(client_chat_id)
+    legacy = message_data.get("client_conversation_id")
+    return str(legacy) if legacy is not None else None
+
+
+def _numeric_chat_key(client_chat_id: Optional[str], resolved_id: Optional[int]) -> Optional[int]:
+    """Integer used to derive session ids / Redis channels (Task 5 rekeys these).
+
+    int(client_chat_id) when numeric, else the resolved integer id, else None.
+    """
+    if client_chat_id is not None:
+        try:
+            return int(client_chat_id)
+        except (ValueError, TypeError):
+            pass
+    return resolved_id
+
+
 def get_current_claude_api_key(user_id: Optional[str]) -> Optional[str]:
     if not user_id:
         logger.warning("Attempted to get Claude API key without user_id.")
@@ -3006,9 +3032,14 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Get conversation_id from query parameters if provided
         conversation_id = None
-        if "conversation_id" in websocket.query_params:
+        connect_ref = None  # client_chat_id (str) or conversation_id (int) from the query string
+        if "client_chat_id" in websocket.query_params:
+            connect_ref = websocket.query_params["client_chat_id"] or None
+            logger.info(f"WebSocket connection requested for client_chat_id={connect_ref}")
+        elif "conversation_id" in websocket.query_params:
             try:
                 conversation_id = int(websocket.query_params["conversation_id"])
+                connect_ref = conversation_id
                 logger.info(f"WebSocket connection requested for conversation_id={conversation_id}")
             except ValueError:
                 logger.warning(f"Invalid conversation_id parameter: {websocket.query_params['conversation_id']}")
@@ -3061,48 +3092,46 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 # CRITICAL FIX: Resolve optimistic conversation IDs to real IDs before setting up the session
                 # This ensures we subscribe to the correct Redis channel and track the correct conversation
-                actual_conversation_id = conversation_id
                 optimistic_id_for_migration = None  # Track if we need to migrate an old optimistic session
 
-                if conversation_id is not None and conversation_id < 0:
-                    # This is an optimistic ID, check if it has a real ID in the database
-                    logger.info(f"Checking if optimistic conversation ID {conversation_id} has been migrated to a real ID")
-                    opt_result = supabase.table("conversations")\
-                        .select("id")\
-                        .eq("user_id", user_id)\
-                        .eq("optimistic_chat_id", str(conversation_id))\
-                        .is_("deleted_at", "null")\
-                        .execute()
+                # Single resolution of the connect reference (client_chat_id str or conversation_id int)
+                actual_conversation_id = None
+                client_chat_id = None
+                if connect_ref is not None:
+                    actual_conversation_id = resolve_conversation_id(connect_ref, user_id)
+                    if isinstance(connect_ref, str):
+                        client_chat_id = connect_ref
+                    elif actual_conversation_id is not None:
+                        client_chat_id = client_chat_id_for(actual_conversation_id)
+                    elif connect_ref < 0:
+                        client_chat_id = str(connect_ref)
 
-                    if opt_result.data and len(opt_result.data) > 0:
-                        actual_conversation_id = opt_result.data[0]["id"]
-                        logger.info(f"Optimistic ID {conversation_id} has been migrated to real ID {actual_conversation_id}, will use real ID for session")
+                if actual_conversation_id is None and client_chat_id is not None:
+                    # Not migrated yet: a numeric (optimistic) id keeps being used as the session's id
+                    try:
+                        actual_conversation_id = int(client_chat_id)
+                    except ValueError:
+                        pass  # Non-numeric client_chat_id with no row yet: new chat, created on first message
                     else:
-                        logger.info(f"Optimistic ID {conversation_id} has not been migrated yet, will use optimistic ID")
+                        if actual_conversation_id > 0:
+                            actual_conversation_id = None
 
-                elif conversation_id is not None and conversation_id > 0:
-                    # This is a real ID - check if there's an optimistic ID that maps to it
-                    # This handles the case where a client reconnects with the real ID after disconnect
-                    logger.info(f"Client connected with real conversation ID {conversation_id}, checking for optimistic session to migrate")
-                    opt_result = supabase.table("conversations")\
-                        .select("optimistic_chat_id")\
-                        .eq("id", conversation_id)\
-                        .eq("user_id", user_id)\
-                        .is_("deleted_at", "null")\
-                        .execute()
+                if isinstance(connect_ref, int) and connect_ref > 0 and client_chat_id is not None:
+                    # Reconnect with the real id: migrate an old numeric-keyed optimistic session
+                    try:
+                        optimistic_id_for_migration = int(client_chat_id)
+                    except ValueError:
+                        pass
 
-                    if opt_result.data and len(opt_result.data) > 0:
-                        opt_chat_id = opt_result.data[0].get("optimistic_chat_id")
-                        if opt_chat_id:
-                            optimistic_id_for_migration = int(opt_chat_id)
-                            logger.info(f"Found optimistic ID {optimistic_id_for_migration} for real conversation {conversation_id}")
-                
                 # Load conversation history and initialize session
                 # Create a unique session ID per conversation, not just per user
-                # Note: We keep the original conversation_id in the session_id for consistency,
-                # but use actual_conversation_id for all operations
-                if conversation_id is not None:
-                    session_id = f"ws_{user_id}_conv_{conversation_id}"
+                # (Task 5 rekeys sessions; until then derive from the numeric key)
+                if isinstance(connect_ref, int):
+                    session_key = connect_ref
+                else:
+                    session_key = _numeric_chat_key(client_chat_id, actual_conversation_id)
+                if session_key is not None:
+                    session_id = f"ws_{user_id}_conv_{session_key}"
                 else:
                     # If no specific conversation, create a session for a new conversation
                     session_id = f"ws_{user_id}_new_{int(time.time())}"
@@ -3146,8 +3175,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 # The original session_id is already correctly formatted based on conversation_id
 
                 # Log the resolution if it happened
-                if conversation_id != actual_conversation_id:
-                    logger.info(f"WebSocket connected with optimistic ID {conversation_id}, resolved to real ID {actual_conversation_id}")
+                if connect_ref is not None and connect_ref != actual_conversation_id:
+                    logger.info(f"WebSocket connected with ref {connect_ref} (client_chat_id={client_chat_id}), resolved to conversation ID {actual_conversation_id}")
                     
             except JWTError as e:
                 logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
@@ -3249,7 +3278,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Parse incoming message - support both structured JSON and legacy plain text
                     request_id = None
                     message_type = "message"  # default type
-                    client_conversation_id = None
+                    client_chat_id = None
                     client_message_id = None
                     client_timestamp = None
                     try:
@@ -3260,19 +3289,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         # Get conversation_id from message (if provided)
                         message_conversation_id = message_data.get("conversation_id")
-                        client_conversation_id = message_data.get("client_conversation_id")
+                        client_chat_id = parse_client_chat_id(message_data)
                         client_message_id = message_data.get("client_message_id")
                         # Get timestamp from client for preserving message order
                         client_timestamp = message_data.get("timestamp")
                         
-                        # If message includes a conversation_id, update the session's conversation_id only if it changed
-                        if message_conversation_id is not None and message_conversation_id > 0:
-                            if session_conversation_id != message_conversation_id:
-                                logger.info(f"Updating session conversation_id from {session_conversation_id} to {message_conversation_id}")
-                                session_conversation_id = message_conversation_id
-                            # else: conversation_id matches, no update needed
-                        
-                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}, client_timestamp: {client_timestamp}")
+                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_chat_id: {client_chat_id}, client_timestamp: {client_timestamp}")
 
                         # Require client_timestamp - fail fast if missing
                         if client_timestamp is None:
@@ -3286,34 +3308,21 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                             raise MissingTimestampError(error_msg)
 
-                        # Validate client_conversation_id immediately
-                        # Convert to int if it's a string number, and check if positive
-                        if client_conversation_id is not None:
+                        # If session_conversation_id is None (new conversation) and we have a client chat id, use it.
+                        # Channels/sessions are still integer-keyed (Task 5 rekeys): int(client_chat_id) when
+                        # numeric, otherwise the resolved integer id (None if no row exists yet).
+                        if session_conversation_id is None and client_chat_id is not None:
                             try:
-                                client_conv_id_int = int(client_conversation_id) if isinstance(client_conversation_id, str) else client_conversation_id
-                                if client_conv_id_int > 0:
-                                    error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. Use the conversation_id URL parameter for server-assigned IDs."
-                                    logger.error(error_msg)
-                                    await websocket.send_json({
-                                        "error": error_msg,
-                                        "type": "error",
-                                        "request_id": request_id
-                                    })
-                                    continue  # Skip processing this message
-                                # Update client_conversation_id to be the integer version for consistency
-                                client_conversation_id = client_conv_id_int
-                            except (ValueError, TypeError):
-                                # If it's not a valid number, log and continue with original value
-                                logger.warning(f"client_conversation_id is not a valid number: {client_conversation_id} (type: {type(client_conversation_id)})")
-                        
-                        # If session_conversation_id is None (new conversation) and we have an optimistic ID, use it
-                        if session_conversation_id is None and client_conversation_id is not None and client_conversation_id < 0:
-                            logger.info(f"Setting session_conversation_id to optimistic ID {client_conversation_id} for new conversation")
-                            session_conversation_id = client_conversation_id
-                            # Register and subscribe to this optimistic conversation ID
-                            # This ensures the WebSocket can receive broadcasts immediately
-                            await register_websocket_for_conversation(session_id, client_conversation_id, websocket)
-                            await subscribe_to_conversation(session_id, client_conversation_id, websocket)
+                                numeric_key = int(client_chat_id)
+                                chat_key = numeric_key if numeric_key < 0 else None
+                            except ValueError:
+                                chat_key = resolve_conversation_id(client_chat_id, user_id)
+                            if chat_key is not None:
+                                logger.info(f"Setting session_conversation_id to {chat_key} (client_chat_id={client_chat_id}) for new conversation")
+                                session_conversation_id = chat_key
+                                # Register and subscribe so the WebSocket can receive broadcasts immediately
+                                await register_websocket_for_conversation(session_id, chat_key, websocket)
+                                await subscribe_to_conversation(session_id, chat_key, websocket)
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -3450,13 +3459,15 @@ async def websocket_endpoint(websocket: WebSocket):
                                     if "active_requests" in redis_managers:
                                         await redis_managers["active_requests"].remove(session_id, request_id)
                         
-                        # Calculate correct session_id per-message based on client_conversation_id
+                        # Calculate correct session_id per-message based on client_chat_id
                         # This ensures messages are routed to the correct conversation's Redis context
                         # even if they arrive on a WebSocket that was originally opened for a different conversation
-                        if client_conversation_id is not None and client_conversation_id < 0:
-                            message_session_id = f"ws_{user_id}_conv_{client_conversation_id}"
-                            message_conversation_id = client_conversation_id
-                            logger.info(f"Routing message to per-message session_id={message_session_id} based on client_conversation_id={client_conversation_id}")
+                        # (still integer-keyed until Task 5: only numeric negative ids get their own session)
+                        optimistic_key = _numeric_chat_key(client_chat_id, None)
+                        if optimistic_key is not None and optimistic_key < 0:
+                            message_session_id = f"ws_{user_id}_conv_{optimistic_key}"
+                            message_conversation_id = optimistic_key
+                            logger.info(f"Routing message to per-message session_id={message_session_id} based on client_chat_id={client_chat_id}")
                         else:
                             message_session_id = session_id
                             message_conversation_id = session_conversation_id
@@ -3470,7 +3481,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 user_id=user_id,
                                 message=message,
                                 request_id=request_id,
-                                client_conversation_id=client_conversation_id,
+                                client_chat_id=client_chat_id,
                                 client_message_id=client_message_id,
                                 client_timestamp=client_timestamp,
                                 device_id=device_id,
@@ -5179,8 +5190,20 @@ async def upload_wake_word_audio(
 async def catch_all(path: str, request: Request):
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None, device_id=None, is_hidden=False):
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_chat_id: Optional[str] = None, client_message_id=None, client_timestamp=None, device_id=None, is_hidden=False):
     """Process a single message in a cancellable task"""
+    # Integer (optimistic) key for the session/channel machinery, which Task 5 rekeys.
+    # Only numeric negative client_chat_ids participate in it.
+    _numeric_key = _numeric_chat_key(client_chat_id, None)
+    client_conversation_id = _numeric_key if (_numeric_key is not None and _numeric_key < 0) else None
+
+    def outbound_chat_id(conversation_id=None):
+        """client_chat_id for outbound payloads: the request's, else looked up from the conversation."""
+        if client_chat_id:
+            return client_chat_id
+        conv = conversation_id if conversation_id is not None else session_conversation_id
+        return client_chat_id_for(conv) if conv is not None and conv > 0 else None
+
     # Helper function to safely send to WebSocket
     async def safe_websocket_send(payload):
         """Send payload to WebSocket, handling disconnection gracefully"""
@@ -5260,7 +5283,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         local_objects = redis_managers.get("local_objects") if redis_managers else None
         # Hidden user messages get a distinct content_type so the REST history sync excludes them.
         user_content_type = "hidden_text" if is_hidden else "text"
-        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp, content_type=user_content_type, local_objects=local_objects)
+        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_chat_id, client_timestamp, content_type=user_content_type, local_objects=local_objects)
         if save_result is None:
             logger.error("Failed to save user message to database")
             error_payload = {
@@ -5268,7 +5291,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "code": "DATABASE_ERROR",
                 "message": "Failed to save message to database",
                 "request_id": request_id,
-                "client_conversation_id": client_conversation_id
+                "client_chat_id": outbound_chat_id()
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
@@ -5323,7 +5346,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         "code": "MAPPING_CONFLICT",
                         "message": "Conversation mapping conflict detected. Please refresh the page.",
                         "request_id": request_id,
-                        "conversation_id": real_conversation_id
+                        "conversation_id": real_conversation_id,
+                        "client_chat_id": outbound_chat_id(real_conversation_id)
                     }
                     await safe_websocket_send(error_payload)
 
@@ -5574,7 +5598,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": "Claude API key is not set. Please configure it in settings.",
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,  # Include conversation_id for client sync
-                "client_conversation_id": client_conversation_id
+                "client_chat_id": outbound_chat_id()
             }
             await safe_websocket_send(error_payload_key)
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
@@ -5680,7 +5704,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "code": "CLAUDE_TIMEOUT",
                 "message": "Claude API request timed out. Please try again.",
                 "request_id": request_id,
-                "conversation_id": session_conversation_id
+                "conversation_id": session_conversation_id,
+                "client_chat_id": outbound_chat_id()
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
@@ -5700,7 +5725,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
-                "client_conversation_id": client_conversation_id
+                "client_chat_id": outbound_chat_id()
             }
             
             # Save error as ASSISTANT message to database (persists even if WebSocket fails)
@@ -5772,7 +5797,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_conversation_id": client_conversation_id,
+                    "client_chat_id": outbound_chat_id(),
                     "client_message_id": client_message_id
                 }
 
@@ -5831,7 +5856,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_conversation_id": client_conversation_id,
+                    "client_chat_id": outbound_chat_id(),
                     "client_message_id": client_message_id
                 }
 
@@ -5878,7 +5903,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": error_message,
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
-                "client_conversation_id": client_conversation_id,
+                "client_chat_id": outbound_chat_id(),
                 "client_message_id": client_message_id
             }
 
@@ -5963,7 +5988,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": "ServerError",
                     "detail": "Tool use indicated but no tool found.",
                     "request_id": request_id,
-                    "client_conversation_id": client_conversation_id
+                    "client_chat_id": outbound_chat_id()
                 }
                 await safe_websocket_send(error_payload)
                 return
@@ -6293,7 +6318,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                        "Asana authentication failed" in result.get("error", ""):
                         logger.info(f"Tool {tb.name} resulted in Asana auth error. Sending directly to client.")
                         result["request_id"] = request_id
-                        result["client_conversation_id"] = client_conversation_id
+                        result["client_chat_id"] = outbound_chat_id()
                         await safe_websocket_send(result)
                         asana_auth_error = result
 
@@ -6377,7 +6402,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_conversation_id": client_conversation_id
+                    "client_chat_id": outbound_chat_id()
                 }
                 
                 # Save error as ASSISTANT message to database (persists even if WebSocket fails)
@@ -6426,7 +6451,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         "message": error_message,
                         "request_id": request_id,
                         "conversation_id": session_conversation_id,
-                        "client_conversation_id": client_conversation_id,
+                        "client_chat_id": outbound_chat_id(),
                         "client_message_id": client_message_id
                     }
 
@@ -6747,7 +6772,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "response": assistant_response_text,
                     "request_id": request_id,
                     "conversation_id": saved_conversation_id,  # Include real conversation_id for client sync (resolved from optimistic if needed)
-                    "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
+                    "client_chat_id": outbound_chat_id(saved_conversation_id),  # Echo back the client's chat id
                     "client_message_id": client_message_id,  # Echo back optimistic message ID
                     "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "response"  # Indicate this is a direct response (vs broadcast)
@@ -6764,7 +6789,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "response": assistant_response_text,
                     "request_id": request_id,  # Include request_id so clients can track the message
                     "conversation_id": processing_conversation_id,  # Send the real conversation ID
-                    "client_conversation_id": client_conversation_id,  # Include for client validation
+                    "client_chat_id": outbound_chat_id(processing_conversation_id),  # Include for client validation
                     "client_message_id": client_message_id,  # Include for completeness
                     "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "broadcast"  # Keep type to indicate it's a broadcast
@@ -6844,7 +6869,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             "message": error_message,
             "request_id": request_id,
             "conversation_id": session_conversation_id,
-            "client_conversation_id": client_conversation_id,
+            "client_chat_id": outbound_chat_id(),
             "client_message_id": client_message_id
         }
 
