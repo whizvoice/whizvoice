@@ -62,6 +62,7 @@ from database import (
     update_tool_result_in_db,
     resolve_conversation_id,
     invalidate_conversation_cache,
+    client_chat_id_for,
 )
 from cleanup_tasks import (
     cleanup_session,
@@ -4226,13 +4227,10 @@ async def get_conversations(
         
         logger.debug(f"Getting conversations for user {user_id}, since: {since}")
         
-        # Build the query
-        query = supabase.table('conversations')\
-            .select('*')\
-            .eq('user_id', user_id)\
-            .order('updated_at', desc=True)
-        
-        # Add incremental sync filter if provided
+        # Decide the sync filter up front; the builder itself is created fresh per page
+        # because postgrest's .range() mutates the builder's params in place.
+        updated_since = None
+        exclude_deleted = False
         if since:
             try:
                 # Parse the timestamp and filter for records updated after it
@@ -4240,7 +4238,7 @@ async def get_conversations(
                 # Use slightly older timestamp to avoid edge case timing issues
                 # Go back 1 second to catch any conversations that might be missed due to timing precision
                 adjusted_timestamp = since_timestamp - timedelta(seconds=1)
-                query = query.gte('updated_at', adjusted_timestamp.isoformat())
+                updated_since = adjusted_timestamp.isoformat()
                 logger.info(f"Incremental sync: fetching conversations updated since {adjusted_timestamp} (original: {since_timestamp}, includes deleted)")
                 # Note: For incremental sync, we include deleted conversations so client can handle deletions
             except ValueError as e:
@@ -4248,15 +4246,27 @@ async def get_conversations(
                 # Fall back to full sync if timestamp is invalid
         else:
             # For full sync (no 'since'), exclude deleted conversations
-            query = query.is_('deleted_at', 'null')
+            exclude_deleted = True
             logger.debug(f"Full sync: excluding deleted conversations")
-        
+
+        def build_query():
+            q = supabase.table('conversations')\
+                .select('*')\
+                .eq('user_id', user_id)\
+                .order('updated_at', desc=True)\
+                .order('id', desc=True)  # unique tiebreaker so offset paging is stable
+            if updated_since is not None:
+                q = q.gte('updated_at', updated_since)
+            if exclude_deleted:
+                q = q.is_('deleted_at', 'null')
+            return q
+
         # PostgREST caps a select at 1000 rows, so page until a short page arrives
         page_size = 1000
         conversations = []
         start = 0
         while True:
-            page = query.range(start, start + page_size - 1).execute()
+            page = build_query().range(start, start + page_size - 1).execute()
             page_rows = page.data if page.data else []
             conversations.extend(page_rows)
             if len(page_rows) < page_size:
@@ -4456,10 +4466,15 @@ async def delete_conversation(
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
+        deleted_client_chat_id = client_chat_id_for(actual_conversation_id)
         invalidate_conversation_cache(actual_conversation_id)
 
         logger.info(f"Successfully soft-deleted conversation {actual_conversation_id} (requested: {conversation_ref}) for user {user_id}")
-        return {"message": "Conversation deleted successfully", "conversation_id": conversation_ref}
+        return {
+            "message": "Conversation deleted successfully",
+            "conversation_id": actual_conversation_id,
+            "client_chat_id": deleted_client_chat_id,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -4947,12 +4962,13 @@ async def get_conversation_pending_requests(
     """Check if there are any in-flight requests for a conversation.
     Used by the Android client to restore the thinking indicator after navigation."""
     user_id = current_user.get("sub")
-    conversation_id = resolve_conversation_id(conversation_ref, user_id)
-    if conversation_id is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    session_id = f"ws_{user_id}_conv_{conversation_id}"
 
     try:
+        conversation_id = resolve_conversation_id(conversation_ref, user_id)
+        if conversation_id is None:
+            # Client polls this after navigation; an unknown ref is just "nothing pending"
+            return {"has_pending": False, "request_ids": []}
+        session_id = f"ws_{user_id}_conv_{conversation_id}"
         active_request_ids = set(await get_active_requests(session_id))
 
         # An in-flight request started while the chat was still optimistic is tracked

@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
+from postgrest import SyncPostgrestClient
 
 import app as app_module
 
@@ -71,7 +72,8 @@ class TestConversationsRest(unittest.IsolatedAsyncioTestCase):
         page2 = MagicMock()
         page2.data = [_row(1000 + i) for i in range(3)]
         query = (mock_supabase.table.return_value.select.return_value
-                 .eq.return_value.order.return_value.is_.return_value)
+                 .eq.return_value.order.return_value.order.return_value
+                 .is_.return_value)
         query.range.return_value.execute.side_effect = [page1, page2]
 
         resp = await self.client.get("/conversations")
@@ -81,6 +83,75 @@ class TestConversationsRest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query.range.call_count, 2)
         query.range.assert_any_call(0, 999)
         query.range.assert_any_call(1000, 1999)
+
+    @patch("app.supabase")
+    async def test_get_conversations_exactly_1000_rows_stops_on_empty_page(self, mock_supabase):
+        page1 = MagicMock()
+        page1.data = [_row(i) for i in range(1000)]
+        page2 = MagicMock()
+        page2.data = []
+        query = (mock_supabase.table.return_value.select.return_value
+                 .eq.return_value.order.return_value.order.return_value
+                 .is_.return_value)
+        query.range.return_value.execute.side_effect = [page1, page2]
+
+        resp = await self.client.get("/conversations")
+
+        self.assertEqual(resp.json()["count"], 1000)
+        self.assertEqual(query.range.call_count, 2)
+
+    async def test_get_conversations_real_builder_sends_single_offset_and_limit(self):
+        """A real postgrest builder mutates params in .range(); reusing one builder
+        across pages would send duplicate offset/limit params."""
+        urls = []
+
+        def handler(request):
+            urls.append(request.url)
+            n = 1000 if len(urls) == 1 else 3
+            return httpx.Response(200, json=[_row(i) for i in range(n)])
+
+        real = SyncPostgrestClient("http://db.test/rest/v1", headers={})
+        real.session = httpx.Client(
+            base_url="http://db.test/rest/v1", transport=httpx.MockTransport(handler)
+        )
+        with patch("app.supabase", real):
+            resp = await self.client.get("/conversations")
+
+        self.assertEqual(resp.json()["count"], 1003)
+        self.assertEqual(len(urls), 2)
+        self.assertEqual(urls[0].params.get_list("offset"), ["0"])
+        self.assertEqual(urls[0].params.get_list("limit"), ["1000"])
+        self.assertEqual(urls[1].params.get_list("offset"), ["1000"])
+        self.assertEqual(urls[1].params.get_list("limit"), ["1000"])
+        self.assertEqual(urls[1].params.get_list("order"), ["updated_at.desc,id.desc"])
+
+    @patch("app.resolve_conversation_id", return_value=None)
+    async def test_pending_requests_unresolvable_ref_is_soft(self, mock_resolve):
+        resp = await self.client.get(f"/api/conversations/{UUID_REF}/pending-requests")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"has_pending": False, "request_ids": []})
+
+    @patch("app.client_chat_id_for", return_value=UUID_REF)
+    @patch("app.invalidate_conversation_cache")
+    @patch("app.resolve_conversation_id", return_value=19400)
+    @patch("app.supabase")
+    async def test_delete_conversation_returns_int_id_and_client_chat_id(
+        self, mock_supabase, mock_resolve, mock_invalidate, mock_cc
+    ):
+        verify = MagicMock()
+        verify.data = [{"deleted_at": None}]
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = verify
+        upd = MagicMock()
+        upd.data = [_row()]
+        (mock_supabase.table.return_value.update.return_value
+            .eq.return_value.eq.return_value.execute.return_value) = upd
+
+        resp = await self.client.delete(f"/conversations/{UUID_REF}")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["conversation_id"], 19400)
+        self.assertEqual(resp.json()["client_chat_id"], UUID_REF)
+        mock_invalidate.assert_called_once_with(19400)
 
     @patch("app.supabase")
     async def test_create_conversation_stores_client_chat_id(self, mock_supabase):
