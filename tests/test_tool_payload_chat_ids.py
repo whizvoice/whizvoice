@@ -1,5 +1,5 @@
-"""Outbound tool_execution / delete_message payloads carry client_chat_id (and, LEGACY until
-Task 8, the int client_conversation_id) alongside conversation_id."""
+"""Outbound tool_execution / delete_message payloads carry client_chat_id alongside conversation_id
+(and no legacy int id)."""
 import contextvars
 import json
 import os
@@ -21,19 +21,18 @@ CHAT = "7f3a0c2e-1b4d-4c55-9a77-0d1e2f3a4b5c"
 
 
 class TestChatIdsForConversation(unittest.TestCase):
-    def test_legacy_negative_id_is_its_own_client_chat_id(self):
-        self.assertEqual(tool_payload_ids.chat_ids_for_conversation(-77),
-                         {"client_chat_id": "-77", "client_conversation_id": -77})
+    def test_negative_id_has_no_client_chat_id(self):
+        self.assertEqual(tool_payload_ids.chat_ids_for_conversation(-77), {"client_chat_id": None})
 
     def test_positive_id_looks_up_rows_client_chat_id(self):
         with patch("database.client_chat_id_for", return_value=CHAT) as lookup:
             ids = tool_payload_ids.chat_ids_for_conversation(19400)
         lookup.assert_called_once_with(19400)
-        self.assertEqual(ids, {"client_chat_id": CHAT, "client_conversation_id": None})
+        self.assertEqual(ids, {"client_chat_id": CHAT})
 
     def test_none_without_context(self):
         self.assertEqual(tool_payload_ids.chat_ids_for_conversation(None),
-                         {"client_chat_id": None, "client_conversation_id": None})
+                         {"client_chat_id": None})
 
     def test_running_tools_client_chat_id_wins(self):
         def run():
@@ -61,14 +60,14 @@ class TestToolModulesPayloads(unittest.IsolatedAsyncioTestCase):
     async def assert_carries_ids(self, call):
         frame = await self.sent_frame(call, -77)
         self.assertEqual(frame["conversation_id"], -77)
-        self.assertEqual(frame["client_chat_id"], "-77")
-        self.assertEqual(frame["client_conversation_id"], -77)
+        self.assertIsNone(frame["client_chat_id"])
+        self.assertNotIn("client_conversation_id", frame)
 
         with patch("database.client_chat_id_for", return_value=CHAT):
             frame = await self.sent_frame(call, 19400)
         self.assertEqual(frame["conversation_id"], 19400)
         self.assertEqual(frame["client_chat_id"], CHAT)
-        self.assertIsNone(frame["client_conversation_id"])
+        self.assertNotIn("client_conversation_id", frame)
 
     async def test_device_control_tools(self):
         await self.assert_carries_ids(lambda ws, cid: device_control_tools._send_device_tool(
@@ -98,7 +97,7 @@ class TestDeleteMessagePayload(unittest.TestCase):
         lookup.assert_called_once_with(19400)
         self.assertEqual(payload, {
             "type": "delete_message", "message_id": 5, "conversation_id": 19400,
-            "client_chat_id": "-77", "client_conversation_id": -77,
+            "client_chat_id": "-77",
             "request_id": "req-1", "reason": "superseded_by_new_request",
         })
 
@@ -106,7 +105,7 @@ class TestDeleteMessagePayload(unittest.TestCase):
         with patch("app.client_chat_id_for", return_value=CHAT):
             payload = app_module.delete_message_payload(None, 19400, "req-1", "x")
         self.assertEqual(payload["client_chat_id"], CHAT)
-        self.assertIsNone(payload["client_conversation_id"])
+        self.assertNotIn("client_conversation_id", payload)
 
 
 class TestCancelAndBroadcastUsesPayload(unittest.IsolatedAsyncioTestCase):

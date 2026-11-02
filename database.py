@@ -313,7 +313,7 @@ def _bump_timestamp_1ms(raw_timestamp: str) -> str:
     return bumped.isoformat().replace('+00:00', 'Z')
 
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_chat_id: Optional[str] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None, client_conversation_id: Optional[int] = None) -> Optional[Tuple[int, int, List[int], str]]:
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_chat_id: Optional[str] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None) -> Optional[Tuple[int, int, List[int], str]]:
     """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids, timestamp)
 
     Args:
@@ -329,16 +329,12 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         tool_content: Optional JSONB content for tool-related messages
         mark_cancelled: If True, mark the message as cancelled (for error messages from cancelled requests)
         local_objects: Unused (kept for caller compatibility); ID mappings are cached in this module
-        client_conversation_id: Deprecated alias for client_chat_id (str() of it is used); removed in a later task
 
     Returns:
         Tuple of (conversation_id, message_id, cancelled_message_ids) where cancelled_message_ids
         is a list of message IDs that were marked for cancellation (caller should broadcast deletions)
     """
     try:
-        if client_chat_id is None and client_conversation_id is not None:
-            client_chat_id = str(client_conversation_id)
-
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_chat_id={client_chat_id}, content='{content[:50] if content else '(empty)'}...'")
 
         # A legacy negative conversation_id is a client ref: treat it as the client_chat_id

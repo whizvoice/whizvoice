@@ -7,7 +7,7 @@ import asyncio
 # Add the parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import parse_client_chat_id, legacy_client_conversation_id,get_current_claude_api_key, get_anthropic_client, _anthropic_clients_cache
+from app import parse_client_chat_id, get_current_claude_api_key, get_anthropic_client, _anthropic_clients_cache
 
 class TestAppHelpers(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -189,25 +189,14 @@ class TestParseClientChatId(unittest.TestCase):
     def test_client_chat_id_wins(self):
         self.assertEqual(parse_client_chat_id({"client_chat_id": "x"}), "x")
 
-    def test_legacy_int(self):
-        self.assertEqual(parse_client_chat_id({"client_conversation_id": -5}), "-5")
+    def test_legacy_int_ignored(self):
+        self.assertIsNone(parse_client_chat_id({"client_conversation_id": -5}))
 
-    def test_legacy_string(self):
-        self.assertEqual(parse_client_chat_id({"client_conversation_id": "-5"}), "-5")
+    def test_legacy_string_ignored(self):
+        self.assertIsNone(parse_client_chat_id({"client_conversation_id": "-5"}))
 
     def test_missing(self):
         self.assertIsNone(parse_client_chat_id({}))
-
-
-class TestLegacyClientConversationId(unittest.TestCase):
-    def test_numeric(self):
-        self.assertEqual(legacy_client_conversation_id("-5"), -5)
-
-    def test_uuid_like(self):
-        self.assertIsNone(legacy_client_conversation_id("7f3a-1c2d-9e"))
-
-    def test_none(self):
-        self.assertIsNone(legacy_client_conversation_id(None))
 
 
 if __name__ == '__main__':

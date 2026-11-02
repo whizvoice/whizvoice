@@ -25,9 +25,9 @@ class TestResolveConversationId(unittest.TestCase):
 
     @patch("database.supabase")
     def test_negative_id_resolves_to_real_id(self, mock_supabase):
-        """Negative optimistic_id returns the real ID from conversations.optimistic_chat_id.
+        """Negative optimistic_id returns the real ID via conversations.client_chat_id.
 
-        The column stores optimistic IDs as strings (see database.py and app.py call
+        The column stores the ids as strings (see database.py and app.py call
         sites). Soft-deleted rows are excluded via is_('deleted_at', 'null').
         """
         mock_execute = MagicMock()
@@ -40,7 +40,7 @@ class TestResolveConversationId(unittest.TestCase):
 
         self.assertEqual(result, self.real_id)
         mock_supabase.table.assert_called_once_with("conversations")
-        # Verify the optimistic_chat_id was stringified for the .eq() call
+        # Verify the id was stringified for the .eq() call
         eq_calls = mock_supabase.table.return_value.select.return_value.eq.call_args_list
         self.assertIn(
             ("client_chat_id", str(self.optimistic_id)),
@@ -239,35 +239,6 @@ class TestResolveConversationId(unittest.TestCase):
         invalidate_conversation_cache(5)
         self.assertEqual(database._conversation_id_by_client_chat_id, {})
         self.assertEqual(database._client_chat_id_by_conversation_id, {})
-
-    @patch("database.supabase")
-    def test_client_conversation_id_alias_matches_client_chat_id(self, mock_supabase):
-        """Deprecated client_conversation_id=-5 behaves exactly like client_chat_id="-5"."""
-        def run(**kwargs):
-            clear_id_cache()
-            conversations = MagicMock()
-            lookup = conversations.select.return_value.eq.return_value.eq.return_value.is_.return_value
-            lookup.execute.return_value = MagicMock(data=[])
-            conversations.insert.return_value.execute.return_value = MagicMock(
-                data=[{"id": 99, "created_at": "t", "updated_at": "t"}]
-            )
-            messages = MagicMock()
-            messages.insert.return_value.execute.return_value = MagicMock(
-                data=[{"id": 78, "timestamp": "2026-11-01T00:00:00Z", "conversation_id": 99}]
-            )
-            mock_supabase.table.side_effect = lambda name: conversations if name == "conversations" else messages
-            result = save_message_to_db(
-                self.user_id, None, "hello", "USER",
-                client_timestamp="2026-11-01T00:00:00Z", **kwargs
-            )
-            return result, conversations.insert.call_args
-
-        alias_result, alias_insert = run(client_conversation_id=-5)
-        new_result, new_insert = run(client_chat_id="-5")
-
-        self.assertEqual(alias_result, new_result)
-        self.assertEqual(alias_insert, new_insert)
-        self.assertEqual(alias_insert.args[0]["client_chat_id"], "-5")
 
 
 if __name__ == "__main__":

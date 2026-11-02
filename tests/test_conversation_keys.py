@@ -47,11 +47,6 @@ UUID = "7f3a0c2e-1b4d-4c55-9a77-0d1e2f3a4b5c"
 
 
 class TestConversationIdForChat(unittest.TestCase):
-    @patch("app.conversation_id_for")
-    def test_legacy_negative_id_is_returned_without_lookup(self, mock_lookup):
-        self.assertEqual(app_module.conversation_id_for_chat("-1793565083660", "u"), -1793565083660)
-        mock_lookup.assert_not_called()
-
     @patch("app.conversation_id_for", return_value=19400)
     def test_uuid_resolves_through_row(self, mock_lookup):
         self.assertEqual(app_module.conversation_id_for_chat(UUID, "u"), 19400)

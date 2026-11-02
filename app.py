@@ -246,46 +246,16 @@ def classify_claude_bad_request(error_text: str) -> Tuple[str, str]:
 def parse_client_chat_id(message_data: dict) -> Optional[str]:
     """Extract the client-minted chat id from an inbound WebSocket message.
 
-    Prefers `client_chat_id`; falls back to the legacy negative-int
-    `client_conversation_id` (stringified). Fallback removed in Task 8.
+    Reads `client_chat_id` only.
     """
     client_chat_id = message_data.get("client_chat_id")
-    if client_chat_id:
-        return str(client_chat_id)
-    legacy = message_data.get("client_conversation_id")
-    return str(legacy) if legacy is not None else None
-
-
-def legacy_client_conversation_id(client_chat_id: Optional[str]) -> Optional[int]:
-    """Legacy `client_conversation_id` (int) for old Android clients, or None if not numeric.
-
-    Outbound payloads emit this alongside `client_chat_id`; removed in a later task (Task 8).
-    """
-    if client_chat_id is None:
-        return None
-    try:
-        return int(client_chat_id)
-    except (ValueError, TypeError):
-        return None
-
-
-def legacy_optimistic_chat_id(client_chat_id: Optional[str]) -> Optional[str]:
-    """LEGACY: remove in Task 8. `optimistic_chat_id` for old Android sync: the client_chat_id
-    when it is a legacy negative integer, else None."""
-    legacy_id = legacy_client_conversation_id(client_chat_id)
-    return str(client_chat_id) if legacy_id is not None and legacy_id < 0 else None
+    return str(client_chat_id) if client_chat_id else None
 
 
 def conversation_id_for_chat(client_chat_id: str, user_id: str) -> Optional[int]:
-    """Integer conversation id a WebSocket message for this chat carries into processing.
-
-    A legacy negative client id is returned as-is (old clients expect it echoed as
-    `conversation_id` until their chat is confirmed; the database layer resolves it).
-    Otherwise the row's id, or None if the conversation has no row yet.
+    """Integer conversation id a WebSocket message for this chat carries into processing:
+    the row's id, or None if the conversation has no row yet.
     """
-    legacy_id = legacy_client_conversation_id(client_chat_id)
-    if legacy_id is not None and legacy_id < 0:
-        return legacy_id
     return conversation_id_for(client_chat_id, user_id)
 
 
@@ -3105,13 +3075,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if connection_chat_id is None:
                     connection_chat_id = str(uuid.uuid4())
 
-                # Integer conversation id for the database and payloads: the row's id, else (no row yet)
-                # a legacy negative client id, which old clients expect echoed as conversation_id.
+                # Integer conversation id for the database and payloads: the row's id, or None (no row yet).
                 session_conversation_id = actual_conversation_id
-                if session_conversation_id is None:
-                    legacy_id = legacy_client_conversation_id(connection_chat_id)
-                    if legacy_id is not None and legacy_id < 0:
-                        session_conversation_id = legacy_id
 
                 # Two ids per connection:
                 # - session_id: the chat's Redis context (and active requests), keyed by client_chat_id
@@ -3223,9 +3188,6 @@ async def websocket_endpoint(websocket: WebSocket):
         # IMPORTANT: Must happen AFTER adding new session to get accurate count
         await evict_user_sessions_if_needed(user_id, origin_session_id)
 
-        # LEGACY: remove in Task 8. Chat this socket was additionally subscribed to via a legacy
-        # positive conversation_id frame (avoids re-subscribing on every message).
-        legacy_subscribed_chat_id = None
         try:
             while True:
                 try:
@@ -3243,7 +3205,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     client_chat_id = None
                     client_message_id = None
                     client_timestamp = None
-                    legacy_resolved_conversation_id = None  # LEGACY: remove in Task 8
                     try:
                         message_data = json.loads(message_text)
                         message = message_data.get("message", "")
@@ -3253,22 +3214,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         # Get conversation_id from message (if provided)
                         message_conversation_id = message_data.get("conversation_id")
                         client_chat_id = parse_client_chat_id(message_data)
-                        # LEGACY: remove in Task 8. Old app sends only `conversation_id: <positive int>`
-                        # for an existing chat, sometimes on a socket opened for a different chat.
-                        # Resolve it to that chat's client_chat_id so the message routes there.
-                        if (client_chat_id is None and message_type == "message"
-                                and isinstance(message_conversation_id, int)
-                                and not isinstance(message_conversation_id, bool)
-                                and message_conversation_id > 0):
-                            legacy_resolved_conversation_id = resolve_conversation_id(message_conversation_id, user_id)
-                            if legacy_resolved_conversation_id is not None:
-                                client_chat_id = client_chat_id_for(legacy_resolved_conversation_id)
-                                if client_chat_id is None:
-                                    legacy_resolved_conversation_id = None
-                                else:
-                                    logger.info(f"Legacy frame conversation_id={message_conversation_id} resolved to client_chat_id={client_chat_id}")
-                            else:
-                                logger.warning(f"Legacy frame conversation_id={message_conversation_id} not found for user {user_id}; routing to connection chat {connection_chat_id}")
                         client_message_id = message_data.get("client_message_id")
                         # Get timestamp from client for preserving message order
                         client_timestamp = message_data.get("timestamp")
@@ -3301,19 +3246,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Register and subscribe so the WebSocket can receive broadcasts immediately
                             await register_websocket_for_conversation(origin_session_id, connection_chat_id, websocket)
                             await subscribe_to_conversation(origin_session_id, connection_chat_id, websocket)
-                            if legacy_resolved_conversation_id is not None and connection_chat_id == client_chat_id:
-                                # LEGACY: remove in Task 8. Bound via a legacy positive conversation_id.
-                                session_conversation_id = legacy_resolved_conversation_id
-                                legacy_subscribed_chat_id = client_chat_id
-                        elif (legacy_resolved_conversation_id is not None
-                                and client_chat_id != connection_chat_id
-                                and client_chat_id != legacy_subscribed_chat_id):
-                            # LEGACY: remove in Task 8. The old app reuses this socket for the chat it
-                            # named by conversation_id; follow that chat's broadcasts as a bound frame would.
-                            legacy_subscribed_chat_id = client_chat_id
-                            logger.info(f"Subscribing connection {origin_session_id} to legacy-resolved client_chat_id={client_chat_id}")
-                            await register_websocket_for_conversation(origin_session_id, client_chat_id, websocket)
-                            await subscribe_to_conversation(origin_session_id, client_chat_id, websocket)
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -3452,9 +3384,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             message_conversation_id = session_conversation_id
                         else:
                             message_conversation_id = conversation_id_for_chat(message_chat_id, user_id)
-                        if legacy_resolved_conversation_id is not None:
-                            # LEGACY: remove in Task 8. The old app named this chat by its row id; echo that.
-                            message_conversation_id = legacy_resolved_conversation_id
                         if message_session_id != session_id:
                             logger.info(f"Routing message to per-message session_id={message_session_id} based on client_chat_id={message_chat_id}")
 
@@ -3738,7 +3667,6 @@ def delete_message_payload(message_id: Optional[int], conversation_id: Optional[
         "message_id": message_id,
         "conversation_id": conversation_id,
         "client_chat_id": client_chat_id,
-        "client_conversation_id": legacy_client_conversation_id(client_chat_id),  # LEGACY: remove in Task 8
         "request_id": request_id,
         "reason": reason,
     }
@@ -4214,11 +4142,6 @@ async def get_conversations(
             if len(page_rows) < page_size:
                 break
             start += page_size
-
-        # LEGACY: remove in Task 8. The old app's sync matches local negative-id chats via
-        # `optimistic_chat_id` (a string it parses with toLongOrNull()).
-        for row in conversations:
-            row["optimistic_chat_id"] = legacy_optimistic_chat_id(row.get("client_chat_id"))
 
         # Log detailed information about what we're returning
         if conversations:
@@ -5123,10 +5046,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         conv = conversation_id if conversation_id is not None else session_conversation_id
         return client_chat_id_for(conv) if conv is not None and conv > 0 else None
 
-    def legacy_conv_id(conversation_id=None):
-        """Legacy int `client_conversation_id` for old clients (numeric client_chat_id only)."""
-        return legacy_client_conversation_id(outbound_chat_id(conversation_id))
-
     # Helper function to safely send to WebSocket
     async def safe_websocket_send(payload):
         """Send payload to WebSocket, handling disconnection gracefully"""
@@ -5215,7 +5134,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": "Failed to save message to database",
                 "request_id": request_id,
                 "client_chat_id": outbound_chat_id(),
-                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
@@ -5463,7 +5381,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,  # Include conversation_id for client sync
                 "client_chat_id": outbound_chat_id(),
-                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
             }
             await safe_websocket_send(error_payload_key)
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
@@ -5571,7 +5488,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
                 "client_chat_id": outbound_chat_id(),
-                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
@@ -5592,7 +5508,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
                 "client_chat_id": outbound_chat_id(),
-                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
             }
             
             # Save error as ASSISTANT message to database (persists even if WebSocket fails)
@@ -5664,7 +5579,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
+                    "client_chat_id": outbound_chat_id(),
                     "client_message_id": client_message_id
                 }
 
@@ -5723,7 +5638,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
+                    "client_chat_id": outbound_chat_id(),
                     "client_message_id": client_message_id
                 }
 
@@ -5770,7 +5685,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": error_message,
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
-                "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
+                "client_chat_id": outbound_chat_id(),
                 "client_message_id": client_message_id
             }
 
@@ -5856,7 +5771,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "detail": "Tool use indicated but no tool found.",
                     "request_id": request_id,
                     "client_chat_id": outbound_chat_id(),
-                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
                 }
                 await safe_websocket_send(error_payload)
                 return
@@ -6189,7 +6103,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         logger.info(f"Tool {tb.name} resulted in Asana auth error. Sending directly to client.")
                         result["request_id"] = request_id
                         result["client_chat_id"] = outbound_chat_id()
-                        result["client_conversation_id"] = legacy_conv_id()  # legacy; removed in a later task
                         await safe_websocket_send(result)
                         asana_auth_error = result
 
@@ -6274,7 +6187,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
                     "client_chat_id": outbound_chat_id(),
-                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
                 }
                 
                 # Save error as ASSISTANT message to database (persists even if WebSocket fails)
@@ -6323,7 +6235,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         "message": error_message,
                         "request_id": request_id,
                         "conversation_id": session_conversation_id,
-                        "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
+                        "client_chat_id": outbound_chat_id(),
                         "client_message_id": client_message_id
                     }
 
@@ -6644,7 +6556,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "response": assistant_response_text,
                     "request_id": request_id,
                     "conversation_id": saved_conversation_id,  # Include real conversation_id for client sync
-                    "client_chat_id": outbound_chat_id(saved_conversation_id), "client_conversation_id": legacy_conv_id(saved_conversation_id),  # Echo back the client's chat id; legacy field removed in a later task
+                    "client_chat_id": outbound_chat_id(saved_conversation_id),  # Echo back the client's chat id
                     "client_message_id": client_message_id,  # Echo back the client's message ID
                     "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "response"  # Indicate this is a direct response (vs broadcast)
@@ -6661,7 +6573,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "response": assistant_response_text,
                     "request_id": request_id,  # Include request_id so clients can track the message
                     "conversation_id": processing_conversation_id,  # Send the real conversation ID
-                    "client_chat_id": outbound_chat_id(processing_conversation_id), "client_conversation_id": legacy_conv_id(processing_conversation_id),  # Include for client validation; legacy field removed in a later task
+                    "client_chat_id": outbound_chat_id(processing_conversation_id),  # Include for client validation
                     "client_message_id": client_message_id,  # Include for completeness
                     "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "broadcast"  # Keep type to indicate it's a broadcast
@@ -6741,7 +6653,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             "message": error_message,
             "request_id": request_id,
             "conversation_id": session_conversation_id,
-            "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
+            "client_chat_id": outbound_chat_id(),
             "client_message_id": client_message_id
         }
 
