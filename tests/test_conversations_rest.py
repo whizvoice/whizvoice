@@ -131,6 +131,29 @@ class TestConversationsRest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"has_pending": False, "request_ids": []})
 
+    @patch("app.get_request_state")
+    @patch("app.get_active_requests")
+    @patch("app.client_chat_id_for", return_value=UUID_REF)
+    @patch("app.resolve_conversation_id", return_value=19400)
+    async def test_pending_requests_reads_session_keyed_by_client_chat_id(
+        self, mock_resolve, mock_cci, mock_active, mock_state
+    ):
+        async def active(session_id):
+            return {"req-1"} if session_id == f"ws_user-1_conv_{UUID_REF}" else set()
+
+        async def state(request_id):
+            return None
+
+        mock_active.side_effect = active
+        mock_state.side_effect = state
+
+        resp = await self.client.get("/api/conversations/19400/pending-requests")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"has_pending": True, "request_ids": ["req-1"]})
+        mock_cci.assert_called_once_with(19400)
+        mock_active.assert_called_once_with(f"ws_user-1_conv_{UUID_REF}")
+
     @patch("app.client_chat_id_for", return_value=UUID_REF)
     @patch("app.invalidate_conversation_cache")
     @patch("app.resolve_conversation_id", return_value=19400)

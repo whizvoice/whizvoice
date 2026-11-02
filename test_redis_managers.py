@@ -103,22 +103,6 @@ async def test_redis_managers():
     assert len(requests) == 0, "Requests not cleared"
     print("  ✅ Cleared requests successfully")
     
-    # Test SessionMappingManager
-    print("\n🔄 Testing SessionMappingManager...")
-    
-    # Set mapping
-    client_id = -1
-    real_id = 100
-    await managers["session_mappings"].set_mapping(session_id, client_id, real_id)
-    
-    # Get mappings
-    retrieved_real = await managers["session_mappings"].get_real_id(session_id, client_id)
-    assert retrieved_real == real_id, "Real ID mapping failed"
-    
-    retrieved_client = await managers["session_mappings"].get_optimistic_id(session_id, real_id)
-    assert retrieved_client == client_id, "Client ID mapping failed"
-    print("  ✅ ID mappings working correctly")
-    
     # ConnectionTracker removed - functionality moved to LocalObjectManager
     print("\n🌐 ConnectionTracker removed - WebSocket tracking now in LocalObjectManager")
     
@@ -127,7 +111,6 @@ async def test_redis_managers():
     await managers["chat_sessions"].delete(session_id)
     await managers["user_sessions"].remove_session(user_id, "session2")
     await managers["session_timestamps"].delete(session_id)
-    await managers["session_mappings"].delete(session_id)
     
     # Verify cleanup
     exists = await managers["chat_sessions"].exists(session_id)

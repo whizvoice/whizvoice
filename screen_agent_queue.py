@@ -160,38 +160,34 @@ class ScreenAgentQueueManager:
             f"looking up active connection (session={session_id}, conversation={conversation_id})"
         )
 
-        # Strategy 1: Resolve session redirect and look up new WebSocket
+        # Strategy 1: Session ids are stable (keyed by client_chat_id), so a reconnect
+        # re-registers a fresh WebSocket under the same session id.
         if not self._redis_managers:
             logger.warning("No redis_managers available for WebSocket refresh")
             return
-        chat_session_mgr = self._redis_managers["chat_sessions"]
         local_mgr = self._redis_managers["local_objects"]
 
         if session_id:
             try:
-                resolved_id = await chat_session_mgr.resolve_session_id(session_id)
-                if resolved_id != session_id:
-                    fresh_ws = await local_mgr.get_session_websocket(resolved_id)
-                    if fresh_ws and fresh_ws.client_state == WebSocketState.CONNECTED:
-                        context["websocket"] = fresh_ws
-                        logger.info(f"Refreshed WebSocket via session redirect: {session_id} -> {resolved_id}")
-                        return
+                fresh_ws = await local_mgr.get_session_websocket(session_id)
+                if fresh_ws and fresh_ws is not websocket and fresh_ws.client_state == WebSocketState.CONNECTED:
+                    context["websocket"] = fresh_ws
+                    logger.info(f"Refreshed WebSocket via session lookup: {session_id}")
+                    return
             except Exception as e:
-                logger.warning(f"Error resolving session redirect: {e}")
+                logger.warning(f"Error looking up WebSocket by session: {e}")
 
-        # Strategy 2: Look up by conversation_id
-        if conversation_id is not None:
+        # Strategy 2: Look up any socket registered for the conversation (keyed by client_chat_id)
+        db_conversation_id = context.get("tracking_conversation_id") or conversation_id
+        if isinstance(db_conversation_id, int) and db_conversation_id > 0:
             try:
-                real_id = conversation_id
-                if isinstance(conversation_id, int) and conversation_id < 0:
-                    cached_real = await local_mgr.get_real_id_cached(conversation_id)
-                    if cached_real:
-                        real_id = cached_real
-                registrations = await local_mgr.get_conversation_websockets(real_id)
+                from database import client_chat_id_for
+                client_chat_id = client_chat_id_for(db_conversation_id)
+                registrations = await local_mgr.get_conversation_websockets(client_chat_id) if client_chat_id else []
                 for sid, ws in registrations:
                     if ws.client_state == WebSocketState.CONNECTED:
                         context["websocket"] = ws
-                        logger.info(f"Refreshed WebSocket via conversation lookup (conv_id={real_id}, session={sid})")
+                        logger.info(f"Refreshed WebSocket via conversation lookup (client_chat_id={client_chat_id}, session={sid})")
                         return
             except Exception as e:
                 logger.warning(f"Error looking up WebSocket by conversation: {e}")
@@ -216,7 +212,7 @@ class ScreenAgentQueueManager:
             return {"error": "Queue manager not initialized", "success": False}
 
         try:
-            # Refresh WebSocket if the original one disconnected (e.g., during optimistic→real ID migration)
+            # Refresh WebSocket if the original one disconnected (e.g., the client reconnected)
             await self._refresh_websocket_if_stale(context)
             # Execute the current tool
             # Note: user_id is already in context, passed via **context

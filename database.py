@@ -206,7 +206,7 @@ def resolve_conversation_id(ref: Union[int, str, None], user_id: str) -> Optiona
     Resolve a conversation reference to the real DB id.
 
     - int or numeric string > 0: verify the conversation exists and is owned by the user.
-    - negative int (legacy optimistic id): looked up as str(ref) in `client_chat_id`.
+    - negative int (legacy client id): looked up as str(ref) in `client_chat_id`.
     - any other string (UUID client_chat_id, incl. negative numeric strings): looked up
       in `client_chat_id`.
 
@@ -318,7 +318,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
 
     Args:
         user_id: User ID
-        conversation_id: Conversation ID (can be negative for optimistic IDs)
+        conversation_id: Conversation ID (can be a legacy negative client id)
         content: Text content of the message
         message_sender: 'USER' or 'ASSISTANT' (renamed from message_type)
         request_id: Optional request ID for tracking
@@ -593,7 +593,7 @@ def save_messages_to_db(messages: List[Dict], conversation_id: int, request_id: 
             - content_type: 'text', 'tool_use', 'tool_result', or 'mixed'
             - tool_content: Optional JSONB content for tool-related messages
             - timestamp: ISO timestamp string for message ordering
-        conversation_id: The conversation ID (must be resolved, not optimistic)
+        conversation_id: The conversation ID (must be the resolved DB id)
         request_id: Request ID for tracking
 
     Returns:
@@ -653,13 +653,13 @@ def update_tool_result_in_db(conversation_id: int, tool_use_id: str, result_cont
         conversation_id: The conversation ID containing the tool result message
         tool_use_id: The tool_use_id to identify which tool_result to update
         result_content: The actual tool execution result to replace the pending content
-        user_id: The user ID (required if conversation_id is optimistic/negative)
+        user_id: The user ID (required if conversation_id is a client ref / negative)
 
     Returns:
         True if update successful, False otherwise
     """
     try:
-        # Handle optimistic conversation IDs (negative IDs)
+        # Handle client conversation refs (legacy negative ids / client_chat_id strings)
         if conversation_id is not None and (isinstance(conversation_id, str) or conversation_id < 0):
             if user_id is None:
                 logger.error(f"user_id required to resolve client conversation ref {conversation_id}")
