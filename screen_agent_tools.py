@@ -8,6 +8,8 @@ import uuid
 import asyncio
 from typing import Optional, Dict, Any
 
+from tool_payload_ids import tool_payload_chat_ids
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,8 @@ async def agent_launch_app(app_name: str, user_id: str = None, websocket = None,
             "params": {
                 "app_name": app_name
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -160,7 +163,8 @@ async def agent_disable_continuous_listening(user_id: str = None, websocket = No
             "tool": "agent_disable_continuous_listening",
             "request_id": tool_request_id,
             "params": {},
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -261,7 +265,8 @@ async def agent_set_tts_enabled(enabled: bool, user_id: str = None, websocket = 
             "params": {
                 "enabled": enabled
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -374,7 +379,8 @@ async def agent_close_app(user_id: str = None, websocket = None,
             "tool": "agent_close_app",
             "request_id": tool_request_id,
             "params": {},
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -437,7 +443,8 @@ async def agent_open_app(user_id: str = None, websocket = None,
             "tool": "agent_open_app",
             "request_id": tool_request_id,
             "params": {},
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         try:
@@ -523,7 +530,8 @@ async def agent_close_other_app(app_name: str, user_id: str = None, websocket = 
             "params": {
                 "app_name": app_name
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         try:
@@ -622,7 +630,8 @@ async def agent_log_health_data(data_type: str, value: float, date: str = None, 
                 # unknown keys) keep logging to today, and the message stays minimal.
                 **({"date": date} if date else {}),
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         try:
@@ -698,6 +707,7 @@ async def agent_open_health_app_settings(user_id: str = None,
             "request_id": tool_request_id,
             "params": {},
             "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         try:
@@ -744,6 +754,7 @@ async def _send_tool_and_wait(tool_name: str, params: dict, user_id, websocket,
         "request_id": tool_request_id,
         "params": params,
         "conversation_id": conversation_id,
+        **tool_payload_chat_ids(conversation_id),
     }
 
     try:

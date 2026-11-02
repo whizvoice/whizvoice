@@ -221,6 +221,63 @@ class TestPerMessageRouting(EndpointHarness):
         self.assertEqual(kwargs["session_conversation_id"], 100)
 
 
+def legacy_message(conversation_id, request_id="req-1"):
+    """Old-app frame for an existing chat: only a positive conversation_id, no client_chat_id."""
+    return json.dumps({"type": "message", "message": "hi", "request_id": request_id,
+                       "timestamp": "2026-11-01T00:00:00.000Z", "conversation_id": conversation_id})
+
+
+class TestLegacyPositiveConversationIdFrame(EndpointHarness):
+    """LEGACY: remove in Task 8."""
+
+    async def test_owned_positive_conversation_id_routes_to_that_chat(self):
+        self.resolve.side_effect = lambda ref, uid: 19400 if ref == 19400 else None
+        self.cci_for.side_effect = lambda cid: CHAT_A if cid == 19400 else None
+        ws = FakeWebSocket({"conversation_id": "-5"}, inbound=[legacy_message(19400)])
+        await self.run_endpoint(ws)
+
+        kwargs = self.process.await_args.kwargs
+        self.assertEqual(kwargs["client_chat_id"], CHAT_A)
+        self.assertEqual(kwargs["session_id"], f"ws_{USER}_conv_{CHAT_A}")
+        self.assertEqual(kwargs["session_conversation_id"], 19400)
+        # Bound to -5 at connect, then also registered/subscribed to the named chat
+        chats = [c.args[1] for c in self.register.await_args_list]
+        self.assertEqual(chats, ["-5", CHAT_A])
+        self.assertEqual(self.subscribe.await_args.args[1:], (CHAT_A, ws))
+
+    async def test_repeat_frames_subscribe_once(self):
+        self.resolve.side_effect = lambda ref, uid: 19400 if ref == 19400 else None
+        self.cci_for.side_effect = lambda cid: CHAT_A if cid == 19400 else None
+        ws = FakeWebSocket({"conversation_id": "-5"},
+                           inbound=[legacy_message(19400, "r1"), legacy_message(19400, "r2")])
+        await self.run_endpoint(ws)
+
+        self.assertEqual([c.args[1] for c in self.register.await_args_list], ["-5", CHAT_A])
+        self.assertEqual(self.process.await_count, 2)
+
+    async def test_unowned_positive_conversation_id_keeps_connection_chat(self):
+        ws = FakeWebSocket({"conversation_id": "-5"}, inbound=[legacy_message(19400)])
+        await self.run_endpoint(ws)
+
+        kwargs = self.process.await_args.kwargs
+        self.assertEqual(kwargs["client_chat_id"], "-5")
+        self.assertEqual(kwargs["session_id"], f"ws_{USER}_conv_-5")
+        self.assertEqual(kwargs["session_conversation_id"], -5)
+        self.register.assert_awaited_once()
+
+    async def test_unbound_socket_binds_to_resolved_chat(self):
+        self.resolve.side_effect = lambda ref, uid: 19400 if ref == 19400 else None
+        self.cci_for.side_effect = lambda cid: CHAT_A if cid == 19400 else None
+        ws = FakeWebSocket(inbound=[legacy_message(19400)])
+        await self.run_endpoint(ws)
+
+        self.register.assert_awaited_once()
+        self.assertEqual(self.register.await_args.args[1], CHAT_A)
+        kwargs = self.process.await_args.kwargs
+        self.assertEqual(kwargs["client_chat_id"], CHAT_A)
+        self.assertEqual(kwargs["session_conversation_id"], 19400)
+
+
 class TestTwoSocketsSameChat(unittest.IsolatedAsyncioTestCase):
     """Real registration through the endpoint, then a broadcast excluding socket A's origin."""
 

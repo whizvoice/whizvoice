@@ -67,6 +67,7 @@ from database import (
     conversation_id_for,
 )
 import conversation_keys
+import tool_payload_ids
 from cleanup_tasks import (
     cleanup_session,
     evict_user_sessions_if_needed,
@@ -266,6 +267,13 @@ def legacy_client_conversation_id(client_chat_id: Optional[str]) -> Optional[int
         return int(client_chat_id)
     except (ValueError, TypeError):
         return None
+
+
+def legacy_optimistic_chat_id(client_chat_id: Optional[str]) -> Optional[str]:
+    """LEGACY: remove in Task 8. `optimistic_chat_id` for old Android sync: the client_chat_id
+    when it is a legacy negative integer, else None."""
+    legacy_id = legacy_client_conversation_id(client_chat_id)
+    return str(client_chat_id) if legacy_id is not None and legacy_id < 0 else None
 
 
 def conversation_id_for_chat(client_chat_id: str, user_id: str) -> Optional[int]:
@@ -3215,6 +3223,9 @@ async def websocket_endpoint(websocket: WebSocket):
         # IMPORTANT: Must happen AFTER adding new session to get accurate count
         await evict_user_sessions_if_needed(user_id, origin_session_id)
 
+        # LEGACY: remove in Task 8. Chat this socket was additionally subscribed to via a legacy
+        # positive conversation_id frame (avoids re-subscribing on every message).
+        legacy_subscribed_chat_id = None
         try:
             while True:
                 try:
@@ -3232,6 +3243,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     client_chat_id = None
                     client_message_id = None
                     client_timestamp = None
+                    legacy_resolved_conversation_id = None  # LEGACY: remove in Task 8
                     try:
                         message_data = json.loads(message_text)
                         message = message_data.get("message", "")
@@ -3241,6 +3253,22 @@ async def websocket_endpoint(websocket: WebSocket):
                         # Get conversation_id from message (if provided)
                         message_conversation_id = message_data.get("conversation_id")
                         client_chat_id = parse_client_chat_id(message_data)
+                        # LEGACY: remove in Task 8. Old app sends only `conversation_id: <positive int>`
+                        # for an existing chat, sometimes on a socket opened for a different chat.
+                        # Resolve it to that chat's client_chat_id so the message routes there.
+                        if (client_chat_id is None and message_type == "message"
+                                and isinstance(message_conversation_id, int)
+                                and not isinstance(message_conversation_id, bool)
+                                and message_conversation_id > 0):
+                            legacy_resolved_conversation_id = resolve_conversation_id(message_conversation_id, user_id)
+                            if legacy_resolved_conversation_id is not None:
+                                client_chat_id = client_chat_id_for(legacy_resolved_conversation_id)
+                                if client_chat_id is None:
+                                    legacy_resolved_conversation_id = None
+                                else:
+                                    logger.info(f"Legacy frame conversation_id={message_conversation_id} resolved to client_chat_id={client_chat_id}")
+                            else:
+                                logger.warning(f"Legacy frame conversation_id={message_conversation_id} not found for user {user_id}; routing to connection chat {connection_chat_id}")
                         client_message_id = message_data.get("client_message_id")
                         # Get timestamp from client for preserving message order
                         client_timestamp = message_data.get("timestamp")
@@ -3273,6 +3301,19 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Register and subscribe so the WebSocket can receive broadcasts immediately
                             await register_websocket_for_conversation(origin_session_id, connection_chat_id, websocket)
                             await subscribe_to_conversation(origin_session_id, connection_chat_id, websocket)
+                            if legacy_resolved_conversation_id is not None and connection_chat_id == client_chat_id:
+                                # LEGACY: remove in Task 8. Bound via a legacy positive conversation_id.
+                                session_conversation_id = legacy_resolved_conversation_id
+                                legacy_subscribed_chat_id = client_chat_id
+                        elif (legacy_resolved_conversation_id is not None
+                                and client_chat_id != connection_chat_id
+                                and client_chat_id != legacy_subscribed_chat_id):
+                            # LEGACY: remove in Task 8. The old app reuses this socket for the chat it
+                            # named by conversation_id; follow that chat's broadcasts as a bound frame would.
+                            legacy_subscribed_chat_id = client_chat_id
+                            logger.info(f"Subscribing connection {origin_session_id} to legacy-resolved client_chat_id={client_chat_id}")
+                            await register_websocket_for_conversation(origin_session_id, client_chat_id, websocket)
+                            await subscribe_to_conversation(origin_session_id, client_chat_id, websocket)
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -3411,6 +3452,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             message_conversation_id = session_conversation_id
                         else:
                             message_conversation_id = conversation_id_for_chat(message_chat_id, user_id)
+                        if legacy_resolved_conversation_id is not None:
+                            # LEGACY: remove in Task 8. The old app named this chat by its row id; echo that.
+                            message_conversation_id = legacy_resolved_conversation_id
                         if message_session_id != session_id:
                             logger.info(f"Routing message to per-message session_id={message_session_id} based on client_chat_id={message_chat_id}")
 
@@ -3685,6 +3729,21 @@ async def broadcast_to_conversation(client_chat_id: str, message_payload: dict, 
     # This prevents duplicate messages (sessions were receiving via both Redis and local broadcast)
 
 
+def delete_message_payload(message_id: Optional[int], conversation_id: Optional[int],
+                           request_id: Optional[str], reason: str) -> dict:
+    """`delete_message` broadcast for a message (or, with message_id None, a request) in a conversation."""
+    client_chat_id = client_chat_id_for(conversation_id) if conversation_id is not None and conversation_id > 0 else None
+    return {
+        "type": "delete_message",
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "client_chat_id": client_chat_id,
+        "client_conversation_id": legacy_client_conversation_id(client_chat_id),  # LEGACY: remove in Task 8
+        "request_id": request_id,
+        "reason": reason,
+    }
+
+
 async def cancel_and_broadcast_messages(
     message_ids: List[int],
     conversation_id: int,
@@ -3730,13 +3789,7 @@ async def cancel_and_broadcast_messages(
 
     # Broadcast DeleteMessage to all clients in conversation
     for msg_id in message_ids:
-        delete_notification = {
-            "type": "delete_message",
-            "message_id": msg_id,
-            "conversation_id": conversation_id,
-            "request_id": request_id,
-            "reason": reason
-        }
+        delete_notification = delete_message_payload(msg_id, conversation_id, request_id, reason)
         try:
             await broadcast_to_conversation_id(conversation_id, delete_notification)
             logger.info(f"Broadcasted delete notification for message {msg_id} to conversation {conversation_id}")
@@ -3836,13 +3889,7 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
         for req_id in cancelled_requests:
             if req_id not in cancelled_with_bot_messages:
                 logger.info(f"Sending delete notification for request {req_id} with no bot messages (superseded before response)")
-                delete_notification = {
-                    "type": "delete_message",
-                    "message_id": None,
-                    "conversation_id": conversation_id,
-                    "request_id": req_id,
-                    "reason": "superseded_by_new_request"
-                }
+                delete_notification = delete_message_payload(None, conversation_id, req_id, "superseded_by_new_request")
                 try:
                     await broadcast_to_conversation_id(conversation_id, delete_notification)
                 except Exception as e:
@@ -4167,6 +4214,11 @@ async def get_conversations(
             if len(page_rows) < page_size:
                 break
             start += page_size
+
+        # LEGACY: remove in Task 8. The old app's sync matches local negative-id chats via
+        # `optimistic_chat_id` (a string it parses with toLongOrNull()).
+        for row in conversations:
+            row["optimistic_chat_id"] = legacy_optimistic_chat_id(row.get("client_chat_id"))
 
         # Log detailed information about what we're returning
         if conversations:
@@ -6100,6 +6152,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     from tool_result_handler import _current_tool_use_id, _current_session_id
                     _current_tool_use_id.set(tb.id)
                     _current_session_id.set(session_id)
+                    # Tool modules' tool_execution payloads carry this chat's client_chat_id
+                    tool_payload_ids.current_client_chat_id.set(client_chat_id)
                     result = await execute_tool_with_queue(
                         tb.name,
                         tb.input,

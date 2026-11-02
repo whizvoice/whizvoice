@@ -205,8 +205,9 @@ class TestResolveConversationId(unittest.TestCase):
         self.assertEqual(result[1], 77)
 
     @patch("database.supabase")
-    def test_stale_cache_entry_after_soft_delete_creates_new_conversation(self, mock_supabase):
-        """Cached id whose row is now soft-deleted: drop entry and create a new conversation."""
+    def test_stale_cache_entry_after_soft_delete_returns_none(self, mock_supabase):
+        """Cached id whose row is now soft-deleted: drop the entry and save nothing.
+        A deleted chat is not resurrected (the unique client_chat_id index covers deleted rows)."""
         clear_id_cache()
         cid = "7f3a1c52-9d4e-4b8a-a1c3-2e5f6a7b8c9d"
         database._conversation_id_by_client_chat_id[(self.user_id, cid)] = self.real_id
@@ -216,13 +217,7 @@ class TestResolveConversationId(unittest.TestCase):
         # exists-and-not-deleted check returns nothing (row soft-deleted)
         (conversations.select.return_value.eq.return_value.eq.return_value
             .is_.return_value.execute.return_value) = MagicMock(data=[])
-        conversations.insert.return_value.execute.return_value = MagicMock(
-            data=[{"id": 99, "created_at": "t", "updated_at": "t"}]
-        )
         messages = MagicMock()
-        messages.insert.return_value.execute.return_value = MagicMock(
-            data=[{"id": 78, "timestamp": "2026-11-01T00:00:00Z", "conversation_id": 99}]
-        )
         mock_supabase.table.side_effect = lambda name: conversations if name == "conversations" else messages
 
         result = save_message_to_db(
@@ -230,8 +225,9 @@ class TestResolveConversationId(unittest.TestCase):
             client_chat_id=cid, client_timestamp="2026-11-01T00:00:00Z",
         )
 
-        self.assertEqual(result[0], 99)
-        conversations.insert.assert_called_once()
+        self.assertIsNone(result)
+        conversations.insert.assert_not_called()
+        messages.insert.assert_not_called()
         self.assertNotIn((self.user_id, cid), database._conversation_id_by_client_chat_id)
         self.assertNotIn(self.real_id, database._client_chat_id_by_conversation_id)
         clear_id_cache()

@@ -100,6 +100,23 @@ class TestConversationsRest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.json()["count"], 1000)
         self.assertEqual(query.range.call_count, 2)
 
+    @patch("app.supabase")
+    async def test_get_conversations_emits_legacy_optimistic_chat_id(self, mock_supabase):
+        """LEGACY: remove in Task 8. Old app sync matches local chats via optimistic_chat_id."""
+        page = MagicMock()
+        page.data = [_row(1, "-77"), _row(2, UUID_REF)]
+        ordered = (mock_supabase.table.return_value.select.return_value
+                   .eq.return_value.order.return_value.order.return_value)
+        ordered.is_.return_value.range.return_value.execute.return_value = page
+        ordered.gte.return_value.range.return_value.execute.return_value = page
+
+        for url in ("/conversations", "/conversations?since=2026-11-01T00:00:00Z"):
+            resp = await self.client.get(url)
+            rows = {r["id"]: r for r in resp.json()["conversations"]}
+            self.assertEqual(rows[1]["optimistic_chat_id"], "-77", url)
+            self.assertIsNone(rows[2]["optimistic_chat_id"], url)
+        self.assertEqual(ordered.gte.return_value.range.call_count, 1)  # incremental path ran
+
     async def test_get_conversations_real_builder_sends_single_offset_and_limit(self):
         """A real postgrest builder mutates params in .range(); reusing one builder
         across pages would send duplicate offset/limit params."""

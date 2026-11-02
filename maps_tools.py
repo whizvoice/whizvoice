@@ -8,6 +8,8 @@ import uuid
 import asyncio
 from typing import Optional, Dict, Any
 
+from tool_payload_ids import tool_payload_chat_ids
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,8 @@ async def agent_search_google_maps_location(address_keyword: str, user_id: str =
             "params": {
                 "address": address_keyword
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -144,7 +147,8 @@ async def agent_search_google_maps_phrase(search_phrase: str, user_id: str = Non
             "params": {
                 "search_phrase": search_phrase
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -232,7 +236,8 @@ async def agent_recenter_google_maps(user_id: str = None, websocket = None,
             "tool": "agent_recenter_google_maps",
             "request_id": tool_request_id,
             "params": {},
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -334,7 +339,8 @@ async def agent_select_location_from_list(position: Optional[int] = None, fragme
             "tool": "agent_select_location_from_list",
             "request_id": tool_request_id,
             "params": params,
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -422,7 +428,8 @@ async def agent_fullscreen_google_maps(user_id: str = None, websocket = None,
             "tool": "agent_fullscreen_google_maps",
             "request_id": tool_request_id,
             "params": {},
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -535,7 +542,8 @@ async def agent_get_google_maps_directions(mode: Optional[str] = None,
             "tool": "agent_get_google_maps_directions",
             "request_id": tool_request_id,
             "params": params,
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket

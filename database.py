@@ -354,7 +354,8 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             conversation_id = conversation_id_for(client_chat_id, user_id)
             if conversation_id is not None:
                 # The id may come from the cache; confirm the row still exists and is not
-                # soft-deleted, otherwise drop the stale entry and create a new conversation.
+                # soft-deleted. A deleted chat is not resurrected: the unique (user_id, client_chat_id)
+                # index covers soft-deleted rows, so no new row can take its client_chat_id.
                 stale_check = supabase.table("conversations")\
                     .select("id")\
                     .eq("id", conversation_id)\
@@ -365,9 +366,9 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                     validated = True
                     logger.info(f"Found existing conversation {conversation_id} for client_chat_id {client_chat_id}")
                 else:
-                    logger.info(f"Cached conversation {conversation_id} for client_chat_id {client_chat_id} is deleted/missing, will create new one")
+                    logger.warning(f"Conversation {conversation_id} for client_chat_id {client_chat_id} is deleted; not saving {message_sender} message (deleted chats are not resurrected)")
                     invalidate_conversation_cache(conversation_id)
-                    conversation_id = None
+                    return None
             else:
                 logger.info(f"No existing conversation found for client_chat_id {client_chat_id}, will create new one")
 

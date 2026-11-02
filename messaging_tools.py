@@ -8,6 +8,8 @@ import uuid
 import asyncio
 from typing import Optional, Dict, Any
 
+from tool_payload_ids import tool_payload_chat_ids
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,8 @@ async def agent_whatsapp_select_chat(chat_name: str, user_id: str = None, websoc
             "params": {
                 "chat_name": chat_name
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -155,7 +158,8 @@ async def agent_whatsapp_draft_message(message: str, chat_name: str, user_id: st
             "tool": "agent_whatsapp_draft_message",
             "request_id": tool_request_id,
             "params": params,
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -249,7 +253,8 @@ async def agent_whatsapp_send_message(message: str, user_id: str = None, websock
             "params": {
                 "message": message
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -342,7 +347,8 @@ async def agent_sms_select_chat(contact_name: str, user_id: str = None, websocke
             "params": {
                 "contact_name": contact_name
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -444,7 +450,8 @@ async def agent_sms_draft_message(message: str, contact_name: str, user_id: str 
             "tool": "agent_sms_draft_message",
             "request_id": tool_request_id,
             "params": params,
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -537,7 +544,8 @@ async def agent_sms_send_message(message: str, user_id: str = None, websocket = 
             "params": {
                 "message": message
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -614,7 +622,8 @@ async def agent_dismiss_draft(user_id: str = None, websocket = None,
                 "tool": "agent_dismiss_draft",
                 "request_id": tool_request_id,
                 "params": {},
-                "conversation_id": conversation_id
+                "conversation_id": conversation_id,
+                **tool_payload_chat_ids(conversation_id),
             }
 
             if tool_result_handler:

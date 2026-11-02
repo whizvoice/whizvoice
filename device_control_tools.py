@@ -10,6 +10,8 @@ import json
 import uuid
 from typing import Optional
 
+from tool_payload_ids import tool_payload_chat_ids
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +35,8 @@ async def _send_device_tool(tool_name: str, params: dict, user_id: str = None,
         "tool": tool_name,
         "request_id": tool_request_id,
         "params": params,
-        "conversation_id": conversation_id
+        "conversation_id": conversation_id,
+        **tool_payload_chat_ids(conversation_id),
     }
 
     try:
