@@ -145,7 +145,8 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         # Verify cleanup WAS called since resources_allocated should be True
         # (Session activity was updated before the failure)
         mock_remove_timestamp.assert_called_once()
-        mock_clear_session.assert_called_once()
+        # The chat context is shared across sockets on the chat, so it is never cleared here
+        mock_clear_session.assert_not_called()
         mock_unsubscribe.assert_called_once()
         mock_remove_user_session.assert_called_once()
         

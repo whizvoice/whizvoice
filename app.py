@@ -3145,8 +3145,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Clean up session timestamp if it was set
                     await remove_session_timestamp(origin_session_id)
 
-                    # Clean up chat messages if they were loaded
-                    await clear_chat_session(session_id)
+                    # The chat context (session_id) is shared with other sockets on the chat and
+                    # expires by TTL (cleanup_session never owned it), so it is not cleared here.
 
                     # Clean up any Redis subscriptions
                     await unsubscribe_from_conversation(origin_session_id)
@@ -3178,8 +3178,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Clean up session timestamp if it was set
                     await remove_session_timestamp(origin_session_id)
 
-                    # Clean up chat messages if they were loaded
-                    await clear_chat_session(session_id)
+                    # The chat context (session_id) is shared with other sockets on the chat and
+                    # expires by TTL (cleanup_session never owned it), so it is not cleared here.
 
                     # Clean up any Redis subscriptions
                     await unsubscribe_from_conversation(origin_session_id)
@@ -3259,10 +3259,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                             raise MissingTimestampError(error_msg)
 
-                        # A connection opened without naming a chat binds on its first message: to the
-                        # chat that message names, or to the connection's own (minted) chat id if it
-                        # names none, since that is the chat the message will be saved under.
-                        if not connection_bound:
+                        # A connection opened without naming a chat binds on the first frame that names
+                        # one, or on its first user message (to the connection's own minted chat id,
+                        # which that message is saved under). Other frames (cancel, tool_result, ...)
+                        # without a client_chat_id leave the connection unbound.
+                        if not connection_bound and (client_chat_id is not None or message_type == "message"):
                             connection_bound = True
                             if client_chat_id is not None and client_chat_id != connection_chat_id:
                                 connection_chat_id = client_chat_id

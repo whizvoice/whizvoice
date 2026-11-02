@@ -66,6 +66,8 @@ class EndpointHarness(unittest.IsolatedAsyncioTestCase):
         local = MagicMock()
         local.add_task = AsyncMock()
         local.remove_task = AsyncMock()
+        local.get_and_cancel_task = AsyncMock(return_value=None)
+        local.unregister_conversation_websocket = AsyncMock()
         active = MagicMock()
         active.add = AsyncMock()
         active.remove = AsyncMock()
@@ -150,6 +152,47 @@ class TestNoRefBinding(EndpointHarness):
         await self.run_endpoint(FakeWebSocket())
         self.register.assert_not_awaited()
         self.subscribe.assert_not_awaited()
+
+    async def test_non_message_first_frame_without_chat_id_does_not_bind(self):
+        cancel = json.dumps({"type": "cancel", "cancel_request_id": "req-0",
+                             "timestamp": "2026-11-01T00:00:00.000Z"})
+        ws = FakeWebSocket(inbound=[cancel, user_message(CHAT_A)])
+        await self.run_endpoint(ws)
+
+        # The cancel frame left the socket unbound; the message for CHAT_A bound it there
+        self.register.assert_awaited_once()
+        origin, chat_id, _ = self.register.await_args.args
+        self.assertEqual(chat_id, CHAT_A)
+        self.subscribe.assert_awaited_once_with(origin, CHAT_A, ws)
+        kwargs = self.process.await_args.kwargs
+        self.assertEqual(kwargs["client_chat_id"], CHAT_A)
+        self.assertEqual(kwargs["session_id"], f"ws_{USER}_conv_{CHAT_A}")
+
+
+class TestConnectFailureKeepsSharedContext(EndpointHarness):
+    async def test_connect_error_after_context_load_does_not_clear_chat_context(self):
+        chat_session = f"ws_{USER}_conv_{CHAT_A}"
+        store = {chat_session: ["sibling socket's context"]}
+
+        async def fake_set(session_id, messages):
+            store[session_id] = list(messages) or store.get(session_id, [])
+
+        async def fake_clear(session_id):
+            store.pop(session_id, None)
+
+        self.set_chat_messages.side_effect = fake_set
+        self.register.side_effect = RuntimeError("boom after set_chat_messages")
+        ws = FakeWebSocket({"client_chat_id": CHAT_A})
+        with patch("app.clear_chat_session", new=AsyncMock(side_effect=fake_clear)) as clear, \
+             patch("app.remove_session_timestamp", new=AsyncMock()), \
+             patch("app.unsubscribe_from_conversation", new=AsyncMock()), \
+             patch("app.remove_user_session", new=AsyncMock()):
+            await self.run_endpoint(ws)
+
+        self.set_chat_messages.assert_awaited_once()
+        clear.assert_not_awaited()
+        self.assertEqual(store[chat_session], ["sibling socket's context"])
+        self.assertEqual(json.loads(ws.send_text.await_args.args[0])["code"], "AUTH_GENERAL_ERROR")
 
 
 class TestPerMessageRouting(EndpointHarness):

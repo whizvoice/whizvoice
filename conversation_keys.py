@@ -7,7 +7,9 @@ Build these keys only through these helpers.
 
 
 def session_id(user_id: str, client_chat_id: str) -> str:
-    """Chat session id (Redis context, timestamps, active requests, socket registration)."""
+    """Chat session id: the chat's Redis context and its active requests, shared by every
+    socket on the chat. Per-socket state (registration, pubsub, activity timestamp,
+    exclude_session) uses connection_session_id instead."""
     return f"ws_{user_id}_conv_{client_chat_id}"
 
 
