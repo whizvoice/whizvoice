@@ -254,6 +254,19 @@ def parse_client_chat_id(message_data: dict) -> Optional[str]:
     return str(legacy) if legacy is not None else None
 
 
+def legacy_client_conversation_id(client_chat_id: Optional[str]) -> Optional[int]:
+    """Legacy `client_conversation_id` (int) for old Android clients, or None if not numeric.
+
+    Outbound payloads emit this alongside `client_chat_id`; removed in a later task (Task 8).
+    """
+    if client_chat_id is None:
+        return None
+    try:
+        return int(client_chat_id)
+    except (ValueError, TypeError):
+        return None
+
+
 def _numeric_chat_key(client_chat_id: Optional[str], resolved_id: Optional[int]) -> Optional[int]:
     """Integer used to derive session ids / Redis channels (Task 5 rekeys these).
 
@@ -5204,6 +5217,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         conv = conversation_id if conversation_id is not None else session_conversation_id
         return client_chat_id_for(conv) if conv is not None and conv > 0 else None
 
+    def legacy_conv_id(conversation_id=None):
+        """Legacy int `client_conversation_id` for old clients (numeric client_chat_id only)."""
+        return legacy_client_conversation_id(outbound_chat_id(conversation_id))
+
     # Helper function to safely send to WebSocket
     async def safe_websocket_send(payload):
         """Send payload to WebSocket, handling disconnection gracefully"""
@@ -5291,7 +5308,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "code": "DATABASE_ERROR",
                 "message": "Failed to save message to database",
                 "request_id": request_id,
-                "client_chat_id": outbound_chat_id()
+                "client_chat_id": outbound_chat_id(),
+                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
@@ -5347,7 +5365,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         "message": "Conversation mapping conflict detected. Please refresh the page.",
                         "request_id": request_id,
                         "conversation_id": real_conversation_id,
-                        "client_chat_id": outbound_chat_id(real_conversation_id)
+                        "client_chat_id": outbound_chat_id(real_conversation_id),
+                        "client_conversation_id": legacy_conv_id(real_conversation_id)  # legacy; removed in a later task
                     }
                     await safe_websocket_send(error_payload)
 
@@ -5598,7 +5617,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": "Claude API key is not set. Please configure it in settings.",
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,  # Include conversation_id for client sync
-                "client_chat_id": outbound_chat_id()
+                "client_chat_id": outbound_chat_id(),
+                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
             }
             await safe_websocket_send(error_payload_key)
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
@@ -5705,7 +5725,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": "Claude API request timed out. Please try again.",
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
-                "client_chat_id": outbound_chat_id()
+                "client_chat_id": outbound_chat_id(),
+                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
@@ -5725,7 +5746,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
-                "client_chat_id": outbound_chat_id()
+                "client_chat_id": outbound_chat_id(),
+                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
             }
             
             # Save error as ASSISTANT message to database (persists even if WebSocket fails)
@@ -5797,7 +5819,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_chat_id": outbound_chat_id(),
+                    "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
                     "client_message_id": client_message_id
                 }
 
@@ -5856,7 +5878,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_chat_id": outbound_chat_id(),
+                    "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
                     "client_message_id": client_message_id
                 }
 
@@ -5903,7 +5925,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": error_message,
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
-                "client_chat_id": outbound_chat_id(),
+                "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
                 "client_message_id": client_message_id
             }
 
@@ -5988,7 +6010,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": "ServerError",
                     "detail": "Tool use indicated but no tool found.",
                     "request_id": request_id,
-                    "client_chat_id": outbound_chat_id()
+                    "client_chat_id": outbound_chat_id(),
+                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
                 }
                 await safe_websocket_send(error_payload)
                 return
@@ -6319,6 +6342,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         logger.info(f"Tool {tb.name} resulted in Asana auth error. Sending directly to client.")
                         result["request_id"] = request_id
                         result["client_chat_id"] = outbound_chat_id()
+                        result["client_conversation_id"] = legacy_conv_id()  # legacy; removed in a later task
                         await safe_websocket_send(result)
                         asana_auth_error = result
 
@@ -6402,7 +6426,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_chat_id": outbound_chat_id()
+                    "client_chat_id": outbound_chat_id(),
+                    "client_conversation_id": legacy_conv_id()  # legacy; removed in a later task
                 }
                 
                 # Save error as ASSISTANT message to database (persists even if WebSocket fails)
@@ -6451,7 +6476,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         "message": error_message,
                         "request_id": request_id,
                         "conversation_id": session_conversation_id,
-                        "client_chat_id": outbound_chat_id(),
+                        "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
                         "client_message_id": client_message_id
                     }
 
@@ -6772,7 +6797,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "response": assistant_response_text,
                     "request_id": request_id,
                     "conversation_id": saved_conversation_id,  # Include real conversation_id for client sync (resolved from optimistic if needed)
-                    "client_chat_id": outbound_chat_id(saved_conversation_id),  # Echo back the client's chat id
+                    "client_chat_id": outbound_chat_id(saved_conversation_id), "client_conversation_id": legacy_conv_id(saved_conversation_id),  # Echo back the client's chat id; legacy field removed in a later task
                     "client_message_id": client_message_id,  # Echo back optimistic message ID
                     "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "response"  # Indicate this is a direct response (vs broadcast)
@@ -6789,7 +6814,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "response": assistant_response_text,
                     "request_id": request_id,  # Include request_id so clients can track the message
                     "conversation_id": processing_conversation_id,  # Send the real conversation ID
-                    "client_chat_id": outbound_chat_id(processing_conversation_id),  # Include for client validation
+                    "client_chat_id": outbound_chat_id(processing_conversation_id), "client_conversation_id": legacy_conv_id(processing_conversation_id),  # Include for client validation; legacy field removed in a later task
                     "client_message_id": client_message_id,  # Include for completeness
                     "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "broadcast"  # Keep type to indicate it's a broadcast
@@ -6869,7 +6894,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             "message": error_message,
             "request_id": request_id,
             "conversation_id": session_conversation_id,
-            "client_chat_id": outbound_chat_id(),
+            "client_chat_id": outbound_chat_id(), "client_conversation_id": legacy_conv_id(),  # legacy; removed in a later task
             "client_message_id": client_message_id
         }
 
