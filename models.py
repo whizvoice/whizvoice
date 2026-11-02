@@ -83,6 +83,7 @@ class ConversationCreate(BaseModel):
     title: str
     source: str = "app"
     google_session_id: Optional[str] = None
+    client_chat_id: Optional[str] = None
 
 
 class ConversationUpdate(BaseModel):
@@ -98,6 +99,7 @@ class ConversationResponse(BaseModel):
     source: str
     google_session_id: Optional[str] = None
     deleted_at: Optional[str] = None
+    client_chat_id: str
 
 
 class MessageCreate(BaseModel):
