@@ -7,7 +7,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from postgrest.exceptions import APIError
 
+import database
 from database import (
+    invalidate_conversation_cache,
     resolve_conversation_id,
     client_chat_id_for,
     clear_id_cache,
@@ -201,6 +203,75 @@ class TestResolveConversationId(unittest.TestCase):
 
         self.assertEqual(result[0], self.real_id)
         self.assertEqual(result[1], 77)
+
+    @patch("database.supabase")
+    def test_stale_cache_entry_after_soft_delete_creates_new_conversation(self, mock_supabase):
+        """Cached id whose row is now soft-deleted: drop entry and create a new conversation."""
+        clear_id_cache()
+        cid = "7f3a1c52-9d4e-4b8a-a1c3-2e5f6a7b8c9d"
+        database._conversation_id_by_client_chat_id[(self.user_id, cid)] = self.real_id
+        database._client_chat_id_by_conversation_id[self.real_id] = cid
+
+        conversations = MagicMock()
+        # exists-and-not-deleted check returns nothing (row soft-deleted)
+        (conversations.select.return_value.eq.return_value.eq.return_value
+            .is_.return_value.execute.return_value) = MagicMock(data=[])
+        conversations.insert.return_value.execute.return_value = MagicMock(
+            data=[{"id": 99, "created_at": "t", "updated_at": "t"}]
+        )
+        messages = MagicMock()
+        messages.insert.return_value.execute.return_value = MagicMock(
+            data=[{"id": 78, "timestamp": "2026-11-01T00:00:00Z", "conversation_id": 99}]
+        )
+        mock_supabase.table.side_effect = lambda name: conversations if name == "conversations" else messages
+
+        result = save_message_to_db(
+            self.user_id, None, "hello", "USER",
+            client_chat_id=cid, client_timestamp="2026-11-01T00:00:00Z",
+        )
+
+        self.assertEqual(result[0], 99)
+        conversations.insert.assert_called_once()
+        self.assertNotIn((self.user_id, cid), database._conversation_id_by_client_chat_id)
+        self.assertNotIn(self.real_id, database._client_chat_id_by_conversation_id)
+        clear_id_cache()
+
+    def test_invalidate_conversation_cache_drops_both_entries(self):
+        clear_id_cache()
+        database._conversation_id_by_client_chat_id[(self.user_id, "x")] = 5
+        database._client_chat_id_by_conversation_id[5] = "x"
+        invalidate_conversation_cache(5)
+        self.assertEqual(database._conversation_id_by_client_chat_id, {})
+        self.assertEqual(database._client_chat_id_by_conversation_id, {})
+
+    @patch("database.supabase")
+    def test_client_conversation_id_alias_matches_client_chat_id(self, mock_supabase):
+        """Deprecated client_conversation_id=-5 behaves exactly like client_chat_id="-5"."""
+        def run(**kwargs):
+            clear_id_cache()
+            conversations = MagicMock()
+            lookup = conversations.select.return_value.eq.return_value.eq.return_value.is_.return_value
+            lookup.execute.return_value = MagicMock(data=[])
+            conversations.insert.return_value.execute.return_value = MagicMock(
+                data=[{"id": 99, "created_at": "t", "updated_at": "t"}]
+            )
+            messages = MagicMock()
+            messages.insert.return_value.execute.return_value = MagicMock(
+                data=[{"id": 78, "timestamp": "2026-11-01T00:00:00Z", "conversation_id": 99}]
+            )
+            mock_supabase.table.side_effect = lambda name: conversations if name == "conversations" else messages
+            result = save_message_to_db(
+                self.user_id, None, "hello", "USER",
+                client_timestamp="2026-11-01T00:00:00Z", **kwargs
+            )
+            return result, conversations.insert.call_args
+
+        alias_result, alias_insert = run(client_conversation_id=-5)
+        new_result, new_insert = run(client_chat_id="-5")
+
+        self.assertEqual(alias_result, new_result)
+        self.assertEqual(alias_insert, new_insert)
+        self.assertEqual(alias_insert.args[0]["client_chat_id"], "-5")
 
 
 if __name__ == "__main__":

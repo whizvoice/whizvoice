@@ -143,6 +143,14 @@ def clear_id_cache() -> None:
     _conversation_id_by_client_chat_id.clear()
 
 
+def invalidate_conversation_cache(conversation_id: int) -> None:
+    """Drop a conversation from both id caches (e.g. after soft-delete / stale hit)."""
+    client_chat_id = _client_chat_id_by_conversation_id.pop(conversation_id, None)
+    for key in [k for k, v in _conversation_id_by_client_chat_id.items()
+                if v == conversation_id or (client_chat_id is not None and k[1] == client_chat_id)]:
+        _conversation_id_by_client_chat_id.pop(key, None)
+
+
 def _lookup_by_client_chat_id(client_chat_id: str, user_id: str) -> Optional[int]:
     """Query (uncached) the live conversation id for (user_id, client_chat_id)."""
     result = supabase.table("conversations")\
@@ -305,7 +313,7 @@ def _bump_timestamp_1ms(raw_timestamp: str) -> str:
     return bumped.isoformat().replace('+00:00', 'Z')
 
 
-def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_chat_id: Optional[str] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None) -> Optional[Tuple[int, int, List[int], str]]:
+def save_message_to_db(user_id: str, conversation_id: Optional[int], content: str, message_sender: str, request_id: Optional[str] = None, client_chat_id: Optional[str] = None, client_timestamp: Optional[str] = None, content_type: str = "text", tool_content: Optional[dict] = None, mark_cancelled: bool = False, local_objects=None, client_conversation_id: Optional[int] = None) -> Optional[Tuple[int, int, List[int], str]]:
     """Save a message to the database and return (conversation_id, message_id, cancelled_message_ids, timestamp)
 
     Args:
@@ -321,13 +329,17 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
         tool_content: Optional JSONB content for tool-related messages
         mark_cancelled: If True, mark the message as cancelled (for error messages from cancelled requests)
         local_objects: Unused (kept for caller compatibility); ID mappings are cached in this module
+        client_conversation_id: Deprecated alias for client_chat_id (str() of it is used); removed in a later task
 
     Returns:
         Tuple of (conversation_id, message_id, cancelled_message_ids) where cancelled_message_ids
         is a list of message IDs that were marked for cancellation (caller should broadcast deletions)
     """
     try:
-        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_chat_id={client_chat_id},content='{content[:50] if content else '(empty)'}...'")
+        if client_chat_id is None and client_conversation_id is not None:
+            client_chat_id = str(client_conversation_id)
+
+        logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_chat_id={client_chat_id}, content='{content[:50] if content else '(empty)'}...'")
 
         # A legacy negative conversation_id is a client ref: treat it as the client_chat_id
         # (its str() form) when none was given, then resolve to the real id if it exists.
@@ -337,10 +349,25 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
             conversation_id = None
 
         # If no conversation_id provided, look up an existing conversation by client_chat_id
+        validated = False
         if conversation_id is None and client_chat_id is not None:
             conversation_id = conversation_id_for(client_chat_id, user_id)
             if conversation_id is not None:
-                logger.info(f"Found existing conversation {conversation_id} for client_chat_id {client_chat_id}")
+                # The id may come from the cache; confirm the row still exists and is not
+                # soft-deleted, otherwise drop the stale entry and create a new conversation.
+                stale_check = supabase.table("conversations")\
+                    .select("id")\
+                    .eq("id", conversation_id)\
+                    .eq("user_id", user_id)\
+                    .is_("deleted_at", "null")\
+                    .execute()
+                if stale_check.data:
+                    validated = True
+                    logger.info(f"Found existing conversation {conversation_id} for client_chat_id {client_chat_id}")
+                else:
+                    logger.info(f"Cached conversation {conversation_id} for client_chat_id {client_chat_id} is deleted/missing, will create new one")
+                    invalidate_conversation_cache(conversation_id)
+                    conversation_id = None
             else:
                 logger.info(f"No existing conversation found for client_chat_id {client_chat_id}, will create new one")
 
@@ -381,7 +408,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
                 created_at = conv_result.data[0]["created_at"]
                 updated_at = conv_result.data[0]["updated_at"]
                 logger.warning(f"Created NEW conversation {conversation_id} for user {user_id} at {created_at} (updated_at: {updated_at})")
-        else:
+        elif not validated:
             # Verify the conversation exists and is not soft-deleted
             logger.debug(f"Validating conversation {conversation_id} for user {user_id}")
             conv_check = supabase.table("conversations")\
