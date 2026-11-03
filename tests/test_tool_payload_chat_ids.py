@@ -21,8 +21,8 @@ CHAT = "7f3a0c2e-1b4d-4c55-9a77-0d1e2f3a4b5c"
 
 
 class TestChatIdsForConversation(unittest.TestCase):
-    def test_negative_id_has_no_client_chat_id(self):
-        self.assertEqual(tool_payload_ids.chat_ids_for_conversation(-77), {"client_chat_id": None})
+    def test_chat_without_row_has_no_client_chat_id(self):
+        self.assertEqual(tool_payload_ids.chat_ids_for_conversation(None), {"client_chat_id": None})
 
     def test_positive_id_looks_up_rows_client_chat_id(self):
         with patch("database.client_chat_id_for", return_value=CHAT) as lookup:
@@ -58,8 +58,8 @@ class TestToolModulesPayloads(unittest.IsolatedAsyncioTestCase):
         return frame
 
     async def assert_carries_ids(self, call):
-        frame = await self.sent_frame(call, -77)
-        self.assertEqual(frame["conversation_id"], -77)
+        frame = await self.sent_frame(call, None)
+        self.assertIsNone(frame["conversation_id"])
         self.assertIsNone(frame["client_chat_id"])
         self.assertNotIn("client_conversation_id", frame)
 

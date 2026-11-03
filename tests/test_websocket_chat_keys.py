@@ -134,6 +134,20 @@ class TestNoRefBinding(EndpointHarness):
         self.assertIsNone(kwargs["session_conversation_id"])
         self.assertEqual(kwargs["origin_session_id"], origin)
 
+    async def test_negative_number_string_is_an_ordinary_chat_id(self):
+        # Rows migrated from the old app hold their negative number as client_chat_id text;
+        # the new app sends it back as a plain string and nothing special-cases it.
+        ws = FakeWebSocket(inbound=[user_message("-5")])
+        await self.run_endpoint(ws)
+
+        origin, chat_id, _ = self.register.await_args.args
+        self.assertEqual(chat_id, "-5")
+        self.subscribe.assert_awaited_once_with(origin, "-5", ws)
+        kwargs = self.process.await_args.kwargs
+        self.assertEqual(kwargs["session_id"], f"ws_{USER}_conv_-5")
+        self.assertEqual(kwargs["client_chat_id"], "-5")
+        self.assertIsNone(kwargs["session_conversation_id"])
+
     async def test_binds_to_minted_chat_when_first_message_names_none(self):
         ws = FakeWebSocket(inbound=[user_message(None)])
         await self.run_endpoint(ws)

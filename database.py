@@ -318,7 +318,7 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
 
     Args:
         user_id: User ID
-        conversation_id: Conversation ID (can be a legacy negative client id)
+        conversation_id: Conversation row id, or None for a chat that has no row yet
         content: Text content of the message
         message_sender: 'USER' or 'ASSISTANT' (renamed from message_type)
         request_id: Optional request ID for tracking
@@ -336,13 +336,6 @@ def save_message_to_db(user_id: str, conversation_id: Optional[int], content: st
     """
     try:
         logger.info(f"save_message_to_db called: user_id={user_id}, conversation_id={conversation_id}, message_sender={message_sender}, content_type={content_type}, client_chat_id={client_chat_id}, content='{content[:50] if content else '(empty)'}...'")
-
-        # A legacy negative conversation_id is a client ref: treat it as the client_chat_id
-        # (its str() form) when none was given, then resolve to the real id if it exists.
-        if conversation_id is not None and conversation_id < 0:
-            if client_chat_id is None:
-                client_chat_id = str(conversation_id)
-            conversation_id = None
 
         # If no conversation_id provided, look up an existing conversation by client_chat_id
         validated = False

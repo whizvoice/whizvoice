@@ -46,17 +46,6 @@ from redis_managers import ChatSessionManager, LocalObjectManager, create_manage
 UUID = "7f3a0c2e-1b4d-4c55-9a77-0d1e2f3a4b5c"
 
 
-class TestConversationIdForChat(unittest.TestCase):
-    @patch("app.conversation_id_for", return_value=19400)
-    def test_uuid_resolves_through_row(self, mock_lookup):
-        self.assertEqual(app_module.conversation_id_for_chat(UUID, "u"), 19400)
-        mock_lookup.assert_called_once_with(UUID, "u")
-
-    @patch("app.conversation_id_for", return_value=None)
-    def test_uuid_without_row_is_none(self, mock_lookup):
-        self.assertIsNone(app_module.conversation_id_for_chat(UUID, "u"))
-
-
 class TestMessageChatRoute(unittest.TestCase):
     def test_uuid_message_on_connection_bound_to_other_chat_gets_its_own_session(self):
         chat_id, session_id = app_module.message_chat_route("u", UUID, "-1793565083660")

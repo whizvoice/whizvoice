@@ -252,13 +252,6 @@ def parse_client_chat_id(message_data: dict) -> Optional[str]:
     return str(client_chat_id) if client_chat_id else None
 
 
-def conversation_id_for_chat(client_chat_id: str, user_id: str) -> Optional[int]:
-    """Integer conversation id a WebSocket message for this chat carries into processing:
-    the row's id, or None if the conversation has no row yet.
-    """
-    return conversation_id_for(client_chat_id, user_id)
-
-
 def message_chat_route(user_id: str, message_client_chat_id: Optional[str], connection_chat_id: str) -> Tuple[str, str]:
     """(client_chat_id, session_id) an inbound WebSocket message is processed under.
 
@@ -3062,9 +3055,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         if connection_chat_id is None:
                             # Every row has a client_chat_id (NOT NULL), so None means the lookup failed
                             raise RuntimeError(f"Could not read client_chat_id for conversation {actual_conversation_id}")
-                    elif connect_ref < 0:
-                        # Legacy negative client id with no row yet: it is the chat's client_chat_id
-                        connection_chat_id = str(connect_ref)
                     else:
                         logger.warning(f"conversation_id={connect_ref} not found for user {user_id}; starting a new chat session")
 
@@ -3241,7 +3231,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             if client_chat_id is not None and client_chat_id != connection_chat_id:
                                 connection_chat_id = client_chat_id
                                 session_id = conversation_keys.session_id(user_id, connection_chat_id)
-                                session_conversation_id = conversation_id_for_chat(connection_chat_id, user_id)
+                                session_conversation_id = conversation_id_for(connection_chat_id, user_id)
                             logger.info(f"Binding connection {origin_session_id} to client_chat_id={connection_chat_id} (conversation {session_conversation_id})")
                             # Register and subscribe so the WebSocket can receive broadcasts immediately
                             await register_websocket_for_conversation(origin_session_id, connection_chat_id, websocket)
@@ -3380,10 +3370,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         message_chat_id, message_session_id = message_chat_route(user_id, client_chat_id, connection_chat_id)
                         if message_chat_id == connection_chat_id:
                             if session_conversation_id is None:
-                                session_conversation_id = conversation_id_for_chat(message_chat_id, user_id)
+                                session_conversation_id = conversation_id_for(message_chat_id, user_id)
                             message_conversation_id = session_conversation_id
                         else:
-                            message_conversation_id = conversation_id_for_chat(message_chat_id, user_id)
+                            message_conversation_id = conversation_id_for(message_chat_id, user_id)
                         if message_session_id != session_id:
                             logger.info(f"Routing message to per-message session_id={message_session_id} based on client_chat_id={message_chat_id}")
 
