@@ -6457,6 +6457,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # If web search blocks are present, save them as tool_content for multi-turn context
         saved_conversation_id = session_conversation_id
         save_result = None
+        response_not_stored = False  # True when the reply had text but could not be saved (e.g. chat deleted mid-request)
         if assistant_response_text and not skip_duplicate_response:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
             local_objects = redis_managers.get("local_objects") if redis_managers else None
@@ -6492,7 +6493,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         session_id=session_id
                     )
             else:
-                logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
+                # Usually the chat was deleted while Claude was still replying (deleted chats are
+                # not resurrected). There is nothing to deliver, so skip the send/broadcast below.
+                response_not_stored = True
+                logger.warning(f"ASSISTANT message not saved for conversation_id={session_conversation_id}, request_id={request_id}; not delivering the reply")
         else:
             logger.info(f"No text content in Claude's response for request {request_id}, only tool calls. This is normal for tool-only responses.")
 
@@ -6537,7 +6541,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         except Exception as e:
             logger.error(f"Error checking for pending get_* tool: {e}")
 
-        if not request_cancelled and not should_skip_broadcast_for_pending_get and not skip_duplicate_response:
+        if not request_cancelled and not should_skip_broadcast_for_pending_get and not skip_duplicate_response and not response_not_stored:
             # Only send response if there's actual text content
             # Empty responses create blank message bubbles in the Android app
             if assistant_response_text and assistant_response_text.strip():
