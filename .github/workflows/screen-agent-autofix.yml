@@ -85,6 +85,24 @@ jobs:
           git config user.name "whizvoice-autofix[bot]"
           git config user.email "autofix@whizvoice.com"
 
+      # The verification test force-reinstalls a locally built debug APK over the
+      # app baked into the emulator snapshot. Without the same debug keystore the
+      # signature won't match (install fails / login state is lost), and without
+      # the OAuth client IDs Google Sign-In throws at the login screen before the
+      # screen agent is ever exercised. Mirrors whizvoiceapp's autofix-tests.yml.
+      - name: Setup debug keystore
+        run: |
+          mkdir -p ~/.android
+          echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | base64 -d > ~/.android/debug.keystore
+          echo "==> Debug keystore SHA-1:"
+          keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey 2>&1 | grep -i "sha1" || echo "    WARNING: keytool produced no SHA output"
+
+      - name: Setup local.properties with OAuth client IDs
+        run: |
+          cd whizvoiceapp
+          echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}" >> local.properties
+          echo "WEB_CLIENT_ID=${{ secrets.WEB_CLIENT_ID }}" >> local.properties
+
       - name: Download snapshot and pin emulator version
         env:
           SNAPSHOT_ENCRYPTION_KEY: ${{ secrets.SNAPSHOT_ENCRYPTION_KEY }}

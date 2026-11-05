@@ -153,6 +153,7 @@ def _person_to_contact(person):
 
     contact = {
         "display_name": display_name,
+        "resource_name": person.get("resourceName"),
         "phone_numbers": _label_dict(person.get("phoneNumbers")),
         "emails": _label_dict(person.get("emailAddresses")),
         "addresses": _label_dict(person.get("addresses"), value_key="formattedValue"),

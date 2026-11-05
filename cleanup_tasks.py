@@ -9,15 +9,12 @@ import traceback
 from typing import Optional
 
 from redis_helpers import (
-    get_chat_messages,
     get_user_sessions,
     remove_user_session,
     remove_session_timestamp,
-    clear_session_mappings,
     get_active_requests,
     get_stale_sessions,
     get_session_timestamp,
-    clear_chat_session,
     redis_managers
 )
 from tool_result_handler import tool_result_handler
@@ -69,10 +66,6 @@ async def cleanup_session(session_id: str, user_id: Optional[str] = None, conver
     from app import unsubscribe_from_conversation as app_unsubscribe
     await app_unsubscribe(session_id)
 
-    # Clean up session mappings
-    await clear_session_mappings(session_id)
-    logger.info(f"Cleaned up session mappings: {session_id}")
-
     # Clean up conversation websockets (check all conversations, not just the provided one)
     if redis_managers and "local_objects" in redis_managers:
         await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
@@ -107,12 +100,13 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
     if not current_sessions:
         return
 
-    # Check for dead sessions (sessions without chat history)
+    # Check for dead sessions. User sessions are per-connection ids (the chat history lives
+    # under the chat's own key), so a session is dead once cleanup_session removed its
+    # activity timestamp.
     dead_sessions = []
     for sess in current_sessions:
         if sess != new_session_id:
-            messages = await get_chat_messages(sess)
-            if not messages:
+            if await get_session_timestamp(sess) is None:
                 dead_sessions.append(sess)
 
     # Remove dead sessions
@@ -142,12 +136,10 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
             continue  # Don't evict the session we're trying to create
 
         # Skip sessions that are already cleaned up (disconnected)
-        messages = await get_chat_messages(sess_id)
-        if not messages:
+        last_activity = await get_session_timestamp(sess_id)
+        if last_activity is None:
             logger.debug(f"Skipping already-disconnected session {sess_id}")
             continue
-
-        last_activity = await get_session_timestamp(sess_id) or 0
 
         sessions_with_activity.append((sess_id, last_activity))
 
@@ -166,24 +158,10 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
         evicted_timestamp = await get_session_timestamp(eviction_candidate) or 0
         logger.info(f"Evicting session {eviction_candidate} (last active: {int(current_time - evicted_timestamp)} seconds ago)")
 
-        # Extract conversation_id from the evicted session if possible
-        evicted_conversation_id = None
-        parts = eviction_candidate.split('_')
-        if len(parts) >= 4 and parts[2] == 'conv':
-            try:
-                evicted_conversation_id = int(parts[3])
-            except ValueError:
-                pass
-
         # Find and notify the websocket for the evicted session
         ws_to_notify = None
         if redis_managers and "local_objects" in redis_managers:
-            if evicted_conversation_id:
-                connections = await redis_managers["local_objects"].get_conversation_websockets(evicted_conversation_id)
-                for sid, ws in connections:
-                    if sid == eviction_candidate:
-                        ws_to_notify = ws
-                        break
+            ws_to_notify = await redis_managers["local_objects"].get_session_websocket(eviction_candidate)
 
         if ws_to_notify:
             try:
@@ -198,8 +176,9 @@ async def evict_user_sessions_if_needed(user_id: str, new_session_id: str) -> No
                 logger.warning(f"Failed to notify evicted session: {e}")
 
         # Clean up the evicted session
-        await clear_chat_session(eviction_candidate)  # Clear Redis chat history
-        await cleanup_session(eviction_candidate, user_id, evicted_conversation_id)
+        # The chat history is keyed by client_chat_id and may be shared with other sockets on
+        # the chat, so only the connection's own state is cleaned up.
+        await cleanup_session(eviction_candidate, user_id)
 
 
 async def cleanup_abandoned_tool_executions():
@@ -233,23 +212,16 @@ async def cleanup_stale_sessions():
                 logger.info(f"Found {len(stale_sessions)} stale sessions to clean up")
 
                 for session_id in stale_sessions:
-                    # Extract user_id and conversation_id from session_id if possible
+                    # Extract user_id from session_id if possible
+                    # Session ID format: ws_{user_id}_conv_{client_chat_id} (see conversation_keys)
                     user_id = None
-                    conversation_id = None
-
-                    # Session ID format: ws_{user_id}_conv_{conversation_id} or ws_{user_id}_new_{timestamp}
                     parts = session_id.split('_')
                     if len(parts) >= 2:
                         user_id = parts[1]
-                    if len(parts) >= 4 and parts[2] == 'conv':
-                        try:
-                            conversation_id = int(parts[3])
-                        except ValueError:
-                            pass
 
                     stale_timestamp = await get_session_timestamp(session_id) or 0
                     logger.info(f"Cleaning up stale session: {session_id} (inactive for {int(current_time - stale_timestamp)} seconds)")
-                    await cleanup_session(session_id, user_id, conversation_id)
+                    await cleanup_session(session_id, user_id)
 
         except Exception as e:
             logger.error(f"Error during stale session cleanup: {str(e)}")

@@ -7,7 +7,7 @@ import asyncio
 # Add the parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import get_current_claude_api_key, get_anthropic_client, _anthropic_clients_cache
+from app import parse_client_chat_id, get_current_claude_api_key, get_anthropic_client, _anthropic_clients_cache
 
 class TestAppHelpers(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -184,6 +184,20 @@ class TestAppHelpers(unittest.IsolatedAsyncioTestCase):
         
         # Verify same client is returned
         self.assertEqual(result1, result2)
+
+class TestParseClientChatId(unittest.TestCase):
+    def test_client_chat_id_wins(self):
+        self.assertEqual(parse_client_chat_id({"client_chat_id": "x"}), "x")
+
+    def test_legacy_int_ignored(self):
+        self.assertIsNone(parse_client_chat_id({"client_conversation_id": -5}))
+
+    def test_legacy_string_ignored(self):
+        self.assertIsNone(parse_client_chat_id({"client_conversation_id": "-5"}))
+
+    def test_missing(self):
+        self.assertIsNone(parse_client_chat_id({}))
+
 
 if __name__ == '__main__':
     unittest.main() 

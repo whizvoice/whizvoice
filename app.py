@@ -5,9 +5,11 @@ from pydantic import BaseModel, ValidationError
 from typing import List, Optional, Dict, Any, Union, Set, Tuple
 import json
 import os
+import re
 import traceback
 import logging
 import time
+import uuid
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta, timezone
 import asyncio
@@ -19,9 +21,10 @@ from redis.asyncio.client import PubSub
 from anthropic import AsyncAnthropic, AuthenticationError, BadRequestError
 from asana_tools import asana_tools, get_asana_sections, get_asana_tasks, get_asana_workspaces, get_current_date, get_current_datetime, get_parent_tasks, get_new_asana_task_id, update_asana_task, delete_asana_task, clear_workspace_preference_cache, get_workspace_preference, get_parent_task_preference, set_parent_task_preference, init_redis_client, _CREATE_TASK_DESC_PARENT_REQUIRED
 import tool_dedupe
+import send_gate
 from about_me_tool import about_me_tools, get_app_info, get_user_data
 from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_log_health_data, agent_open_health_app_settings, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
-from device_control_tools import device_control_tools, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
+from device_control_tools import device_control_tools, RAGE_SHAKE_MODES, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
 from messaging_tools import messaging_tools, agent_whatsapp_select_chat, agent_whatsapp_send_message, agent_whatsapp_draft_message, agent_sms_select_chat, agent_sms_draft_message, agent_sms_send_message, agent_dismiss_draft
@@ -29,7 +32,8 @@ from music_tools import music_tools, agent_play_youtube_music, agent_queue_youtu
 from maps_tools import maps_tools, agent_search_google_maps_location, agent_search_google_maps_phrase, agent_get_google_maps_directions, agent_recenter_google_maps, agent_fullscreen_google_maps, agent_select_location_from_list
 from color_tools import color_tools, pick_random_color
 from location_tools import location_tools, save_location
-from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference, add_contact_nickname, remove_contact_nickname
+from contacts_tools import contacts_tools, add_contact_preference, get_contact_preference, list_contact_preferences, remove_contact_preference, add_contact_nickname, remove_contact_nickname, import_contact
+import contact_import
 from weather_tools import weather_tools, get_weather, set_temperature_units
 from tool_result_handler import tool_result_handler
 from preferences import set_preference, get_preference, ensure_user_and_prefs, get_decrypted_preference_key, set_encrypted_preference_key, CLAUDE_API_KEY_PREF_NAME, set_user_timezone
@@ -58,7 +62,12 @@ from database import (
     save_message_to_db,
     update_tool_result_in_db,
     resolve_conversation_id,
+    invalidate_conversation_cache,
+    client_chat_id_for,
+    conversation_id_for,
 )
+import conversation_keys
+import tool_payload_ids
 from cleanup_tasks import (
     cleanup_session,
     evict_user_sessions_if_needed,
@@ -80,7 +89,7 @@ except ImportError:
     STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
 from redis_helpers import (
     # Chat session functions
-    get_chat_messages, get_chat_messages_for_claude, add_chat_message, set_chat_messages, clear_chat_session, rename_chat_session, mark_chat_messages_cancelled, update_pending_result_timestamp, update_tool_results,
+    get_chat_messages, get_chat_messages_for_claude, add_chat_message, set_chat_messages, clear_chat_session, mark_chat_messages_cancelled, update_pending_result_timestamp, update_tool_results,
     # User session functions  
     get_user_sessions, add_user_session, remove_user_session, get_all_user_sessions,
     # Session timestamp functions
@@ -91,8 +100,6 @@ from redis_helpers import (
     add_active_request, remove_active_request, get_active_requests, clear_active_requests,
     # Request state tracking functions
     set_request_state, get_request_state, get_all_request_states,
-    # Session mapping functions
-    set_session_mapping, get_real_id, get_optimistic_id, clear_session_mappings,
     # Utility functions
     get_total_session_count, get_user_session_count,
     # Module initialization
@@ -111,30 +118,30 @@ set_stripe_config(STRIPE_SECRET_KEY, STRIPE_PRICE_ID)
 CLAUDE_SYSTEM_PROMPT = """You are Whiz Voice, a friendly AI chatbot that can help with anything. You have access to various tools that you MUST use when appropriate. Each tool's description explains when and how to use it — follow those. A couple of things the tool descriptions don't cover:
 
 - For music playback, we currently only support YouTube Music, not Spotify.
+- Apps without dedicated tools are still fully usable via agent_get_ui / agent_click / agent_insert_text, and agent_peek_app can read what's on screen in a backgrounded app.
 
 IMPORTANT: You MUST ACTUALLY USE the appropriate tools for all actions rather than just describing what you would do.
 
 You are a voice app. Please keep your responses BRIEF AND CONCISE so that they don't take too long to be read out loud. DO NOT comment or explain beyond the direct answer unless asked explicitly.
 
-User messages sent to you are transcribed from audio. If it doesn't make sense, the transcription was probably inaccurate. Take your best guess of what the user meant to say. But don't hallucinate names.
+User messages sent to you are transcribed from audio. If it doesn't make sense, the transcription was probably inaccurate. Take your best guess of what the user meant to say.
 
 The user may contradict themselves while thinking aloud. Remember: the most recent messages are the most true to their intent. 
 
 FORMATTING: You can use markdown formatting in your responses (e.g., **bold**, *italic*, `code`, code blocks with triple backticks, lists, etc.) to improve readability. The app will render markdown appropriately.
 
-DON'T DUPLICATE: You have access to the tool history and the success/failure of past tool calls. PLEASE CHECK THE HISTORY. Often multiple Asana tasks will be created as different versions of the same user intent, and YOU NEED TO PROACTIVELY DELETE THE OLD ONES.
-
 PENDING RESULT: When you've requested something with a tool use and it hasn't completed yet, the tool result will say "Result pending..." or may indicate a specific wait reason (e.g., "Waiting for user to unlock phone..."). These will be updated later with the real tool result.
 
-ACT FIRST CLARIFY LATER: Users are multitasking, and if you ask for clarification without executing, the user may not see it and what they wanted is dropped. For bug reports, message drafts, and to-do list items, you MUST ALWAYS attempt the action IMMEDIATELY with the appropriate tool, using your best guess to fill in anything ambiguous or missing — NEVER respond with only text, and NEVER wait for more details first. The result the user sees (the draft overlay, the created task, the filed report) IS the clarification step — they can review, and you can always adjust what you did later.
+ACT, DON'T ASK: Users are multitasking and won't see a clarifying question. Requests that aren't executed are dropped. When the user asks for an action, make a tool call towards what the user wants in that turn. Fill in anything ambiguous with your best guess, and don't skip it because you think it's already done — you only know device state from a tool result, and repeating an open, navigate, play, or draft is harmless. The user can always correct what you've done after they see it on the screen (e.g. the draft message overlay before you send).
 
-SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result.
-
-EXTRA NOTE ABOUT NAVIGATION: If you are about to close yourself but you used agent_get_google_maps_directions during the converation, please launch_app Google Maps before you close so the user can continue to navigate.
+SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result. Once a real result arrives, including a timeout or failure, retry the tool once before suggesting the user do it manually.
 """
 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools + screen_agent_tools + device_control_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
+# Every tool in tool_dedupe.GUARDS must accept confirm_duplicate, or the model
+# cannot act on the guard's "call again with confirm_duplicate=true" instruction.
+tool_dedupe.advertise_confirm_duplicate(tools)
 
 # Pre-build variant with parent-required description for get_new_asana_task_id
 tools_parent_required = []
@@ -161,7 +168,7 @@ async def startup_event():
     asyncio.create_task(cleanup_abandoned_tool_executions())
     logger.info("Started abandoned tool execution cleanup task")
     # Initialize screen agent queue with execute_tool function
-    screen_agent_queue.set_execute_tool_func(execute_tool)
+    screen_agent_queue.set_execute_tool_func(_execute_tool_observed)
     screen_agent_queue.set_redis_managers(redis_managers)
     logger.info("Initialized screen agent queue")
 
@@ -204,7 +211,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Claude BadRequest (400) classification -----------------------------------
+# Anthropic returns spend-limit exhaustion as a generic invalid_request_error;
+# the message text is the only distinguishing signal.
+_USAGE_LIMIT_PHRASE = "reached your specified API usage limits"
+_USAGE_LIMIT_RESET_RE = re.compile(r"regain access on (\d{4}-\d{2}-\d{2} at \d{2}:\d{2} UTC)")
+_GENERIC_BAD_REQUEST_MESSAGE = (
+    "I encountered an error processing your message. This might be due to a "
+    "technical issue with the conversation history. Please try starting a new conversation."
+)
+_HISTORY_ERROR_MESSAGE = (
+    "I'm sorry, but this conversation has encountered a technical issue with the "
+    "message history that prevents me from continuing. Please start a new conversation."
+)
+
+
+def classify_claude_bad_request(error_text: str) -> Tuple[str, str]:
+    """Map a Claude 400 error string to (error_code, user_facing_message)."""
+    lowered = error_text.lower()
+    if _USAGE_LIMIT_PHRASE.lower() in lowered:
+        message = "Your Claude API key has reached its monthly spending limit."
+        match = _USAGE_LIMIT_RESET_RE.search(error_text)
+        if match:
+            message += f" Access resumes {match.group(1)}."
+        message += " Raise the limit in the Anthropic Console or switch keys in Settings."
+        return "CLAUDE_USAGE_LIMIT", message
+    if "tool_use_id" in lowered:
+        return "CONVERSATION_HISTORY_ERROR", _HISTORY_ERROR_MESSAGE
+    return "CLAUDE_API_ERROR", _GENERIC_BAD_REQUEST_MESSAGE
+
+
 # Placeholder for the actual preference key name for Claude API key
+
+def parse_client_chat_id(message_data: dict) -> Optional[str]:
+    """Extract the client-minted chat id from an inbound WebSocket message.
+
+    Reads `client_chat_id` only.
+    """
+    client_chat_id = message_data.get("client_chat_id")
+    return str(client_chat_id) if client_chat_id else None
+
+
+def message_chat_route(user_id: str, message_client_chat_id: Optional[str], connection_chat_id: str) -> Tuple[str, str]:
+    """(client_chat_id, session_id) an inbound WebSocket message is processed under.
+
+    Always derived from the message's own client_chat_id, whatever chat the connection
+    is bound to; a message without one belongs to the connection's chat.
+    """
+    chat_id = message_client_chat_id or connection_chat_id
+    return chat_id, conversation_keys.session_id(user_id, chat_id)
+
 
 def get_current_claude_api_key(user_id: Optional[str]) -> Optional[str]:
     if not user_id:
@@ -543,9 +599,9 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
     if len(messages) == 0 and conversation_id:
         logger.warning(f"[CLAUDE_CONTEXT] Empty context for conversation {conversation_id}, attempting to reload from database")
         try:
-            # Resolve optimistic (negative) IDs to the real DB ID before querying the messages table.
-            # This handles races where session_conversation_id still holds the client's optimistic
-            # ID but the conversation has already been persisted under a positive id.
+            # Resolve legacy negative client ids to the real DB ID before querying the messages table.
+            # This handles a session_conversation_id that still holds the client's negative id
+            # after the conversation has been persisted under a positive id.
             resolved_conversation_id = resolve_conversation_id(conversation_id, user_id)
             if resolved_conversation_id is None:
                 logger.warning(
@@ -555,7 +611,7 @@ async def call_claude_api(client: AsyncAnthropic, session_id: str, stream: bool 
                 raise _SafetyNetSkip()
             if resolved_conversation_id != conversation_id:
                 logger.info(
-                    f"[CLAUDE_CONTEXT] Resolved optimistic conversation_id {conversation_id} "
+                    f"[CLAUDE_CONTEXT] Resolved client conversation_id {conversation_id} "
                     f"-> real id {resolved_conversation_id}"
                 )
             query = supabase.table("messages")\
@@ -818,50 +874,50 @@ redis_client: Optional[redis.Redis] = None
 redis_managers = None  # Will be initialized after Redis connection
 
 # Helper functions for managing pending tool execution counter
-async def increment_pending_tools(conversation_id: int):
+async def increment_pending_tools(client_chat_id: str):
     """Increment the pending tool counter for a conversation"""
     if redis_client:
-        key = f"conversation:{conversation_id}:pending_tools"
+        key = conversation_keys.pending_tools_key(client_chat_id)
         await redis_client.incr(key)
         await redis_client.expire(key, 60)  # Auto-cleanup after 60s
-        logger.debug(f"Incremented pending tools for conversation {conversation_id}")
+        logger.debug(f"Incremented pending tools for conversation {client_chat_id}")
 
-async def decrement_pending_tools(conversation_id: int):
+async def decrement_pending_tools(client_chat_id: str):
     """Decrement the pending tool counter for a conversation"""
     if redis_client:
-        key = f"conversation:{conversation_id}:pending_tools"
+        key = conversation_keys.pending_tools_key(client_chat_id)
         current = await redis_client.get(key)
         if current and int(current) > 0:
             await redis_client.decr(key)
-            logger.debug(f"Decremented pending tools for conversation {conversation_id}")
+            logger.debug(f"Decremented pending tools for conversation {client_chat_id}")
 
-async def get_pending_tools_count(conversation_id: int) -> int:
+async def get_pending_tools_count(client_chat_id: str) -> int:
     """Get the count of pending tool executions for a conversation"""
     if redis_client:
-        key = f"conversation:{conversation_id}:pending_tools"
+        key = conversation_keys.pending_tools_key(client_chat_id)
         count = await redis_client.get(key)
         return int(count) if count else 0
     return 0
 
-async def wait_for_pending_tools(conversation_id: int, timeout_seconds: float = 5.0) -> bool:
+async def wait_for_pending_tools(client_chat_id: str, timeout_seconds: float = 5.0) -> bool:
     """
     Wait for pending tool executions to complete.
     Returns True if all tools completed, False if timeout reached.
     """
-    if not conversation_id:
+    if not client_chat_id:
         return True
 
     start_time = time.time()
     max_attempts = int(timeout_seconds / 0.5)
 
     for attempt in range(max_attempts):
-        pending_count = await get_pending_tools_count(conversation_id)
+        pending_count = await get_pending_tools_count(client_chat_id)
         if pending_count == 0:
-            logger.info(f"All pending tools completed for conversation {conversation_id}")
+            logger.info(f"All pending tools completed for conversation {client_chat_id}")
             return True
 
         if time.time() - start_time >= timeout_seconds:
-            logger.warning(f"Timeout waiting for {pending_count} pending tools in conversation {conversation_id}")
+            logger.warning(f"Timeout waiting for {pending_count} pending tools in conversation {client_chat_id}")
             return False
 
         logger.debug(f"Waiting for {pending_count} pending tools (attempt {attempt + 1}/{max_attempts})")
@@ -918,6 +974,9 @@ async def init_redis():
         # Share Redis client with tool_dedupe. REQUIRED: uvicorn runs 4 workers,
         # so recent-call state must live in Redis to be visible across processes.
         tool_dedupe.init_redis_client(redis_client)
+        # Contact-import candidates/hints are per conversation and must also be
+        # visible across workers.
+        contact_import.init_redis_client(redis_client)
 
         # Initialize Redis managers for distributed session state
         redis_managers = create_managers(redis_client)
@@ -944,15 +1003,15 @@ async def init_redis():
         redis_managers = None
 
 
-async def subscribe_to_conversation(session_id: str, conversation_id: int, websocket: WebSocket):
+async def subscribe_to_conversation(session_id: str, client_chat_id: str, websocket: WebSocket):
     """Subscribe to Redis channel for a conversation"""
     if not redis_client:
         return
-    
+
     try:
         # Create a pubsub instance for this WebSocket
         pubsub = redis_client.pubsub()
-        channel_name = f"conversation:{conversation_id}"
+        channel_name = conversation_keys.channel(client_chat_id)
         
         # Subscribe to the conversation channel
         await pubsub.subscribe(channel_name)
@@ -972,7 +1031,7 @@ async def subscribe_to_conversation(session_id: str, conversation_id: int, webso
             logger.warning(f"Redis managers not available, listener task for {session_id} not tracked")
         
     except Exception as e:
-        logger.error(f"Failed to subscribe session {session_id} to conversation {conversation_id}: {str(e)}")
+        logger.error(f"Failed to subscribe session {session_id} to conversation {client_chat_id}: {str(e)}")
 
 
 async def unsubscribe_from_conversation(session_id: str):
@@ -991,50 +1050,6 @@ async def unsubscribe_from_conversation(session_id: str):
         logger.info(f"Session {session_id} unsubscribed from Redis channels")
     except Exception as e:
         logger.error(f"Error unsubscribing session {session_id}: {str(e)}")
-
-
-async def update_websocket_conversation(session_id: str, old_conversation_id: Optional[int], new_conversation_id: int, websocket: WebSocket):
-    """Safely update WebSocket conversation mapping and Redis subscriptions.
-    
-    This function ensures there's always an active listener during the transition
-    by creating the new subscription before destroying the old one.
-    """
-    if old_conversation_id == new_conversation_id:
-        return  # No change needed
-    
-    logger.info(f"Updating WebSocket conversation for session {session_id}: {old_conversation_id} → {new_conversation_id}")
-    
-    try:
-        # STEP 1: Subscribe to new Redis channel FIRST (before unsubscribing from old)
-        await subscribe_to_conversation(session_id, new_conversation_id, websocket)
-        
-        # STEP 2: Update the conversation_websockets mapping using LocalObjectManager
-        if redis_managers and "local_objects" in redis_managers:
-            # Pass the old conversation ID as optimistic if it's negative (optimistic)
-            optimistic_id = old_conversation_id if old_conversation_id and old_conversation_id < 0 else None
-            
-            # First unregister from old conversation
-            if old_conversation_id:
-                await redis_managers["local_objects"].unregister_conversation_websocket(session_id, old_conversation_id)
-            
-            # Then register with new conversation (with optimistic ID if migrating)
-            await redis_managers["local_objects"].register_conversation_websocket(
-                session_id, new_conversation_id, websocket, optimistic_id
-            )
-        
-        # STEP 3: NOW unsubscribe from old channel (after new one is active)
-        if old_conversation_id:
-            # Cancel the old listener task first
-            if redis_managers and "local_objects" in redis_managers:
-                await redis_managers["local_objects"].cancel_listener_task(session_id)
-            await unsubscribe_from_conversation(session_id)
-        
-        logger.info(f"Successfully updated WebSocket registration for session {session_id}")
-        
-    except Exception as e:
-        logger.error(f"Error updating WebSocket conversation for session {session_id}: {str(e)}")
-        # Don't close the WebSocket on error - let it continue with the original setup
-        raise
 
 
 async def redis_message_listener(session_id: str, pubsub: PubSub, websocket: WebSocket):
@@ -1694,12 +1709,16 @@ TOOL_REGISTRY = {
         "is_async": True,
         "needs_websocket": True,
         "args_mapping": lambda args, user_id, **kwargs: (
+            args.get('mode') or 'snooze',
             user_id,
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id')
         ),
-        "validation": None
+        "validation": lambda args: (
+            {"error": f"mode must be one of {list(RAGE_SHAKE_MODES)}."}
+            if (args.get('mode') or 'snooze') not in RAGE_SHAKE_MODES else None
+        )
     },
     "agent_submit_bug_report": {
         "function_name": "agent_submit_bug_report",
@@ -2178,9 +2197,30 @@ TOOL_REGISTRY = {
             kwargs.get('websocket'),
             kwargs.get('tool_result_handler'),
             kwargs.get('conversation_id'),
-            args.get('needed_fields')
+            args.get('needed_fields'),
+            kwargs.get('tracking_conversation_id'),
         ),
         "validation": lambda args: {"error": "name is required."} if not args.get('name') else None
+    },
+    "import_contact": {
+        "function_name": "import_contact",
+        "requires_auth": True,
+        "is_async": True,
+        "needs_websocket": True,
+        "args_mapping": lambda args, user_id, **kwargs: (
+            user_id,
+            args.get('candidate_id'),
+            args.get('preferred_app'),
+            args.get('nicknames'),
+            bool(args.get('never_ask_again')),
+            kwargs.get('tracking_conversation_id') or kwargs.get('conversation_id'),
+        ),
+        "validation": lambda args: (
+            {"error": "candidate_id is required."} if not args.get('candidate_id') else
+            {"error": "preferred_app must be 'whatsapp' or 'sms' unless never_ask_again is true."}
+            if not args.get('never_ask_again') and args.get('preferred_app') not in ['whatsapp', 'sms'] else
+            None
+        )
     },
     "list_contact_preferences": {
         "function_name": "list_contact_preferences",
@@ -2368,6 +2408,19 @@ async def execute_tool(tool_name, tool_args, user_id: Optional[str] = None, **co
         raise e
 
 
+async def _execute_tool_observed(tool_name, tool_args, user_id: Optional[str] = None, **context):
+    """execute_tool plus contact-import observation.
+
+    This is the executor the screen-agent queue runs, both for immediate and
+    deferred (queued) tools, so a send that was queued behind another tool still
+    gets its suggest_import hint. Tracking is keyed on the real conversation id;
+    `conversation_id` may be the client's legacy negative id (or None) on a chat's first turn.
+    """
+    result = await execute_tool(tool_name, tool_args, user_id, **context)
+    tracking_id = context.get("tracking_conversation_id") or context.get("conversation_id")
+    return await contact_import.observe(tool_name, tool_args, user_id, tracking_id, result)
+
+
 async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] = None,
                                   request_id: Optional[str] = None, **context):
     """
@@ -2383,6 +2436,22 @@ async def execute_tool_with_queue(tool_name, tool_args, user_id: Optional[str] =
         user_id: User ID if authenticated
         **context: Additional context (websocket, tool_result_handler, conversation_id, session_id, device_id, etc.)
     """
+    # ===== Pre-execution send confirmation gate =====
+    # A send with no user message after the draft overlay appeared is never
+    # legitimate (bug 1543: draft and send in the same turn). Checked against the
+    # conversation as the model sees it; degrades open if history is unavailable.
+    if tool_name in send_gate.SEND_TOOLS and context.get("session_id"):
+        try:
+            history = await get_chat_messages_for_claude(context["session_id"])
+            if not send_gate.send_is_confirmed(history):
+                logger.warning(
+                    f"Send gate refused {tool_name} for request {request_id}: "
+                    f"no user message since the last draft overlay"
+                )
+                return send_gate.build_refusal(tool_name)
+        except Exception as e:
+            logger.warning(f"Send gate could not read history for {tool_name}, allowing: {e}")
+
     # ===== Pre-execution duplicate guard =====
     # Concurrent requests in one conversation run independent agent loops and can
     # each decide on the same mutation before either result exists in shared
@@ -2914,9 +2983,14 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Get conversation_id from query parameters if provided
         conversation_id = None
-        if "conversation_id" in websocket.query_params:
+        connect_ref = None  # client_chat_id (str) or conversation_id (int) from the query string
+        if "client_chat_id" in websocket.query_params:
+            connect_ref = websocket.query_params["client_chat_id"] or None
+            logger.info(f"WebSocket connection requested for client_chat_id={connect_ref}")
+        elif "conversation_id" in websocket.query_params:
             try:
                 conversation_id = int(websocket.query_params["conversation_id"])
+                connect_ref = conversation_id
                 logger.info(f"WebSocket connection requested for conversation_id={conversation_id}")
             except ValueError:
                 logger.warning(f"Invalid conversation_id parameter: {websocket.query_params['conversation_id']}")
@@ -2967,123 +3041,87 @@ async def websocket_endpoint(websocket: WebSocket):
                     capacity_percent = (total_sessions / MAX_TOTAL_SESSIONS) * 100
                     logger.warning(f"Session count high: {total_sessions}/{MAX_TOTAL_SESSIONS} ({capacity_percent:.1f}% capacity)")
                 
-                # CRITICAL FIX: Resolve optimistic conversation IDs to real IDs before setting up the session
-                # This ensures we subscribe to the correct Redis channel and track the correct conversation
-                actual_conversation_id = conversation_id
-                optimistic_id_for_migration = None  # Track if we need to migrate an old optimistic session
-
-                if conversation_id is not None and conversation_id < 0:
-                    # This is an optimistic ID, check if it has a real ID in the database
-                    logger.info(f"Checking if optimistic conversation ID {conversation_id} has been migrated to a real ID")
-                    opt_result = supabase.table("conversations")\
-                        .select("id")\
-                        .eq("user_id", user_id)\
-                        .eq("optimistic_chat_id", str(conversation_id))\
-                        .is_("deleted_at", "null")\
-                        .execute()
-
-                    if opt_result.data and len(opt_result.data) > 0:
-                        actual_conversation_id = opt_result.data[0]["id"]
-                        logger.info(f"Optimistic ID {conversation_id} has been migrated to real ID {actual_conversation_id}, will use real ID for session")
+                # Resolve the connect reference (client_chat_id str or conversation_id int) once, to the
+                # client_chat_id that keys this connection's session, channel and socket registration.
+                # The key never changes afterwards, including when the conversation row is created.
+                actual_conversation_id = None
+                connection_chat_id = None
+                if connect_ref is not None:
+                    actual_conversation_id = resolve_conversation_id(connect_ref, user_id)
+                    if isinstance(connect_ref, str):
+                        connection_chat_id = connect_ref
+                    elif actual_conversation_id is not None:
+                        connection_chat_id = client_chat_id_for(actual_conversation_id)
+                        if connection_chat_id is None:
+                            # Every row has a client_chat_id (NOT NULL), so None means the lookup failed
+                            raise RuntimeError(f"Could not read client_chat_id for conversation {actual_conversation_id}")
                     else:
-                        logger.info(f"Optimistic ID {conversation_id} has not been migrated yet, will use optimistic ID")
+                        logger.warning(f"conversation_id={connect_ref} not found for user {user_id}; starting a new chat session")
 
-                elif conversation_id is not None and conversation_id > 0:
-                    # This is a real ID - check if there's an optimistic ID that maps to it
-                    # This handles the case where a client reconnects with the real ID after disconnect
-                    logger.info(f"Client connected with real conversation ID {conversation_id}, checking for optimistic session to migrate")
-                    opt_result = supabase.table("conversations")\
-                        .select("optimistic_chat_id")\
-                        .eq("id", conversation_id)\
-                        .eq("user_id", user_id)\
-                        .is_("deleted_at", "null")\
-                        .execute()
+                # A connection whose URL named a chat is bound to it from the start. Otherwise the
+                # connection gets its own chat id: the first message carrying a client_chat_id binds
+                # the socket to that chat, and messages without one are saved under this id.
+                connection_bound = connection_chat_id is not None
+                if connection_chat_id is None:
+                    connection_chat_id = str(uuid.uuid4())
 
-                    if opt_result.data and len(opt_result.data) > 0:
-                        opt_chat_id = opt_result.data[0].get("optimistic_chat_id")
-                        if opt_chat_id:
-                            optimistic_id_for_migration = int(opt_chat_id)
-                            logger.info(f"Found optimistic ID {optimistic_id_for_migration} for real conversation {conversation_id}")
-                
-                # Load conversation history and initialize session
-                # Create a unique session ID per conversation, not just per user
-                # Note: We keep the original conversation_id in the session_id for consistency,
-                # but use actual_conversation_id for all operations
-                if conversation_id is not None:
-                    session_id = f"ws_{user_id}_conv_{conversation_id}"
-                else:
-                    # If no specific conversation, create a session for a new conversation
-                    session_id = f"ws_{user_id}_new_{int(time.time())}"
+                # Integer conversation id for the database and payloads: the row's id, or None (no row yet).
+                session_conversation_id = actual_conversation_id
 
-                # MIGRATE OLD OPTIMISTIC SESSION: If we found an optimistic ID that maps to this real conversation,
-                # migrate the old session to prevent forked contexts (fixes duplicate Asana task bug)
-                if optimistic_id_for_migration is not None:
-                    old_session_id = f"ws_{user_id}_conv_{optimistic_id_for_migration}"
-                    if old_session_id != session_id:
-                        logger.info(f"Migrating optimistic session {old_session_id} → {session_id}")
-                        await rename_chat_session(old_session_id, session_id)
+                # Two ids per connection:
+                # - session_id: the chat's Redis context (and active requests), keyed by client_chat_id
+                #   and shared by every socket on the chat.
+                # - origin_session_id: this socket only. Socket registration, pubsub listener, activity
+                #   timestamp, user-session membership and broadcast exclude_session use it, so two
+                #   sockets on one chat never collide and a socket never receives its own broadcast.
+                session_id = conversation_keys.session_id(user_id, connection_chat_id)
+                origin_session_id = conversation_keys.connection_session_id(user_id, uuid.uuid4().hex)
 
                 # IMPORTANT: Track session immediately to ensure cleanup even if errors occur
-                await update_session_activity_redis(session_id)
+                await update_session_activity_redis(origin_session_id)
                 resources_allocated = True  # Mark that we've started allocating resources
 
-                # Use actual_conversation_id for loading history (it already handles optimistic IDs internally,
-                # but we've already resolved it so we can pass the real ID directly)
                 conversation_history = load_conversation_history(user_id, actual_conversation_id)
 
                 await set_chat_messages(session_id, conversation_history)
 
-                # Track the actual conversation_id for this session (not the optimistic one)
-                session_conversation_id = actual_conversation_id
-                
-                # Register WebSocket with the actual conversation for broadcasting
-                if actual_conversation_id is not None:
-                    await register_websocket_for_conversation(session_id, actual_conversation_id, websocket)
-                    
-                    # Subscribe to Redis channel for the actual conversation (not the optimistic ID)
-                    await subscribe_to_conversation(session_id, actual_conversation_id, websocket)
-                
-                # FIXED: Don't automatically load existing conversation when conversation_id is None
-                # This allows new chats to create fresh conversations instead of reusing old ones
+                # Register WebSocket and subscribe to the chat's channel for broadcasting
+                if connection_bound:
+                    await register_websocket_for_conversation(origin_session_id, connection_chat_id, websocket)
+                    await subscribe_to_conversation(origin_session_id, connection_chat_id, websocket)
+
                 if actual_conversation_id is None:
-                    # For new chats, keep session_conversation_id as None until first message creates it
-                    logger.info(f"New chat session - will create conversation on first message")
-                
-                # 🔧 CRITICAL FIX: Don't modify session_id after creation
-                # The session_id should remain consistent throughout the WebSocket connection
-                # The original session_id is already correctly formatted based on conversation_id
+                    # No row yet: the conversation is created on the first message
+                    logger.info(f"New chat session {session_id} - will create conversation on first message")
 
                 # Log the resolution if it happened
-                if conversation_id != actual_conversation_id:
-                    logger.info(f"WebSocket connected with optimistic ID {conversation_id}, resolved to real ID {actual_conversation_id}")
+                if connect_ref is not None and connect_ref != actual_conversation_id:
+                    logger.info(f"WebSocket connected with ref {connect_ref} (client_chat_id={connection_chat_id}), resolved to conversation ID {actual_conversation_id}")
                     
             except JWTError as e:
                 logger.warning(f"WebSocket JWTError: {str(e)}. Closing connection.")
                 
                 # Clean up any resources that may have been allocated
-                if resources_allocated and 'session_id' in locals():
-                    logger.info(f"Cleaning up resources for failed auth session {session_id}")
-                    
+                if resources_allocated and 'origin_session_id' in locals():
+                    logger.info(f"Cleaning up resources for failed auth session {origin_session_id}")
+
                     # Clean up session timestamp if it was set
-                    await remove_session_timestamp(session_id)
-                    
-                    # Clean up chat messages if they were loaded
-                    await clear_chat_session(session_id)
-                    
+                    await remove_session_timestamp(origin_session_id)
+
+                    # The chat context (session_id) is shared with other sockets on the chat and
+                    # expires by TTL (cleanup_session never owned it), so it is not cleared here.
+
                     # Clean up any Redis subscriptions
-                    await unsubscribe_from_conversation(session_id)
-                    
-                    # Clean up session mappings
-                    await clear_session_mappings(session_id)
-                    
+                    await unsubscribe_from_conversation(origin_session_id)
+
                     # Clean up conversation websockets
                     if redis_managers and "local_objects" in redis_managers:
-                        await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
-                    
+                        await redis_managers["local_objects"].unregister_conversation_websocket(origin_session_id)
+
                     # Clean up from user sessions if it was added
                     if 'user_id' in locals() and user_id:
-                        await remove_user_session(user_id, session_id)
-                
+                        await remove_user_session(user_id, origin_session_id)
+
                 error_payload = {
                     "type": "error",
                     "code": "AUTH_JWT_INVALID",
@@ -3097,28 +3135,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.error(traceback.format_exc())
                 
                 # Clean up any resources that may have been allocated
-                if resources_allocated and 'session_id' in locals():
-                    logger.info(f"Cleaning up resources for failed auth session {session_id}")
-                    
+                if resources_allocated and 'origin_session_id' in locals():
+                    logger.info(f"Cleaning up resources for failed auth session {origin_session_id}")
+
                     # Clean up session timestamp if it was set
-                    await remove_session_timestamp(session_id)
-                    
-                    # Clean up chat messages if they were loaded
-                    await clear_chat_session(session_id)
-                    
+                    await remove_session_timestamp(origin_session_id)
+
+                    # The chat context (session_id) is shared with other sockets on the chat and
+                    # expires by TTL (cleanup_session never owned it), so it is not cleared here.
+
                     # Clean up any Redis subscriptions
-                    await unsubscribe_from_conversation(session_id)
-                    
-                    # Clean up session mappings
-                    await clear_session_mappings(session_id)
-                    
+                    await unsubscribe_from_conversation(origin_session_id)
+
                     # Clean up conversation websockets
                     if redis_managers and "local_objects" in redis_managers:
-                        await redis_managers["local_objects"].unregister_conversation_websocket(session_id)
-                    
+                        await redis_managers["local_objects"].unregister_conversation_websocket(origin_session_id)
+
                     # Clean up from user sessions if it was added
                     if 'user_id' in locals() and user_id:
-                        await remove_user_session(user_id, session_id)
+                        await remove_user_session(user_id, origin_session_id)
                 
                 error_payload = {
                     "type": "error",
@@ -3137,27 +3172,27 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Create a session ID (moved this up since we need it earlier)
         # Associate session with user
-        await add_user_session(user_id, session_id)
-        
+        await add_user_session(user_id, origin_session_id)
+
         # Check if user has exceeded session limit and evict old sessions if needed
         # IMPORTANT: Must happen AFTER adding new session to get accurate count
-        await evict_user_sessions_if_needed(user_id, session_id)
-        
+        await evict_user_sessions_if_needed(user_id, origin_session_id)
+
         try:
             while True:
                 try:
                     # Receive message from client
                     message_text = await websocket.receive_text()
-                    
+
                     # Update session timestamp on activity
                     # Update activity timestamp for receiving a message
-                    await update_session_activity_redis(session_id)
-                    logger.debug(f"Updated activity timestamp for session {session_id} (received message)")
+                    await update_session_activity_redis(origin_session_id)
+                    logger.debug(f"Updated activity timestamp for session {origin_session_id} (received message)")
                     
                     # Parse incoming message - support both structured JSON and legacy plain text
                     request_id = None
                     message_type = "message"  # default type
-                    client_conversation_id = None
+                    client_chat_id = None
                     client_message_id = None
                     client_timestamp = None
                     try:
@@ -3168,19 +3203,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         # Get conversation_id from message (if provided)
                         message_conversation_id = message_data.get("conversation_id")
-                        client_conversation_id = message_data.get("client_conversation_id")
+                        client_chat_id = parse_client_chat_id(message_data)
                         client_message_id = message_data.get("client_message_id")
                         # Get timestamp from client for preserving message order
                         client_timestamp = message_data.get("timestamp")
                         
-                        # If message includes a conversation_id, update the session's conversation_id only if it changed
-                        if message_conversation_id is not None and message_conversation_id > 0:
-                            if session_conversation_id != message_conversation_id:
-                                logger.info(f"Updating session conversation_id from {session_conversation_id} to {message_conversation_id}")
-                                session_conversation_id = message_conversation_id
-                            # else: conversation_id matches, no update needed
-                        
-                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_conversation_id: {client_conversation_id}, client_timestamp: {client_timestamp}")
+                        logger.info(f"Received structured message with request_id: {request_id}, type: {message_type}, conversation_id: {message_conversation_id}, client_chat_id: {client_chat_id}, client_timestamp: {client_timestamp}")
 
                         # Require client_timestamp - fail fast if missing
                         if client_timestamp is None:
@@ -3194,34 +3222,20 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                             raise MissingTimestampError(error_msg)
 
-                        # Validate client_conversation_id immediately
-                        # Convert to int if it's a string number, and check if positive
-                        if client_conversation_id is not None:
-                            try:
-                                client_conv_id_int = int(client_conversation_id) if isinstance(client_conversation_id, str) else client_conversation_id
-                                if client_conv_id_int > 0:
-                                    error_msg = f"Invalid client_conversation_id: {client_conversation_id}. Client conversation IDs must be negative (optimistic) values. Use the conversation_id URL parameter for server-assigned IDs."
-                                    logger.error(error_msg)
-                                    await websocket.send_json({
-                                        "error": error_msg,
-                                        "type": "error",
-                                        "request_id": request_id
-                                    })
-                                    continue  # Skip processing this message
-                                # Update client_conversation_id to be the integer version for consistency
-                                client_conversation_id = client_conv_id_int
-                            except (ValueError, TypeError):
-                                # If it's not a valid number, log and continue with original value
-                                logger.warning(f"client_conversation_id is not a valid number: {client_conversation_id} (type: {type(client_conversation_id)})")
-                        
-                        # If session_conversation_id is None (new conversation) and we have an optimistic ID, use it
-                        if session_conversation_id is None and client_conversation_id is not None and client_conversation_id < 0:
-                            logger.info(f"Setting session_conversation_id to optimistic ID {client_conversation_id} for new conversation")
-                            session_conversation_id = client_conversation_id
-                            # Register and subscribe to this optimistic conversation ID
-                            # This ensures the WebSocket can receive broadcasts immediately
-                            await register_websocket_for_conversation(session_id, client_conversation_id, websocket)
-                            await subscribe_to_conversation(session_id, client_conversation_id, websocket)
+                        # A connection opened without naming a chat binds on the first frame that names
+                        # one, or on its first user message (to the connection's own minted chat id,
+                        # which that message is saved under). Other frames (cancel, tool_result, ...)
+                        # without a client_chat_id leave the connection unbound.
+                        if not connection_bound and (client_chat_id is not None or message_type == "message"):
+                            connection_bound = True
+                            if client_chat_id is not None and client_chat_id != connection_chat_id:
+                                connection_chat_id = client_chat_id
+                                session_id = conversation_keys.session_id(user_id, connection_chat_id)
+                                session_conversation_id = conversation_id_for(connection_chat_id, user_id)
+                            logger.info(f"Binding connection {origin_session_id} to client_chat_id={connection_chat_id} (conversation {session_conversation_id})")
+                            # Register and subscribe so the WebSocket can receive broadcasts immediately
+                            await register_websocket_for_conversation(origin_session_id, connection_chat_id, websocket)
+                            await subscribe_to_conversation(origin_session_id, connection_chat_id, websocket)
                     except json.JSONDecodeError:
                         # Fallback for legacy plain text messages
                         message = message_text
@@ -3260,14 +3274,21 @@ async def websocket_endpoint(websocket: WebSocket):
                         status = message_data.get("status", "")
                         status_message = message_data.get("message", "")
                         logger.info(f"Received tool_status: request_id={tool_request_id}, status={status}")
-                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_contacts_permission", "waiting_for_calendar_permission", "waiting_for_google_contacts_consent"):
+                        if tool_request_id and status in ("waiting_for_unlock", "waiting_for_accessibility", "waiting_for_contacts_permission", "waiting_for_calendar_permission", "waiting_for_google_contacts_consent", "running"):
                             # The Google consent UI (full Google screen + unverified warning)
                             # takes longer than a one-tap permission grant, so extend further.
-                            extension = 130.0 if status == "waiting_for_google_contacts_consent" else 65.0
+                            # "running" = a parked tool has resumed (phone unlocked / service connected):
+                            # give it a fresh budget for its own work rather than a long user-action wait.
+                            extension = (130.0 if status == "waiting_for_google_contacts_consent"
+                                         else 30.0 if status == "running"
+                                         else 65.0)
                             metadata = tool_result_handler.extend_deadline(tool_request_id, extension)
-                            # Update the Redis placeholder so Claude sees why the tool is waiting
+                            # Update the Redis placeholder so Claude sees the tool's CURRENT state
+                            # (it answers mid-tool interjections from this text)
                             if metadata and metadata.get('tool_use_id') and metadata.get('session_id'):
                                 placeholder = ("Waiting for user to unlock phone..." if status == "waiting_for_unlock"
+                                               else (status_message or "Phone unlocked; tool is running...") if status == "running"
+                                               else (status_message or "Waiting for user to enable the Whiz accessibility service...") if status == "waiting_for_accessibility"
                                                else "Waiting for user to grant calendar permission..." if status == "waiting_for_calendar_permission"
                                                else "Waiting for user to grant Google Contacts access..." if status == "waiting_for_google_contacts_consent"
                                                else "Waiting for user to grant contacts permission...")
@@ -3318,21 +3339,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         # So we'll move the detection into process_message_task itself
                         
                         # Define a callback to handle task completion
-                        async def handle_task_completion(task_future):
+                        # request_id / session_id are parameters (not closure variables) so the cleanup
+                        # uses this message's values, not whatever the loop holds when the task ends.
+                        async def handle_task_completion(task_future, request_id, session_id):
                             try:
-                                updated_session_conversation_id = await task_future
-                                if updated_session_conversation_id is not None:
-                                    # Register WebSocket with new conversation ID if it changed
-                                    if updated_session_conversation_id != session_conversation_id:
-                                        # Use the safe update function that creates new listener before destroying old one
-                                        try:
-                                            await update_websocket_conversation(session_id, session_conversation_id, updated_session_conversation_id, websocket)
-                                        except Exception as e:
-                                            logger.error(f"Failed to update WebSocket conversation in task completion: {str(e)}")
-                                        
-                                        # Note: We can't update session_conversation_id here as it's in the outer scope
-                                        # This might need additional handling if conversation ID changes are critical
-                                        logger.info(f"Conversation ID changed from {session_conversation_id} to {updated_session_conversation_id}")
+                                # Sessions and channels are keyed by client_chat_id, which does not change
+                                # when the conversation row is created, so there is nothing to re-register.
+                                await task_future
                             except asyncio.CancelledError:
                                 # This shouldn't happen anymore since we only cancel streams, not tasks
                                 logger.warning(f"Unexpected task cancellation for request {request_id}")
@@ -3351,16 +3364,18 @@ async def websocket_endpoint(websocket: WebSocket):
                                     if "active_requests" in redis_managers:
                                         await redis_managers["active_requests"].remove(session_id, request_id)
                         
-                        # Calculate correct session_id per-message based on client_conversation_id
-                        # This ensures messages are routed to the correct conversation's Redis context
-                        # even if they arrive on a WebSocket that was originally opened for a different conversation
-                        if client_conversation_id is not None and client_conversation_id < 0:
-                            message_session_id = f"ws_{user_id}_conv_{client_conversation_id}"
-                            message_conversation_id = client_conversation_id
-                            logger.info(f"Routing message to per-message session_id={message_session_id} based on client_conversation_id={client_conversation_id}")
-                        else:
-                            message_session_id = session_id
+                        # The session key is always derived from the message's client_chat_id, so a
+                        # message reaches its own conversation's Redis context even on a WebSocket opened
+                        # for a different conversation. A message without one belongs to the connection's chat.
+                        message_chat_id, message_session_id = message_chat_route(user_id, client_chat_id, connection_chat_id)
+                        if message_chat_id == connection_chat_id:
+                            if session_conversation_id is None:
+                                session_conversation_id = conversation_id_for(message_chat_id, user_id)
                             message_conversation_id = session_conversation_id
+                        else:
+                            message_conversation_id = conversation_id_for(message_chat_id, user_id)
+                        if message_session_id != session_id:
+                            logger.info(f"Routing message to per-message session_id={message_session_id} based on client_chat_id={message_chat_id}")
 
                         # Create task for processing this message
                         task = asyncio.create_task(
@@ -3371,11 +3386,12 @@ async def websocket_endpoint(websocket: WebSocket):
                                 user_id=user_id,
                                 message=message,
                                 request_id=request_id,
-                                client_conversation_id=client_conversation_id,
+                                client_chat_id=message_chat_id,
                                 client_message_id=client_message_id,
                                 client_timestamp=client_timestamp,
                                 device_id=device_id,
                                 is_hidden=is_hidden,
+                                origin_session_id=origin_session_id,
                             )
                         )
                         
@@ -3388,7 +3404,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         # Create a separate task to handle completion without blocking
                         # This allows the WebSocket loop to continue receiving messages
-                        asyncio.create_task(handle_task_completion(task))
+                        asyncio.create_task(handle_task_completion(task, request_id, message_session_id))
                         
                         logger.info(f"Started background processing for request {request_id}, continuing to listen for messages")
 
@@ -3433,8 +3449,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if active_reqs:
                             logger.warning(f"Timed out waiting for {len(active_reqs)} tasks for session {session_id}")
                     
-                    await cleanup_session(session_id, user_id, session_conversation_id)
-                    logger.info(f"WebSocket cleanup completed for session {session_id}")
+                    await cleanup_session(origin_session_id, user_id, session_conversation_id)
+                    logger.info(f"WebSocket cleanup completed for session {origin_session_id}")
                     break
                 except Exception as e:
                     # Check if this is a WebSocket disconnection error FIRST
@@ -3458,8 +3474,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             if active_reqs:
                                 logger.warning(f"Timed out waiting for {len(active_reqs)} tasks for session {session_id}")
                         
-                        await cleanup_session(session_id, user_id, session_conversation_id)
-                        logger.info(f"WebSocket cleanup completed for session {session_id}")
+                        await cleanup_session(origin_session_id, user_id, session_conversation_id)
+                        logger.info(f"WebSocket cleanup completed for session {origin_session_id}")
                         break
                     
                     # For other errors, log and try to send error to client
@@ -3480,7 +3496,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     
         except Exception as e:
             # Handle any other errors that might occur
-            await cleanup_session(session_id, user_id, session_conversation_id)
+            await cleanup_session(origin_session_id, user_id, session_conversation_id)
             logger.error(f"WebSocket error: {str(e)}")
             logger.error(traceback.format_exc())
             raise
@@ -3495,15 +3511,28 @@ async def websocket_endpoint(websocket: WebSocket):
         except:
             pass
 
-async def register_websocket_for_conversation(session_id: str, conversation_id: int, websocket: WebSocket):
-    """Register a WebSocket for a conversation, handling both real and optimistic IDs"""
+async def register_websocket_for_conversation(session_id: str, client_chat_id: str, websocket: WebSocket):
+    """Register a WebSocket for a conversation, keyed by its client_chat_id"""
     if redis_managers and "local_objects" in redis_managers:
         await redis_managers["local_objects"].register_conversation_websocket(
-            session_id, conversation_id, websocket
+            session_id, client_chat_id, websocket
         )
 
 
-async def broadcast_to_conversation_parallel(conversation_id: int, message_payload: dict, exclude_session: Optional[str] = None):
+async def broadcast_to_conversation_id(conversation_id: Optional[int], message_payload: dict, exclude_session: Optional[str] = None):
+    """Broadcast for a caller that holds only the integer conversation id.
+
+    Looks up the conversation's client_chat_id (which keys the channel); if the row is
+    gone there is nobody to deliver to, so the broadcast is logged and skipped.
+    """
+    client_chat_id = client_chat_id_for(conversation_id) if conversation_id is not None else None
+    if client_chat_id is None:
+        logger.warning(f"No client_chat_id for conversation {conversation_id}; skipping broadcast of {message_payload.get('type')}")
+        return
+    await broadcast_to_conversation(client_chat_id, message_payload, exclude_session=exclude_session)
+
+
+async def broadcast_to_conversation_parallel(client_chat_id: str, message_payload: dict, exclude_session: Optional[str] = None):
     """
     Broadcast a message to all WebSocket connections for a specific conversation.
     
@@ -3517,85 +3546,25 @@ async def broadcast_to_conversation_parallel(conversation_id: int, message_paylo
     # First, try Redis pub/sub for cross-process broadcasting
     if redis_client:
         try:
-            # Publish to the real conversation ID channel
-            channel_name = f"conversation:{conversation_id}"
+            channel_name = conversation_keys.channel(client_chat_id)
             message_data = {
                 "payload": message_payload,
                 "exclude_session": exclude_session
             }
             await redis_client.publish(channel_name, json.dumps(message_data))
             logger.info(f"Published message to Redis channel {channel_name} (excluding session: {exclude_session})")
-            
-            # Check for optimistic ID - first try cache, then database
-            optimistic_id = None
-            if redis_managers and "local_objects" in redis_managers:
-                optimistic_id = await redis_managers["local_objects"].get_optimistic_id_cached(conversation_id)
-            
-            if not optimistic_id:
-                # No cached mapping - query database
-                try:
-                    opt_result = supabase.table("conversations")\
-                        .select("optimistic_chat_id")\
-                        .eq("id", conversation_id)\
-                        .execute()
-                    
-                    if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
-                        optimistic_id = opt_result.data[0]["optimistic_chat_id"]
-                        
-                        # Cache this mapping for future use
-                        if redis_managers and "local_objects" in redis_managers:
-                            await redis_managers["local_objects"].cache_id_mapping(optimistic_id, conversation_id)
-                except Exception as opt_e:
-                    logger.warning(f"Could not check for optimistic ID for conversation {conversation_id}: {str(opt_e)}")
-            
-            if optimistic_id:
-                opt_channel_name = f"conversation:{optimistic_id}"
-                await redis_client.publish(opt_channel_name, json.dumps(message_data))
-                logger.info(f"Also published message to optimistic Redis channel {opt_channel_name}")
         except Exception as e:
             logger.error(f"Failed to publish to Redis: {str(e)}")
-    
+
     # Also use local broadcasting for WebSockets in this process
     connections = []
-    
+
     if redis_managers and "local_objects" in redis_managers:
         local_objects = redis_managers["local_objects"]
-        
-        # Get connections for the real conversation ID
-        connections.extend(await local_objects.get_conversation_websockets(conversation_id))
-        
-        # Check for optimistic ID using cached mapping first (avoids database query)
-        optimistic_id = await local_objects.get_optimistic_id_cached(conversation_id)
-        
-        if optimistic_id:
-            # Found cached optimistic ID - use it directly
-            opt_connections = await local_objects.get_conversation_websockets(optimistic_id)
-            if opt_connections:
-                logger.info(f"Found WebSockets registered under cached optimistic ID {optimistic_id} for real conversation {conversation_id}")
-                connections.extend(opt_connections)
-        else:
-            # No cached mapping - fall back to database query (and cache the result)
-            try:
-                opt_result = supabase.table("conversations")\
-                    .select("optimistic_chat_id")\
-                    .eq("id", conversation_id)\
-                    .execute()
-                
-                if opt_result.data and opt_result.data[0].get("optimistic_chat_id"):
-                    optimistic_id = int(opt_result.data[0]["optimistic_chat_id"])
-                    
-                    # Cache this mapping for future use
-                    await local_objects.cache_id_mapping(optimistic_id, conversation_id)
-                    
-                    opt_connections = await local_objects.get_conversation_websockets(optimistic_id)
-                    if opt_connections:
-                        logger.info(f"Found WebSockets registered under optimistic ID {optimistic_id} for real conversation {conversation_id} (cached for future use)")
-                        connections.extend(opt_connections)
-            except Exception as e:
-                logger.warning(f"Could not check for optimistic ID in database: {str(e)}")
-    
+        connections.extend(await local_objects.get_conversation_websockets(client_chat_id))
+
     if not connections:
-        logger.info(f"No local WebSocket sessions registered for conversation {conversation_id} (checked real and optimistic IDs)")
+        logger.info(f"No local WebSocket sessions registered for conversation {client_chat_id}")
         return
     
     # Remove duplicates and exclude the originating session
@@ -3610,7 +3579,7 @@ async def broadcast_to_conversation_parallel(conversation_id: int, message_paylo
         logger.info(f"No sessions to broadcast to after filtering")
         return
     
-    logger.info(f"Broadcasting locally to conversation {conversation_id} with {len(unique_connections)} registered sessions: {list(unique_connections.keys())}")
+    logger.info(f"Broadcasting locally to conversation {client_chat_id} with {len(unique_connections)} registered sessions: {list(unique_connections.keys())}")
     
     # Pre-serialize the message once instead of per connection
     message_json = json.dumps(message_payload)
@@ -3622,7 +3591,7 @@ async def broadcast_to_conversation_parallel(conversation_id: int, message_paylo
             # Update activity for session receiving broadcast
             await update_session_activity_redis(session_id)
             await websocket.send_text(message_json)  # Use pre-serialized JSON
-            logger.info(f"Broadcasted message locally to session {session_id} for conversation {conversation_id}")
+            logger.info(f"Broadcasted message locally to session {session_id} for conversation {client_chat_id}")
             return None  # Success
         except Exception as e:
             logger.warning(f"Failed to broadcast locally to session {session_id}: {str(e)}")
@@ -3642,14 +3611,14 @@ async def broadcast_to_conversation_parallel(conversation_id: int, message_paylo
         # Clean up in parallel as well
         cleanup_tasks = [
             redis_managers["local_objects"].remove_websocket_from_conversation(
-                conversation_id, session_id, websocket
+                client_chat_id, session_id, websocket
             )
             for session_id, websocket in disconnected_sessions
         ]
         await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
 
-async def broadcast_to_conversation(conversation_id: int, message_payload: dict, exclude_session: Optional[str] = None):
+async def broadcast_to_conversation(client_chat_id: str, message_payload: dict, exclude_session: Optional[str] = None):
     """
     Highly optimized broadcast using reverse lookups with batched operations.
     
@@ -3665,30 +3634,32 @@ async def broadcast_to_conversation(conversation_id: int, message_payload: dict,
     # First, try Redis pub/sub for cross-process broadcasting (same as before)
     if redis_client:
         try:
-            channel_name = f"conversation:{conversation_id}"
+            channel_name = conversation_keys.channel(client_chat_id)
             message_data = {
                 "payload": message_payload,
                 "exclude_session": exclude_session
             }
-            
-            # Get optimistic ID from cache if available
-            optimistic_id = None
-            if redis_managers and "local_objects" in redis_managers:
-                optimistic_id = await redis_managers["local_objects"].get_optimistic_id_cached(conversation_id)
-            
-            # Publish to both channels in parallel if we have optimistic ID
-            publish_tasks = [redis_client.publish(channel_name, json.dumps(message_data))]
-            if optimistic_id:
-                opt_channel_name = f"conversation:{optimistic_id}"
-                publish_tasks.append(redis_client.publish(opt_channel_name, json.dumps(message_data)))
-            
-            await asyncio.gather(*publish_tasks, return_exceptions=True)
-            logger.info(f"Published to Redis channels for conversation {conversation_id}")
+            await redis_client.publish(channel_name, json.dumps(message_data))
+            logger.info(f"Published to Redis channel {channel_name}")
         except Exception as e:
             logger.error(f"Failed to publish to Redis: {str(e)}")
     
     # Local broadcasting removed - Redis pub/sub handles all delivery via redis_message_listener
     # This prevents duplicate messages (sessions were receiving via both Redis and local broadcast)
+
+
+def delete_message_payload(message_id: Optional[int], conversation_id: Optional[int],
+                           request_id: Optional[str], reason: str) -> dict:
+    """`delete_message` broadcast for a message (or, with message_id None, a request) in a conversation."""
+    client_chat_id = client_chat_id_for(conversation_id) if conversation_id is not None and conversation_id > 0 else None
+    return {
+        "type": "delete_message",
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "client_chat_id": client_chat_id,
+        "request_id": request_id,
+        "reason": reason,
+    }
 
 
 async def cancel_and_broadcast_messages(
@@ -3736,15 +3707,9 @@ async def cancel_and_broadcast_messages(
 
     # Broadcast DeleteMessage to all clients in conversation
     for msg_id in message_ids:
-        delete_notification = {
-            "type": "delete_message",
-            "message_id": msg_id,
-            "conversation_id": conversation_id,
-            "request_id": request_id,
-            "reason": reason
-        }
+        delete_notification = delete_message_payload(msg_id, conversation_id, request_id, reason)
         try:
-            await broadcast_to_conversation(conversation_id, delete_notification)
+            await broadcast_to_conversation_id(conversation_id, delete_notification)
             logger.info(f"Broadcasted delete notification for message {msg_id} to conversation {conversation_id}")
         except Exception as e:
             logger.error(f"Failed to broadcast delete notification for message {msg_id}: {e}")
@@ -3842,15 +3807,9 @@ async def detect_and_cancel_subset_requests(conversation_id: int, new_message_id
         for req_id in cancelled_requests:
             if req_id not in cancelled_with_bot_messages:
                 logger.info(f"Sending delete notification for request {req_id} with no bot messages (superseded before response)")
-                delete_notification = {
-                    "type": "delete_message",
-                    "message_id": None,
-                    "conversation_id": conversation_id,
-                    "request_id": req_id,
-                    "reason": "superseded_by_new_request"
-                }
+                delete_notification = delete_message_payload(None, conversation_id, req_id, "superseded_by_new_request")
                 try:
-                    await broadcast_to_conversation(conversation_id, delete_notification)
+                    await broadcast_to_conversation_id(conversation_id, delete_notification)
                 except Exception as e:
                     logger.error(f"Failed to broadcast delete notification for request {req_id}: {e}")
             
@@ -4128,13 +4087,10 @@ async def get_conversations(
         
         logger.debug(f"Getting conversations for user {user_id}, since: {since}")
         
-        # Build the query
-        query = supabase.table('conversations')\
-            .select('*')\
-            .eq('user_id', user_id)\
-            .order('updated_at', desc=True)
-        
-        # Add incremental sync filter if provided
+        # Decide the sync filter up front; the builder itself is created fresh per page
+        # because postgrest's .range() mutates the builder's params in place.
+        updated_since = None
+        exclude_deleted = False
         if since:
             try:
                 # Parse the timestamp and filter for records updated after it
@@ -4142,7 +4098,7 @@ async def get_conversations(
                 # Use slightly older timestamp to avoid edge case timing issues
                 # Go back 1 second to catch any conversations that might be missed due to timing precision
                 adjusted_timestamp = since_timestamp - timedelta(seconds=1)
-                query = query.gte('updated_at', adjusted_timestamp.isoformat())
+                updated_since = adjusted_timestamp.isoformat()
                 logger.info(f"Incremental sync: fetching conversations updated since {adjusted_timestamp} (original: {since_timestamp}, includes deleted)")
                 # Note: For incremental sync, we include deleted conversations so client can handle deletions
             except ValueError as e:
@@ -4150,12 +4106,33 @@ async def get_conversations(
                 # Fall back to full sync if timestamp is invalid
         else:
             # For full sync (no 'since'), exclude deleted conversations
-            query = query.is_('deleted_at', 'null')
+            exclude_deleted = True
             logger.debug(f"Full sync: excluding deleted conversations")
-        
-        response = query.execute()
-        conversations = response.data if response.data else []
-        
+
+        def build_query():
+            q = supabase.table('conversations')\
+                .select('*')\
+                .eq('user_id', user_id)\
+                .order('updated_at', desc=True)\
+                .order('id', desc=True)  # unique tiebreaker so offset paging is stable
+            if updated_since is not None:
+                q = q.gte('updated_at', updated_since)
+            if exclude_deleted:
+                q = q.is_('deleted_at', 'null')
+            return q
+
+        # PostgREST caps a select at 1000 rows, so page until a short page arrives
+        page_size = 1000
+        conversations = []
+        start = 0
+        while True:
+            page = build_query().range(start, start + page_size - 1).execute()
+            page_rows = page.data if page.data else []
+            conversations.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            start += page_size
+
         # Log detailed information about what we're returning
         if conversations:
             logger.info(f"Found {len(conversations)} conversations for user {user_id}:")
@@ -4193,7 +4170,8 @@ async def create_conversation(
             "user_id": user_id,
             "title": conversation.title,
             "source": conversation.source,
-            "google_session_id": conversation.google_session_id
+            "google_session_id": conversation.google_session_id,
+            **({"client_chat_id": conversation.client_chat_id} if conversation.client_chat_id else {})
         }).execute()
         
         if not result.data:
@@ -4208,15 +4186,16 @@ async def create_conversation(
             last_message_time=row["last_message_time"],
             source=row["source"],
             google_session_id=row.get("google_session_id"),
-            deleted_at=row.get("deleted_at")
+            deleted_at=row.get("deleted_at"),
+            client_chat_id=row["client_chat_id"]
         )
     except Exception as e:
         logger.error(f"Error creating conversation for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to create conversation")
 
-@app.get("/conversations/{conversation_id}", response_model=ConversationResponse)
+@app.get("/conversations/{conversation_ref}", response_model=ConversationResponse)
 async def get_conversation(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Get a specific conversation by ID (user must own it)"""
@@ -4225,11 +4204,11 @@ async def get_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        # Resolve the actual conversation ID (handles integer ids and client_chat_ids)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Fetch the full conversation data
         result = supabase.table("conversations")\
             .select("*")\
@@ -4250,17 +4229,18 @@ async def get_conversation(
             last_message_time=row["last_message_time"],
             source=row["source"],
             google_session_id=row.get("google_session_id"),
-            deleted_at=row.get("deleted_at")
+            deleted_at=row.get("deleted_at"),
+            client_chat_id=row["client_chat_id"]
         )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting conversation {conversation_id} for user {user_id}: {str(e)}")
+        logger.error(f"Error getting conversation {conversation_ref} for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get conversation")
 
-@app.put("/conversations/{conversation_id}", response_model=ConversationResponse)
+@app.put("/conversations/{conversation_ref}", response_model=ConversationResponse)
 async def update_conversation(
-    conversation_id: int,
+    conversation_ref: str,
     update_data: ConversationUpdate,
     current_user: Dict = Depends(get_current_user)
 ):
@@ -4277,10 +4257,10 @@ async def update_conversation(
         
         if not updates:
             # No updates provided, just return current conversation
-            return await get_conversation(conversation_id, current_user)
-        
-        # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+            return await get_conversation(conversation_ref, current_user)
+
+        # Resolve the actual conversation ID (handles integer ids and client_chat_ids)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
@@ -4304,17 +4284,18 @@ async def update_conversation(
             last_message_time=row["last_message_time"],
             source=row["source"],
             google_session_id=row.get("google_session_id"),
-            deleted_at=row.get("deleted_at")
+            deleted_at=row.get("deleted_at"),
+            client_chat_id=row["client_chat_id"]
         )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating conversation {conversation_id} for user {user_id}: {str(e)}")
+        logger.error(f"Error updating conversation {conversation_ref} for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to update conversation")
 
-@app.delete("/conversations/{conversation_id}")
+@app.delete("/conversations/{conversation_ref}")
 async def delete_conversation(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Delete a specific conversation by ID (user must own it) - uses soft delete with tombstone record"""
@@ -4323,11 +4304,11 @@ async def delete_conversation(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        # Resolve the actual conversation ID (handles integer ids and client_chat_ids)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Check if already deleted
         verify_result = supabase.table("conversations")\
             .select("deleted_at")\
@@ -4345,12 +4326,19 @@ async def delete_conversation(
         if not result.data:
             raise HTTPException(status_code=404, detail="Conversation not found")
         
-        logger.info(f"Successfully soft-deleted conversation {actual_conversation_id} (requested: {conversation_id}) for user {user_id}")
-        return {"message": "Conversation deleted successfully", "conversation_id": conversation_id}
+        deleted_client_chat_id = client_chat_id_for(actual_conversation_id)
+        invalidate_conversation_cache(actual_conversation_id)
+
+        logger.info(f"Successfully soft-deleted conversation {actual_conversation_id} (requested: {conversation_ref}) for user {user_id}")
+        return {
+            "message": "Conversation deleted successfully",
+            "conversation_id": actual_conversation_id,
+            "client_chat_id": deleted_client_chat_id,
+        }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting conversation {conversation_id} for user {user_id}: {str(e)}")
+        logger.error(f"Error deleting conversation {conversation_ref} for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete conversation")
 
 @app.delete("/conversations")
@@ -4368,6 +4356,8 @@ async def delete_all_conversations(current_user: Dict = Depends(get_current_user
         }).eq("user_id", user_id).is_("deleted_at", "null").execute()
 
         deleted_count = len(result.data) if result.data else 0
+        for deleted_row in (result.data or []):
+            invalidate_conversation_cache(deleted_row["id"])
         logger.info(f"Successfully soft-deleted {deleted_count} conversations for user {user_id}")
 
         return {"message": "All conversations deleted successfully", "deleted_count": deleted_count}
@@ -4375,9 +4365,9 @@ async def delete_all_conversations(current_user: Dict = Depends(get_current_user
         logger.error(f"Error deleting all conversations for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete conversations")
 
-@app.put("/conversations/{conversation_id}/last_message_time")
+@app.put("/conversations/{conversation_ref}/last_message_time")
 async def update_conversation_last_message_time(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Update the last_message_time for a conversation to now()"""
@@ -4386,11 +4376,11 @@ async def update_conversation_last_message_time(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        # Resolve the actual conversation ID (handles integer ids and client_chat_ids)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Update the last message time
         result = supabase.table("conversations").update({
             "last_message_time": "now()",
@@ -4404,14 +4394,14 @@ async def update_conversation_last_message_time(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating last message time for conversation {conversation_id}: {str(e)}")
+        logger.error(f"Error updating last message time for conversation {conversation_ref}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to update last message time")
 
 # ================== MESSAGE ENDPOINTS ==================
 
-@app.get("/conversations/{conversation_id}/messages")
+@app.get("/conversations/{conversation_ref}/messages")
 async def get_messages(
-    conversation_id: int,
+    conversation_ref: str,
     since_timestamp: Optional[float] = None,  # Unix timestamp for incremental sync
     current_user: Dict = Depends(get_current_user)
 ):
@@ -4423,12 +4413,12 @@ async def get_messages(
         if not user_id:
             raise HTTPException(status_code=401, detail="User not authenticated")
         
-        logger.info(f"Getting messages for conversation {conversation_id}, user {user_id}, since_timestamp: {since_timestamp}")
-        
-        # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        logger.info(f"Getting messages for conversation {conversation_ref}, user {user_id}, since_timestamp: {since_timestamp}")
+
+        # Resolve the actual conversation ID (handles integer ids and client_chat_ids)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
-            logger.warning(f"No conversation found for conversation ID {conversation_id}")
+            logger.warning(f"No conversation found for conversation ref {conversation_ref}")
             raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Build the messages query - explicitly select fields including cancelled
@@ -4481,13 +4471,13 @@ async def get_messages(
             'includes_cancelled': True  # Signal to client that cancelled messages are included
         }
         
-        logger.info(f"Returning {len(messages)} messages for conversation {conversation_id} (incremental: {since_timestamp is not None})")
+        logger.info(f"Returning {len(messages)} messages for conversation {conversation_ref} (incremental: {since_timestamp is not None})")
         return result
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting messages for conversation {conversation_id}: {str(e)}")
+        logger.error(f"Error getting messages for conversation {conversation_ref}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get messages")
 
 @app.post("/messages", response_model=MessageResponse)
@@ -4501,20 +4491,12 @@ async def create_message(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # Handle optimistic chat IDs (negative IDs)
+        # A legacy negative client id resolves through the conversation's client_chat_id
         actual_conversation_id = message.conversation_id
         if message.conversation_id < 0:
-            # Look up the real conversation using the optimistic_chat_id
-            conv_result = supabase.table("conversations")\
-                .select("id")\
-                .eq("optimistic_chat_id", str(message.conversation_id))\
-                .eq("user_id", user_id)\
-                .is_("deleted_at", "null")\
-                .execute()
-            
-            if conv_result.data:
-                actual_conversation_id = conv_result.data[0]["id"]
-                logger.info(f"Creating message for optimistic chat ID {message.conversation_id}, real ID {actual_conversation_id}")
+            actual_conversation_id = resolve_conversation_id(message.conversation_id, user_id)
+            if actual_conversation_id is not None:
+                logger.info(f"Creating message for client chat id {message.conversation_id}, real ID {actual_conversation_id}")
             else:
                 raise HTTPException(status_code=404, detail="Conversation not found")
         else:
@@ -4567,9 +4549,9 @@ async def create_message(
         logger.error(f"Error creating message: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to create message")
 
-@app.get("/conversations/{conversation_id}/messages/count")
+@app.get("/conversations/{conversation_ref}/messages/count")
 async def get_message_count(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Get the count of messages in a conversation"""
@@ -4578,11 +4560,11 @@ async def get_message_count(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        # Resolve the actual conversation ID (handles integer ids and client_chat_ids)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Get message count
         result = supabase.table("messages").select("id", count="exact").eq("conversation_id", actual_conversation_id).execute()
         
@@ -4590,12 +4572,12 @@ async def get_message_count(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting message count for conversation {conversation_id}: {str(e)}")
+        logger.error(f"Error getting message count for conversation {conversation_ref}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get message count")
 
-@app.post("/conversations/{conversation_id}/check-retry")
+@app.post("/conversations/{conversation_ref}/check-retry")
 async def check_and_retry_failed_messages(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: Dict = Depends(get_current_user)
 ):
     """Check for error messages and retry getting assistant response from Claude"""
@@ -4604,11 +4586,11 @@ async def check_and_retry_failed_messages(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     try:
-        # Resolve the actual conversation ID (handles optimistic IDs)
-        actual_conversation_id = resolve_conversation_id(conversation_id, user_id)
+        # Resolve the actual conversation ID (handles integer ids and client_chat_ids)
+        actual_conversation_id = resolve_conversation_id(conversation_ref, user_id)
         if actual_conversation_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
+
         # Get all messages for this conversation
         result = supabase.table("messages")\
             .select("*")\
@@ -4805,7 +4787,7 @@ async def check_and_retry_failed_messages(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error checking for retry in conversation {conversation_id}: {str(e)}")
+        logger.error(f"Error checking for retry in conversation {conversation_ref}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to check for retry")
 
 @app.get("/requests/{request_id}/state")
@@ -4824,39 +4806,27 @@ async def get_request_state_endpoint(
     
     return state
 
-@app.get("/api/conversations/{conversation_id}/pending-requests")
+@app.get("/api/conversations/{conversation_ref}/pending-requests")
 async def get_conversation_pending_requests(
-    conversation_id: int,
+    conversation_ref: str,
     current_user: dict = Depends(get_current_user)
 ):
     """Check if there are any in-flight requests for a conversation.
     Used by the Android client to restore the thinking indicator after navigation."""
     user_id = current_user.get("sub")
-    session_id = f"ws_{user_id}_conv_{conversation_id}"
 
     try:
+        conversation_id = resolve_conversation_id(conversation_ref, user_id)
+        if conversation_id is None:
+            # Client polls this after navigation; an unknown ref is just "nothing pending"
+            return {"has_pending": False, "request_ids": []}
+        client_chat_id = client_chat_id_for(conversation_id)
+        if client_chat_id is None:
+            logger.warning(f"No client_chat_id for conversation {conversation_id}; reporting nothing pending")
+            return {"has_pending": False, "request_ids": []}
+        # Active requests are tracked under the chat's session, keyed by client_chat_id
+        session_id = conversation_keys.session_id(user_id, client_chat_id)
         active_request_ids = set(await get_active_requests(session_id))
-
-        # An in-flight request started while the chat was still optimistic is tracked
-        # under the optimistic-ID session key (message_session_id at the send site), and
-        # rename_chat_session does not move the active_requests set during migration. So
-        # also union in the optimistic key's active requests, resolving the optimistic ID
-        # the same way the WebSocket connect handler does.
-        if conversation_id > 0:
-            try:
-                opt_result = supabase.table("conversations")\
-                    .select("optimistic_chat_id")\
-                    .eq("id", conversation_id)\
-                    .eq("user_id", user_id)\
-                    .is_("deleted_at", "null")\
-                    .execute()
-                if opt_result.data and len(opt_result.data) > 0:
-                    opt_chat_id = opt_result.data[0].get("optimistic_chat_id")
-                    if opt_chat_id:
-                        opt_session_id = f"ws_{user_id}_conv_{int(opt_chat_id)}"
-                        active_request_ids |= set(await get_active_requests(opt_session_id))
-            except Exception as e:
-                logger.warning(f"Could not union optimistic-key pending requests for conversation {conversation_id}: {e}")
 
         # Filter to only truly pending/processing requests
         pending_ids = []
@@ -5045,8 +5015,27 @@ async def upload_wake_word_audio(
 async def catch_all(path: str, request: Request):
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_conversation_id=None, client_message_id=None, client_timestamp=None, device_id=None, is_hidden=False):
-    """Process a single message in a cancellable task"""
+async def process_message_task(websocket, session_id, session_conversation_id, user_id, message, request_id, client_chat_id: str, client_message_id=None, client_timestamp=None, device_id=None, is_hidden=False, origin_session_id: Optional[str] = None):
+    """Process a single message in a cancellable task.
+
+    `origin_session_id` is the originating socket's per-connection id; it is used only as the
+    final broadcast's `exclude_session`, so that socket does not get its own reply twice.
+
+    `session_id` is derived from `client_chat_id` (conversation_keys.session_id), which also keys
+    the pub/sub channel and pending-tools counter; none of these change when the row is created.
+    `session_conversation_id` is the integer the client knows the chat by (None before the row
+    exists); the database id from the USER save (`processing_conversation_id`) is used for DB work.
+    """
+    # Database id; set from the USER save below
+    processing_conversation_id = session_conversation_id
+
+    def outbound_chat_id(conversation_id=None):
+        """client_chat_id for outbound payloads: the request's, else looked up from the conversation."""
+        if client_chat_id:
+            return client_chat_id
+        conv = conversation_id if conversation_id is not None else session_conversation_id
+        return client_chat_id_for(conv) if conv is not None and conv > 0 else None
+
     # Helper function to safely send to WebSocket
     async def safe_websocket_send(payload):
         """Send payload to WebSocket, handling disconnection gracefully"""
@@ -5109,7 +5098,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
         # If we have an existing conversation but no messages in Redis OR incomplete tool execution,
         # populate from database. This handles reconnection scenarios and race conditions.
-        # IMPORTANT: Also check for optimistic conversations (negative IDs) that may have messages in DB
+        # IMPORTANT: Also check for legacy negative client ids that may have messages in DB
         if (len(messages) == 0 or has_incomplete_tool) and session_conversation_id:
             if has_incomplete_tool:
                 logger.warning(f"Redis session for conversation {session_conversation_id} has incomplete tool execution, reloading from database")
@@ -5126,7 +5115,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         local_objects = redis_managers.get("local_objects") if redis_managers else None
         # Hidden user messages get a distinct content_type so the REST history sync excludes them.
         user_content_type = "hidden_text" if is_hidden else "text"
-        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_conversation_id, client_timestamp, content_type=user_content_type, local_objects=local_objects)
+        save_result = save_message_to_db(user_id, session_conversation_id, message, "USER", request_id, client_chat_id, client_timestamp, content_type=user_content_type, local_objects=local_objects)
         if save_result is None:
             logger.error("Failed to save user message to database")
             error_payload = {
@@ -5134,7 +5123,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "code": "DATABASE_ERROR",
                 "message": "Failed to save message to database",
                 "request_id": request_id,
-                "client_conversation_id": client_conversation_id
+                "client_chat_id": outbound_chat_id(),
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
@@ -5143,76 +5132,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         logger.info(f"After saving user message. Updated session_conversation_id: {real_conversation_id}, message_id: {user_message_id}")
         # Note: USER messages shouldn't have cancelled_ids (only ASSISTANT messages cancel previous ones)
 
-        # Debug logging for optimistic ID migration investigation
-        logger.debug(f"🔧 MIGRATION_DEBUG: session_conversation_id={session_conversation_id}, real_conversation_id={real_conversation_id}")
-        logger.debug(f"🔧 MIGRATION_DEBUG: client_conversation_id={client_conversation_id}")
-        logger.debug(f"🔧 MIGRATION_DEBUG: Is migration? {real_conversation_id and real_conversation_id != session_conversation_id}")
-        logger.debug(f"🔧 MIGRATION_DEBUG: websocket is {'present' if websocket else 'None'}")
-        if websocket:
-            try:
-                logger.debug(f"🔧 MIGRATION_DEBUG: websocket.client_state={websocket.client_state}")
-            except Exception as state_err:
-                logger.warning(f"🔧 MIGRATION_DEBUG: Could not get websocket.client_state: {state_err}")
-
-        # Update optimistic → real mapping if client provided optimistic ID
-        if client_conversation_id and client_conversation_id < 0 and real_conversation_id:
-            if redis_managers and "session_mappings" in redis_managers:
-                try:
-                    await redis_managers["session_mappings"].set_mapping(
-                        session_id, client_conversation_id, real_conversation_id
-                    )
-                    logger.info(f"Mapped optimistic ID {client_conversation_id} → real ID {real_conversation_id}")
-
-                    # Also cache in local_objects for broadcast lookups
-                    if "local_objects" in redis_managers:
-                        await redis_managers["local_objects"].cache_id_mapping(
-                            client_conversation_id, real_conversation_id
-                        )
-                        logger.info(f"Cached mapping in local_objects: {client_conversation_id} → {real_conversation_id}")
-
-                    # PROACTIVE SESSION MIGRATION: Rename the session to use the real ID
-                    # This ensures that if the client reconnects with the real ID, they get the same session
-                    old_session_id = f"ws_{user_id}_conv_{client_conversation_id}"
-                    new_session_id = f"ws_{user_id}_conv_{real_conversation_id}"
-                    if old_session_id != new_session_id:
-                        await rename_chat_session(old_session_id, new_session_id)
-                        logger.info(f"Proactively migrated session: {old_session_id} → {new_session_id}")
-                        # Update local session_id variable to use new ID for rest of this request
-                        session_id = new_session_id
-
-                except ValueError as e:
-                    # This shouldn't happen in normal operation, but if it does, log it and continue
-                    logger.error(f"Failed to set optimistic mapping: {str(e)}")
-                    # Send error to client so they know something went wrong
-                    error_payload = {
-                        "type": "error",
-                        "code": "MAPPING_CONFLICT",
-                        "message": "Conversation mapping conflict detected. Please refresh the page.",
-                        "request_id": request_id,
-                        "conversation_id": real_conversation_id
-                    }
-                    await safe_websocket_send(error_payload)
-
-        # NO LONGER MIGRATING WEBSOCKET: The WebSocket stays subscribed to its original ID
-        # Broadcasting already handles sending to both optimistic and real conversation IDs
-        # This prevents the WebSocket from being closed during optimistic->real ID migration
-        if real_conversation_id and real_conversation_id != session_conversation_id:
-            logger.info(f"Mapped optimistic ID {session_conversation_id} → real ID {real_conversation_id}")
-            # DON'T call update_websocket_conversation() - leave the WebSocket on its original ID
-            # The broadcast system will send messages to both the optimistic and real conversation IDs
-
-        # Use real conversation ID for all database operations and message processing
-        # The WebSocket remains subscribed to session_conversation_id (which may be optimistic)
-        # but we use real_conversation_id for everything else
+        # Use the row's id for all database operations and message processing. The session,
+        # channel and counters stay keyed by client_chat_id, so nothing is renamed here.
         processing_conversation_id = real_conversation_id if real_conversation_id else session_conversation_id
 
         # Wait for any pending tool executions to complete before processing new message
         # This prevents race conditions where new messages arrive while tools are still executing
-        if processing_conversation_id:
-            pending_count = await get_pending_tools_count(processing_conversation_id)
+        if client_chat_id:
+            pending_count = await get_pending_tools_count(client_chat_id)
             if pending_count > 0:
                 logger.info(f"Waiting for {pending_count} pending tool(s) to complete before processing new message")
-                tools_completed = await wait_for_pending_tools(processing_conversation_id, timeout_seconds=5.0)
+                tools_completed = await wait_for_pending_tools(client_chat_id, timeout_seconds=5.0)
                 if tools_completed:
                     logger.info(f"Pending tools completed, will reload history from database")
                 else:
@@ -5440,7 +5370,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": "Claude API key is not set. Please configure it in settings.",
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,  # Include conversation_id for client sync
-                "client_conversation_id": client_conversation_id
+                "client_chat_id": outbound_chat_id(),
             }
             await safe_websocket_send(error_payload_key)
             logger.warning(f"User {user_id} attempted to send message without Claude API key.")
@@ -5458,11 +5388,6 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # Log the tools being sent to Claude for debugging
             logger.info(f"Sending {len(tools)} tools to Claude")
             logger.debug(f"Tool names: {[tool.get('name') for tool in tools]}")
-            # Log specifically the launch_app tool structure
-            launch_app_tool = next((t for t in tools if t.get('name') == 'launch_app'), None)
-            if launch_app_tool:
-                logger.info(f"launch_app tool structure: {json.dumps(launch_app_tool, indent=2)}")
-            
             # Create the stream/response (auto-detects whether to stream)
             # call_claude_api returns a coroutine that when awaited gives us either:
             # - AsyncStream (when stream=True)
@@ -5551,7 +5476,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "code": "CLAUDE_TIMEOUT",
                 "message": "Claude API request timed out. Please try again.",
                 "request_id": request_id,
-                "conversation_id": session_conversation_id
+                "conversation_id": session_conversation_id,
+                "client_chat_id": outbound_chat_id(),
             }
             await safe_websocket_send(error_payload)
             return session_conversation_id
@@ -5571,7 +5497,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
-                "client_conversation_id": client_conversation_id
+                "client_chat_id": outbound_chat_id(),
             }
             
             # Save error as ASSISTANT message to database (persists even if WebSocket fails)
@@ -5580,7 +5506,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             local_objects = redis_managers.get("local_objects") if redis_managers else None
             save_result = save_message_to_db(
                 user_id=user_id,
-                conversation_id=session_conversation_id,
+                conversation_id=processing_conversation_id,
                 content=error_json_content,
                 message_sender="ASSISTANT",
                 request_id=request_id,
@@ -5633,17 +5559,17 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": str(api_error)
                 })
 
-                # Create user-friendly error message
-                error_message = "I encountered an error processing your message. This might be due to a technical issue with the conversation history. Please try starting a new conversation."
+                # Classify the 400 (usage limit vs history corruption vs generic)
+                error_code, error_message = classify_claude_bad_request(str(api_error))
 
                 # Create error payload
                 error_payload = {
                     "type": "error",
-                    "code": "CLAUDE_API_ERROR",
+                    "code": error_code,
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_conversation_id": client_conversation_id,
+                    "client_chat_id": outbound_chat_id(),
                     "client_message_id": client_message_id
                 }
 
@@ -5653,7 +5579,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 local_objects = redis_managers.get("local_objects") if redis_managers else None
                 save_result = save_message_to_db(
                     user_id=user_id,
-                    conversation_id=session_conversation_id,
+                    conversation_id=processing_conversation_id,
                     content=error_json_content,
                     message_sender="ASSISTANT",
                     request_id=request_id,
@@ -5702,7 +5628,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": error_message,
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_conversation_id": client_conversation_id,
+                    "client_chat_id": outbound_chat_id(),
                     "client_message_id": client_message_id
                 }
 
@@ -5712,7 +5638,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 try:
                     save_result = save_message_to_db(
                         user_id=user_id,
-                        conversation_id=session_conversation_id,
+                        conversation_id=processing_conversation_id,
                         content=error_json_content,
                         message_sender="ASSISTANT",
                         request_id=request_id,
@@ -5749,7 +5675,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 "message": error_message,
                 "request_id": request_id,
                 "conversation_id": session_conversation_id,
-                "client_conversation_id": client_conversation_id,
+                "client_chat_id": outbound_chat_id(),
                 "client_message_id": client_message_id
             }
 
@@ -5760,7 +5686,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             try:
                 save_result = save_message_to_db(
                     user_id=user_id,
-                    conversation_id=session_conversation_id,
+                    conversation_id=processing_conversation_id,
                     content=error_json_content,
                     message_sender="ASSISTANT",
                     request_id=request_id,
@@ -5834,7 +5760,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "error": "ServerError",
                     "detail": "Tool use indicated but no tool found.",
                     "request_id": request_id,
-                    "client_conversation_id": client_conversation_id
+                    "client_chat_id": outbound_chat_id(),
                 }
                 await safe_websocket_send(error_payload)
                 return
@@ -5846,7 +5772,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
             # Increment pending tool counter before execution (once per tool)
             for _ in tool_blocks:
-                await increment_pending_tools(session_conversation_id)
+                await increment_pending_tools(client_chat_id)
 
             # ===== CRITICAL: Save tool_use, TEXT, and PENDING tool_result IMMEDIATELY =====
             # This prevents race conditions where Claude sees incomplete conversation history
@@ -5921,7 +5847,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             if not user_timestamp:
                 user_msg_result = supabase.table("messages")\
                     .select("timestamp")\
-                    .eq("conversation_id", session_conversation_id)\
+                    .eq("conversation_id", processing_conversation_id)\
                     .eq("request_id", request_id)\
                     .eq("message_sender", "USER")\
                     .execute()
@@ -5966,7 +5892,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             # IMPORTANT: Only include text BEFORE tool_use, not after
             # 🔒 USE DISTRIBUTED REDIS LOCK to prevent race conditions across worker processes
             # Without this, concurrent requests can read incomplete conversation history
-            lock_key = f"conversation_lock:{session_conversation_id}"
+            lock_key = conversation_keys.lock_key(client_chat_id)
             lock = None
 
             try:
@@ -5975,12 +5901,12 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     lock = redis_client.lock(lock_key, timeout=10, blocking_timeout=5)
                     acquired = await lock.acquire(blocking=True, blocking_timeout=5)
                     if not acquired:
-                        logger.error(f"Failed to acquire conversation lock for {session_conversation_id}, falling back to local lock")
+                        logger.error(f"Failed to acquire conversation lock for {client_chat_id}, falling back to local lock")
                         lock = None  # Fall back to local lock if Redis lock fails
 
                 # If Redis lock failed or unavailable, use local lock as fallback
                 if lock is None:
-                    logger.warning(f"Using local lock (not distributed) for conversation {session_conversation_id}")
+                    logger.warning(f"Using local lock (not distributed) for conversation {client_chat_id}")
                     await chat_sessions_lock.acquire()
 
                 # Build assistant content: text_before + web search blocks + ALL tool_uses (NO text_after)
@@ -6016,7 +5942,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 local_objects = redis_managers.get("local_objects") if redis_managers else None
                 tool_use_save_result = save_message_to_db(
                     user_id=user_id,
-                    conversation_id=session_conversation_id,
+                    conversation_id=processing_conversation_id,
                     content=assistant_response_text_before,  # Include text_before (may be empty string)
                     message_sender="ASSISTANT",
                     request_id=request_id,
@@ -6074,7 +6000,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 # Save ALL PENDING tool_results to database with timestamp after tool_use
                 pending_result_save = save_message_to_db(
                     user_id=user_id,
-                    conversation_id=session_conversation_id,
+                    conversation_id=processing_conversation_id,
                     content="",  # Tool messages don't have text content
                     message_sender="USER",
                     request_id=request_id,
@@ -6099,7 +6025,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         is_owned = await lock.owned()
                         if is_owned:
                             await lock.release()
-                            logger.debug(f"✅ Released distributed conversation lock for {session_conversation_id}")
+                            logger.debug(f"✅ Released distributed conversation lock for {client_chat_id}")
                     except Exception as e:
                         logger.error(f"Error releasing distributed lock: {e}")
                 elif lock is None and not redis_client:
@@ -6119,7 +6045,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         logger.info(f"🔧 TOOL_DEBUG execute_tool: websocket.client_state={websocket.client_state}")
                     except Exception as state_err:
                         logger.warning(f"🔧 TOOL_DEBUG execute_tool: Could not get websocket.client_state: {state_err}")
-                logger.info(f"🔧 TOOL_DEBUG execute_tool: client_conversation_id={client_conversation_id} (optimistic ID migration: {client_conversation_id is not None and client_conversation_id < 0})")
+                logger.info(f"🔧 TOOL_DEBUG execute_tool: client_chat_id={client_chat_id}")
 
                 # Execute ALL tools using execute_tool_with_queue
                 # Screen agent tools will be queued (one at a time), others run in parallel
@@ -6130,6 +6056,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     from tool_result_handler import _current_tool_use_id, _current_session_id
                     _current_tool_use_id.set(tb.id)
                     _current_session_id.set(session_id)
+                    # Tool modules' tool_execution payloads carry this chat's client_chat_id
+                    tool_payload_ids.current_client_chat_id.set(client_chat_id)
                     result = await execute_tool_with_queue(
                         tb.name,
                         tb.input,
@@ -6138,6 +6066,8 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         websocket=websocket,
                         tool_result_handler=tool_result_handler,
                         conversation_id=session_conversation_id,
+                        # Real DB id for server-side tracking (conversation_id may be a client id or None)
+                        tracking_conversation_id=processing_conversation_id,
                         session_id=session_id,
                         device_id=device_id
                     )
@@ -6162,7 +6092,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                        "Asana authentication failed" in result.get("error", ""):
                         logger.info(f"Tool {tb.name} resulted in Asana auth error. Sending directly to client.")
                         result["request_id"] = request_id
-                        result["client_conversation_id"] = client_conversation_id
+                        result["client_chat_id"] = outbound_chat_id()
                         await safe_websocket_send(result)
                         asana_auth_error = result
 
@@ -6181,7 +6111,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
 
                     # Update database with actual result
                     update_success = update_tool_result_in_db(
-                        conversation_id=session_conversation_id,
+                        conversation_id=processing_conversation_id,
                         tool_use_id=tb.id,
                         result_content=tool_execution_results[tb.id],
                         user_id=user_id
@@ -6203,7 +6133,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             finally:
                 # Always decrement counter for ALL tools, even if tool execution or saving fails
                 for _ in tool_blocks:
-                    await decrement_pending_tools(session_conversation_id)
+                    await decrement_pending_tools(client_chat_id)
             
             # Use async API call for tool response
             try:
@@ -6212,7 +6142,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     current_anthropic_client,
                     session_id,
                     stream=False,  # Explicitly disable streaming for tool responses
-                    conversation_id=session_conversation_id,
+                    conversation_id=processing_conversation_id,
                     user_id=user_id
                 )
                 
@@ -6246,7 +6176,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "message": f"Claude API authentication failed: {str(auth_error)}. Please check your Claude API Key in settings.",
                     "request_id": request_id,
                     "conversation_id": session_conversation_id,
-                    "client_conversation_id": client_conversation_id
+                    "client_chat_id": outbound_chat_id(),
                 }
                 
                 # Save error as ASSISTANT message to database (persists even if WebSocket fails)
@@ -6255,7 +6185,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 local_objects = redis_managers.get("local_objects") if redis_managers else None
                 save_result = save_message_to_db(
                     user_id=user_id,
-                    conversation_id=session_conversation_id,
+                    conversation_id=processing_conversation_id,
                     content=error_json_content,
                     message_sender="ASSISTANT",
                     request_id=request_id,
@@ -6276,22 +6206,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             except Exception as tool_api_error:
                 # Check if this is a BadRequestError (400) from Claude API during tool use
                 if isinstance(tool_api_error, BadRequestError):
-                    # Check if this is specifically a tool_use_id mismatch error
-                    is_tool_use_id_error = (
-                        "tool_use_id" in str(tool_api_error).lower() or
-                        "unexpected tool_use_id" in str(tool_api_error).lower()
-                    )
-
-                    if is_tool_use_id_error:
-                        logger.error(f"Claude API tool_use_id mismatch error during tool use for request {request_id}: {str(tool_api_error)}")
-                        logger.error(f"Conversation history corrupted - cannot continue")
-                        error_message = "I'm sorry, but this conversation has encountered a technical issue with the message history that prevents me from continuing. Please start a new conversation."
-                        error_code = "CONVERSATION_HISTORY_ERROR"
-                    else:
-                        # General BadRequestError during tool use (e.g., duplicate content, invalid format)
-                        logger.error(f"Claude API BadRequest (400) during tool use for request {request_id}: {str(tool_api_error)}")
-                        error_message = "I encountered an error processing your message. This might be due to a technical issue with the conversation history. Please try starting a new conversation."
-                        error_code = "CLAUDE_API_ERROR"
+                    # Classify the 400 (usage limit vs tool_use_id history corruption vs generic)
+                    error_code, error_message = classify_claude_bad_request(str(tool_api_error))
+                    logger.error(f"Claude API BadRequest (400) during tool use for request {request_id} [{error_code}]: {str(tool_api_error)}")
+                    if error_code == "CONVERSATION_HISTORY_ERROR":
+                        logger.error("Conversation history corrupted - cannot continue")
 
                     await set_request_state(request_id, "bad_request_error", {
                         "session_id": session_id,
@@ -6306,7 +6225,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         "message": error_message,
                         "request_id": request_id,
                         "conversation_id": session_conversation_id,
-                        "client_conversation_id": client_conversation_id,
+                        "client_chat_id": outbound_chat_id(),
                         "client_message_id": client_message_id
                     }
 
@@ -6316,7 +6235,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     local_objects = redis_managers.get("local_objects") if redis_managers else None
                     save_result = save_message_to_db(
                         user_id=user_id,
-                        conversation_id=session_conversation_id,
+                        conversation_id=processing_conversation_id,
                         content=error_json_content,
                         message_sender="ASSISTANT",
                         request_id=request_id,
@@ -6538,6 +6457,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         # If web search blocks are present, save them as tool_content for multi-turn context
         saved_conversation_id = session_conversation_id
         save_result = None
+        response_not_stored = False  # True when the reply had text but could not be saved (e.g. chat deleted mid-request)
         if assistant_response_text and not skip_duplicate_response:
             logger.info(f"About to save ASSISTANT message: conversation_id={session_conversation_id}, request_id={request_id}, cancelled={request_cancelled}, content_preview='{assistant_response_text[:50]}...'")
             local_objects = redis_managers.get("local_objects") if redis_managers else None
@@ -6548,7 +6468,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             save_content_type = "tool_use" if has_client_tool_use else "text"
             # Still save server tool blocks in tool_content for multi-turn context
             save_tool_content = content_list + server_tool_blocks if server_tool_blocks else None
-            save_result = save_message_to_db(user_id, session_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type=save_content_type, tool_content=save_tool_content, client_timestamp=final_text_timestamp, local_objects=local_objects)
+            save_result = save_message_to_db(user_id, processing_conversation_id, assistant_response_text, "ASSISTANT", request_id, content_type=save_content_type, tool_content=save_tool_content, client_timestamp=final_text_timestamp, local_objects=local_objects)
             if save_result:
                 saved_conversation_id, bot_message_id, cancelled_ids, saved_timestamp = save_result
                 logger.info(f"ASSISTANT message saved successfully: conversation_id={saved_conversation_id}, message_id={bot_message_id}")
@@ -6573,7 +6493,10 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                         session_id=session_id
                     )
             else:
-                logger.error(f"Failed to save ASSISTANT message for conversation_id={session_conversation_id}, request_id={request_id}")
+                # Usually the chat was deleted while Claude was still replying (deleted chats are
+                # not resurrected). There is nothing to deliver, so skip the send/broadcast below.
+                response_not_stored = True
+                logger.warning(f"ASSISTANT message not saved for conversation_id={session_conversation_id}, request_id={request_id}; not delivering the reply")
         else:
             logger.info(f"No text content in Claude's response for request {request_id}, only tool calls. This is normal for tool-only responses.")
 
@@ -6618,7 +6541,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         except Exception as e:
             logger.error(f"Error checking for pending get_* tool: {e}")
 
-        if not request_cancelled and not should_skip_broadcast_for_pending_get and not skip_duplicate_response:
+        if not request_cancelled and not should_skip_broadcast_for_pending_get and not skip_duplicate_response and not response_not_stored:
             # Only send response if there's actual text content
             # Empty responses create blank message bubbles in the Android app
             if assistant_response_text and assistant_response_text.strip():
@@ -6626,9 +6549,9 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                 response_payload = {
                     "response": assistant_response_text,
                     "request_id": request_id,
-                    "conversation_id": saved_conversation_id,  # Include real conversation_id for client sync (resolved from optimistic if needed)
-                    "client_conversation_id": client_conversation_id,  # Echo back optimistic ID
-                    "client_message_id": client_message_id,  # Echo back optimistic message ID
+                    "conversation_id": saved_conversation_id,  # Include real conversation_id for client sync
+                    "client_chat_id": outbound_chat_id(saved_conversation_id),  # Echo back the client's chat id
+                    "client_message_id": client_message_id,  # Echo back the client's message ID
                     "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "response"  # Indicate this is a direct response (vs broadcast)
                 }
@@ -6644,15 +6567,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
                     "response": assistant_response_text,
                     "request_id": request_id,  # Include request_id so clients can track the message
                     "conversation_id": processing_conversation_id,  # Send the real conversation ID
-                    "client_conversation_id": client_conversation_id,  # Include for client validation
+                    "client_chat_id": outbound_chat_id(processing_conversation_id),  # Include for client validation
                     "client_message_id": client_message_id,  # Include for completeness
                     "timestamp": saved_timestamp,  # Authoritative stored timestamp so client adopts server ordering (no local +1 recompute)
                     "type": "broadcast"  # Keep type to indicate it's a broadcast
                 }
                 # Bot responses should go to ALL sessions - they originate from the server, not from any client session
-                # Broadcast using the real conversation ID - the broadcast function will also send to optimistic ID
+                # One channel per conversation, keyed by client_chat_id
                 # Only exclude session if direct send succeeded - if it failed, include it in broadcast so client can receive on reconnect
-                await broadcast_to_conversation(processing_conversation_id, broadcast_payload, exclude_session=session_id if direct_send_succeeded else None)
+                await broadcast_to_conversation(client_chat_id, broadcast_payload, exclude_session=origin_session_id if direct_send_succeeded else None)
                 logger.info(f"Broadcasted assistant message to all sessions for conversation {processing_conversation_id}")
             else:
                 logger.info(f"Skipping empty response broadcast for tool-only response (request {request_id})")
@@ -6724,7 +6647,7 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             "message": error_message,
             "request_id": request_id,
             "conversation_id": session_conversation_id,
-            "client_conversation_id": client_conversation_id,
+            "client_chat_id": outbound_chat_id(),
             "client_message_id": client_message_id
         }
 
@@ -6734,10 +6657,11 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
         try:
             save_message_to_db(
                 user_id=user_id,
-                conversation_id=session_conversation_id,
+                conversation_id=processing_conversation_id,
                 content=error_json_content,
                 message_sender="ASSISTANT",
                 request_id=request_id,
+                client_chat_id=client_chat_id,  # resolves the row if the error came before the USER save
                 content_type="text",
                 mark_cancelled=is_cancelled,  # Mark as cancelled if request was cancelled
                 local_objects=local_objects
@@ -6783,15 +6707,15 @@ async def process_message_task(websocket, session_id, session_conversation_id, u
             
             # If disconnected and no more active tasks for this session, clean up chat history
             if not websocket_connected:
-                # IMPORTANT: Check if a newer WebSocket has replaced ours before cleaning up.
-                # If a new connection re-registered this session while we were processing,
-                # cleaning up would destroy the new connection's Redis subscriptions.
-                current_ws = None
+                # IMPORTANT: The chat context is shared by every socket on this chat. If another
+                # socket (e.g. a reconnect) is registered for the chat, leave the context alone.
+                other_sockets = []
                 if redis_managers and "local_objects" in redis_managers:
-                    current_ws = await redis_managers["local_objects"].get_session_websocket(session_id)
+                    registrations = await redis_managers["local_objects"].get_conversation_websockets(client_chat_id)
+                    other_sockets = [sid for sid, ws in registrations if ws is not websocket]
 
-                if current_ws is not None and current_ws is not websocket:
-                    logger.info(f"Skipping cleanup for session {session_id}: a newer WebSocket has taken over")
+                if other_sockets:
+                    logger.info(f"Skipping cleanup for session {session_id}: other WebSocket(s) on the chat: {other_sockets}")
                 else:
                     active_reqs = await get_active_requests(session_id)
                     session_has_active_requests = bool(active_reqs)

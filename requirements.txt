@@ -17,6 +17,7 @@ coverage>=7.8.0
 pre-commit>=3.6.0
 httpx==0.28.1
 supabase==2.16.0
+postgrest==1.1.1  # supabase 2.16 needs postgrest>=1.1 (passes http_client); older 1.0.x breaks client init
 pytz==2025.2
 redis==5.0.1
 aioredis==2.0.1

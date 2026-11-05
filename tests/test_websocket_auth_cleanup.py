@@ -21,7 +21,6 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
     @patch('app.remove_session_timestamp')
     @patch('app.clear_chat_session')
     @patch('app.unsubscribe_from_conversation')
-    @patch('app.clear_session_mappings')
     @patch('app.remove_user_session')
     @patch('app.redis_managers')
     @patch('jose.jwt.decode')
@@ -36,7 +35,6 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         mock_jwt_decode,
         mock_redis_managers,
         mock_remove_user_session,
-        mock_clear_mappings,
         mock_unsubscribe,
         mock_clear_session,
         mock_remove_timestamp
@@ -79,13 +77,11 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         mock_remove_timestamp.assert_not_called()
         mock_clear_session.assert_not_called()
         mock_unsubscribe.assert_not_called()
-        mock_clear_mappings.assert_not_called()
         mock_remove_user_session.assert_not_called()
     
     @patch('app.remove_session_timestamp')
     @patch('app.clear_chat_session')
     @patch('app.unsubscribe_from_conversation')
-    @patch('app.clear_session_mappings')
     @patch('app.remove_user_session')
     @patch('app.redis_managers')
     @patch('jose.jwt.decode')
@@ -102,7 +98,6 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         mock_jwt_decode,
         mock_redis_managers,
         mock_remove_user_session,
-        mock_clear_mappings,
         mock_unsubscribe,
         mock_clear_session,
         mock_remove_timestamp
@@ -150,9 +145,9 @@ class TestWebSocketAuthCleanup(unittest.IsolatedAsyncioTestCase):
         # Verify cleanup WAS called since resources_allocated should be True
         # (Session activity was updated before the failure)
         mock_remove_timestamp.assert_called_once()
-        mock_clear_session.assert_called_once()
+        # The chat context is shared across sockets on the chat, so it is never cleared here
+        mock_clear_session.assert_not_called()
         mock_unsubscribe.assert_called_once()
-        mock_clear_mappings.assert_called_once()
         mock_remove_user_session.assert_called_once()
         
         # Verify the session_id used for cleanup matches what was created

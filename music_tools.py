@@ -8,6 +8,7 @@ import uuid
 import asyncio
 from typing import Optional, Dict, Any, Tuple
 from preferences import get_preference, set_preference
+from tool_payload_ids import tool_payload_chat_ids
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -107,7 +108,8 @@ async def agent_play_youtube_music(query: str, content_type: Optional[str] = Non
             "tool": "agent_play_youtube_music",
             "request_id": tool_request_id,
             "params": params,
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -197,7 +199,8 @@ async def agent_queue_youtube_music(query: str, user_id: str = None, websocket =
             "params": {
                 "query": query
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket
@@ -286,7 +289,8 @@ async def agent_play_next_youtube_music(query: str, user_id: str = None, websock
             "params": {
                 "query": query
             },
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         try:
@@ -369,7 +373,8 @@ async def agent_pause_youtube_music(user_id: str = None, websocket = None,
             "tool": "agent_pause_youtube_music",
             "request_id": tool_request_id,
             "params": {},
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            **tool_payload_chat_ids(conversation_id),
         }
 
         # Send to Android app via WebSocket

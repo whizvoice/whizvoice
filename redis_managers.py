@@ -58,74 +58,8 @@ class ChatSessionManager:
         except (ValueError, AttributeError) as e:
             raise MissingTimestampError(f"Invalid timestamp format: {timestamp}, error: {e}")
 
-    # --- Session Redirect Methods (for optimistic ID migration) ---
-
-    async def set_redirect(self, old_session_id: str, new_session_id: str):
-        """Store a redirect from old session_id to new session_id.
-
-        This is used when migrating from optimistic to real conversation IDs.
-        The redirect ensures that any operations on the old session_id
-        are automatically forwarded to the new session_id.
-        """
-        key = f"session_redirect:{old_session_id}"
-        await self.redis.set(key, new_session_id, ex=3600)  # 1 hour TTL
-        logger.info(f"Set session redirect: {old_session_id} → {new_session_id}")
-
-    async def get_redirect(self, session_id: str) -> Optional[str]:
-        """Get redirect target for a session_id, if one exists."""
-        key = f"session_redirect:{session_id}"
-        result = await self.redis.get(key)
-        if result:
-            return result.decode() if isinstance(result, bytes) else result
-        return None
-
-    async def resolve_session_id(self, session_id: str) -> str:
-        """Resolve a session_id to its canonical form (following redirects).
-
-        If a redirect exists, returns the target session_id.
-        Otherwise returns the original session_id.
-        """
-        redirect = await self.get_redirect(session_id)
-        if redirect:
-            logger.debug(f"Resolved session redirect: {session_id} → {redirect}")
-            return redirect
-        return session_id
-
-    async def rename_session(self, old_session_id: str, new_session_id: str) -> bool:
-        """Rename a session with redirect-first for safety.
-
-        This atomically:
-        1. Sets a redirect from old to new (FIRST - critical for race condition handling)
-        2. Renames the Redis key if it exists
-
-        Any in-flight operations using the old session_id will be redirected.
-        """
-        old_key = f"chat_session:{old_session_id}"
-        new_key = f"chat_session:{new_session_id}"
-
-        # CRITICAL: Set redirect FIRST to minimize race window
-        await self.set_redirect(old_session_id, new_session_id)
-
-        # Then try to rename (best effort)
-        try:
-            if await self.redis.exists(old_key) and not await self.redis.exists(new_key):
-                await self.redis.rename(old_key, new_key)
-                logger.info(f"Renamed session {old_session_id} → {new_session_id}")
-            elif await self.redis.exists(new_key):
-                logger.info(f"Session {new_session_id} already exists, redirect set only")
-            else:
-                logger.info(f"Old session {old_session_id} doesn't exist, redirect set only")
-        except Exception as e:
-            logger.warning(f"Rename failed (redirect still set): {e}")
-
-        return True
-
-    # --- End Session Redirect Methods ---
-
     async def get(self, session_id: str, include_cancelled: bool = False) -> List[Dict]:
         """Get chat history for a session, ordered by timestamp"""
-        # Resolve any redirect first
-        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         # ZRANGE returns members in score order (lowest to highest = oldest to newest)
         members = await self.redis.zrange(key, 0, -1)
@@ -139,8 +73,6 @@ class ChatSessionManager:
 
     async def set(self, session_id: str, messages: List[Dict]):
         """Set entire chat history using ZSET"""
-        # Resolve any redirect first
-        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         # Delete existing data
         await self.redis.delete(key)
@@ -225,13 +157,8 @@ class ChatSessionManager:
         When a list of messages is passed, they are added atomically using a Redis
         pipeline with transaction=True. This prevents race conditions where another
         worker might read partial state between writes.
-
-        Includes check-after-write pattern to handle race conditions where
-        a redirect is created while the write is in progress.
         """
-        original_session_id = session_id
-        resolved_id = await self.resolve_session_id(session_id)
-        key = f"chat_session:{resolved_id}"
+        key = f"chat_session:{session_id}"
 
         if isinstance(message, list):
             # ATOMIC BATCH: Use pipeline with transaction for multiple messages
@@ -256,19 +183,6 @@ class ChatSessionManager:
                     pipe.zadd(key, {msg_json: score})
                 pipe.expire(key, self.ttl)
                 await pipe.execute()
-
-            # CHECK-AFTER-WRITE: Handle race condition where redirect was created during our write
-            if resolved_id == original_session_id:
-                current_redirect = await self.resolve_session_id(original_session_id)
-                if current_redirect != resolved_id:
-                    # Redirect appeared! Duplicate all messages to correct location
-                    new_key = f"chat_session:{current_redirect}"
-                    async with self.redis.pipeline(transaction=True) as pipe:
-                        for msg_json, score in prepared_messages:
-                            pipe.zadd(new_key, {msg_json: score})
-                        pipe.expire(new_key, self.ttl)
-                        await pipe.execute()
-                    logger.info(f"Check-after-write: duplicated {len(messages)} messages to {current_redirect} (orphan at {resolved_id} will expire)")
         else:
             # SINGLE MESSAGE: Original logic
             # Add metadata to message
@@ -284,16 +198,6 @@ class ChatSessionManager:
             await self.redis.zadd(key, {msg_json: score})
             await self.redis.expire(key, self.ttl)
 
-            # CHECK-AFTER-WRITE: Handle race condition where redirect was created during our write
-            if resolved_id == original_session_id:  # We used original ID (wasn't already redirected)
-                current_redirect = await self.resolve_session_id(original_session_id)
-                if current_redirect != resolved_id:
-                    # Redirect appeared! Duplicate message to correct location
-                    new_key = f"chat_session:{current_redirect}"
-                    await self.redis.zadd(new_key, {msg_json: score})
-                    await self.redis.expire(new_key, self.ttl)
-                    logger.info(f"Check-after-write: duplicated message to {current_redirect} (orphan at {resolved_id} will expire)")
-
         await self._trim_to_max(key)
 
     async def append(self, session_id: str, message: Dict):
@@ -302,8 +206,6 @@ class ChatSessionManager:
 
     async def extend(self, session_id: str, new_messages: List[Dict]):
         """Extend chat history with multiple messages"""
-        # Resolve any redirect first
-        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         for msg in new_messages:
             timestamp = msg.get("_timestamp")
@@ -316,8 +218,6 @@ class ChatSessionManager:
 
     async def delete(self, session_id: str):
         """Delete a session"""
-        # Resolve any redirect first
-        session_id = await self.resolve_session_id(session_id)
         await self.redis.delete(f"chat_session:{session_id}")
 
     async def clear(self, session_id: str):
@@ -326,14 +226,10 @@ class ChatSessionManager:
 
     async def exists(self, session_id: str) -> bool:
         """Check if session exists"""
-        # Resolve any redirect first
-        session_id = await self.resolve_session_id(session_id)
         return await self.redis.exists(f"chat_session:{session_id}")
 
     async def mark_cancelled(self, session_id: str, request_id: str):
         """Mark all messages with given request_id as cancelled"""
-        # Resolve any redirect first
-        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
         for member, score in members_with_scores:
@@ -352,8 +248,6 @@ class ChatSessionManager:
         2. Update _timestamp in the message
         3. Add the new member with new score
         """
-        # Resolve any redirect first
-        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
 
@@ -389,8 +283,6 @@ class ChatSessionManager:
         Returns:
             Number of messages updated
         """
-        # Resolve any redirect first
-        session_id = await self.resolve_session_id(session_id)
         key = f"chat_session:{session_id}"
         members_with_scores = await self.redis.zrange(key, 0, -1, withscores=True)
 
@@ -570,66 +462,6 @@ class ActiveRequestManager:
         return count > 0
 
 
-class SessionMappingManager:
-    """Manages optimistic ID mappings in Redis"""
-    
-    def __init__(self, redis_client: redis.Redis):
-        self.redis = redis_client
-        
-    async def set_mapping(self, session_id: str, client_id: int, real_id: int):
-        """Set optimistic to real ID mapping"""
-        # CRITICAL VALIDATION: Check if this real_id already has a different optimistic mapping
-        existing_optimistic = await self.get_optimistic_id(session_id, real_id)
-        if existing_optimistic is not None and existing_optimistic != client_id:
-            logger.error(f"CRITICAL: Multiple optimistic IDs mapping to same real ID! "
-                        f"Session {session_id}: existing optimistic {existing_optimistic} "
-                        f"conflicts with new optimistic {client_id} for real ID {real_id}")
-            # Raise an exception to prevent data corruption
-            raise ValueError(f"Real conversation {real_id} already mapped to optimistic ID {existing_optimistic}, "
-                           f"cannot map to {client_id}")
-        
-        # Store both directions
-        await self.redis.hset(
-            f"session_mapping:{session_id}:opt_to_real",
-            str(client_id),
-            str(real_id)
-        )
-        await self.redis.hset(
-            f"session_mapping:{session_id}:real_to_opt",
-            str(real_id),
-            str(client_id)
-        )
-        # Set expiry
-        await self.redis.expire(f"session_mapping:{session_id}:opt_to_real", 3600)
-        await self.redis.expire(f"session_mapping:{session_id}:real_to_opt", 3600)
-    
-    async def get_real_id(self, session_id: str, client_id: int) -> Optional[int]:
-        """Get real ID from optimistic ID"""
-        value = await self.redis.hget(
-            f"session_mapping:{session_id}:opt_to_real",
-            str(client_id)
-        )
-        return int(value) if value else None
-    
-    async def get_optimistic_id(self, session_id: str, real_id: int) -> Optional[int]:
-        """Get optimistic ID from real ID"""
-        value = await self.redis.hget(
-            f"session_mapping:{session_id}:real_to_opt",
-            str(real_id)
-        )
-        return int(value) if value else None
-    
-    async def delete(self, session_id: str):
-        """Delete all mappings for a session"""
-        await self.redis.delete(f"session_mapping:{session_id}:opt_to_real")
-        await self.redis.delete(f"session_mapping:{session_id}:real_to_opt")
-    
-    async def clear(self, session_id: str):
-        """Alias for delete() method - for backward compatibility"""
-        await self.delete(session_id)
-
-
-
 class RequestStateManager:
     """Manages request state tracking in Redis"""
     
@@ -787,17 +619,13 @@ class LocalObjectManager:
         self.active_tasks: Dict[str, asyncio.Task] = {}  # Task objects
         self.redis_listener_tasks: Dict[str, asyncio.Task] = {}  # Redis listener tasks
         self.anthropic_clients: Dict[str, Any] = {}  # Client objects
-        self.conversation_websockets: Dict[int, List[Tuple[str, WebSocket]]] = {}  # Conversation WebSockets
+        self.conversation_websockets: Dict[str, List[Tuple[str, WebSocket]]] = {}  # client_chat_id -> WebSockets
         self.claude_streams: Dict[str, Any] = {}  # Claude API stream objects for cancellation
-        
+
         # NEW: Reverse lookup for efficient broadcasting
-        self.session_conversations: Dict[str, Set[int]] = {}  # session_id -> Set of conversation_ids
+        self.session_conversations: Dict[str, Set[str]] = {}  # session_id -> Set of client_chat_ids
         self.session_websocket: Dict[str, WebSocket] = {}  # session_id -> WebSocket (for fast lookup)
-        
-        # Cache for optimistic ID mappings to avoid database queries
-        self.optimistic_to_real: Dict[int, int] = {}  # optimistic_id -> real_id
-        self.real_to_optimistic: Dict[int, int] = {}  # real_id -> optimistic_id
-        
+
         # Locks for local objects
         self.pubsub_lock = asyncio.Lock()
         self.tasks_lock = asyncio.Lock()
@@ -931,8 +759,8 @@ class LocalObjectManager:
             return dict(self.redis_listener_tasks)
     
     # Conversation WebSocket management
-    async def get_websocket_registrations(self, websocket: WebSocket) -> List[int]:
-        """Get all conversation IDs where this WebSocket is registered"""
+    async def get_websocket_registrations(self, websocket: WebSocket) -> List[str]:
+        """Get all client_chat_ids where this WebSocket is registered"""
         async with self.conversation_websockets_lock:
             conversation_ids = []
             for conv_id, registrations in self.conversation_websockets.items():
@@ -942,65 +770,34 @@ class LocalObjectManager:
                         break  # Found in this conversation, move to next
             return conversation_ids
     
-    async def register_conversation_websocket(self, session_id: str, conversation_id: int, 
-                                             websocket: WebSocket, optimistic_id: Optional[int] = None):
-        """Register a WebSocket for a conversation, handling migration from optimistic to real IDs"""
+    async def register_conversation_websocket(self, session_id: str, client_chat_id: str,
+                                             websocket: WebSocket):
+        """Register a WebSocket for a conversation, keyed by its client_chat_id"""
         async with self.conversation_websockets_lock:
             async with self.session_lookup_lock:
-                # Cache the optimistic->real mapping if provided
-                if optimistic_id is not None and conversation_id > 0:
-                    self.optimistic_to_real[optimistic_id] = conversation_id
-                    self.real_to_optimistic[conversation_id] = optimistic_id
-                    logger.info(f"Cached mapping: optimistic {optimistic_id} -> real {conversation_id}")
-                
-                # If this is a real ID (positive) and this WebSocket is already registered
-                # with an optimistic ID (negative), remove the optimistic registration
-                if conversation_id > 0:
-                    # Check all conversations for this exact WebSocket instance
-                    for conv_id in list(self.conversation_websockets.keys()):
-                        if conv_id < 0:  # It's an optimistic ID
-                            # Check if this WebSocket is registered there
-                            registrations = self.conversation_websockets[conv_id]
-                            for sid, ws in registrations[:]:  # Use slice copy to allow modification
-                                if ws is websocket:  # Same WebSocket instance
-                                    registrations.remove((sid, ws))
-                                    # Update reverse lookup: remove optimistic ID from session
-                                    if sid in self.session_conversations:
-                                        self.session_conversations[sid].discard(conv_id)
-                                        if not self.session_conversations[sid]:
-                                            del self.session_conversations[sid]
-                                    # Cache this optimistic->real mapping
-                                    self.optimistic_to_real[conv_id] = conversation_id
-                                    self.real_to_optimistic[conversation_id] = conv_id
-                                    logger.info(f"Removed optimistic registration {conv_id} for WebSocket (session {sid}) migrating to real ID {conversation_id}")
-                                    if not registrations:
-                                        del self.conversation_websockets[conv_id]
-                                    break
-                
-                # Now proceed with normal registration
-                if conversation_id not in self.conversation_websockets:
-                    self.conversation_websockets[conversation_id] = []
-                
+                if client_chat_id not in self.conversation_websockets:
+                    self.conversation_websockets[client_chat_id] = []
+
                 # Remove any existing entry for this session (handles reconnection)
-                existing_entries = [(sid, ws) for sid, ws in self.conversation_websockets[conversation_id] 
+                existing_entries = [(sid, ws) for sid, ws in self.conversation_websockets[client_chat_id]
                                   if sid == session_id]
                 for old_entry in existing_entries:
-                    self.conversation_websockets[conversation_id].remove(old_entry)
-                    logger.info(f"Replaced old WebSocket registration for session {session_id} in conversation {conversation_id}")
-                
+                    self.conversation_websockets[client_chat_id].remove(old_entry)
+                    logger.info(f"Replaced old WebSocket registration for session {session_id} in conversation {client_chat_id}")
+
                 # Add the new WebSocket registration
-                self.conversation_websockets[conversation_id].append((session_id, websocket))
-                
+                self.conversation_websockets[client_chat_id].append((session_id, websocket))
+
                 # Update reverse lookup mappings
                 if session_id not in self.session_conversations:
                     self.session_conversations[session_id] = set()
-                self.session_conversations[session_id].add(conversation_id)
+                self.session_conversations[session_id].add(client_chat_id)
 
                 # Update session -> websocket mapping
                 self.session_websocket[session_id] = websocket
     
-    async def unregister_conversation_websocket(self, session_id: str, conversation_id: Optional[int] = None):
-        """Unregister a WebSocket from conversations"""
+    async def unregister_conversation_websocket(self, session_id: str, conversation_id: Optional[str] = None):
+        """Unregister a WebSocket from conversations (conversation_id is the client_chat_id key)"""
         async with self.conversation_websockets_lock:
             async with self.session_lookup_lock:
                 conversations_cleaned = []
@@ -1046,18 +843,18 @@ class LocalObjectManager:
                 for conv_id in conversations_cleaned:
                     logger.info(f"Removed WebSocket for session {session_id} from conversation {conv_id}")
     
-    async def get_conversation_websockets(self, conversation_id: int) -> List[Tuple[str, WebSocket]]:
+    async def get_conversation_websockets(self, client_chat_id: str) -> List[Tuple[str, WebSocket]]:
         """Get all WebSocket connections for a conversation"""
         async with self.conversation_websockets_lock:
-            return list(self.conversation_websockets.get(conversation_id, []))
-    
-    
-    async def get_all_conversation_websockets(self) -> Dict[int, List[Tuple[str, WebSocket]]]:
+            return list(self.conversation_websockets.get(client_chat_id, []))
+
+
+    async def get_all_conversation_websockets(self) -> Dict[str, List[Tuple[str, WebSocket]]]:
         """Get all conversation WebSocket mappings (for monitoring/debugging)"""
         async with self.conversation_websockets_lock:
             return dict(self.conversation_websockets)
     
-    async def remove_websocket_from_conversation(self, conversation_id: int, session_id: str, 
+    async def remove_websocket_from_conversation(self, conversation_id: str, session_id: str,
                                                 websocket: WebSocket):
         """Remove a specific WebSocket from a conversation (for cleanup after send errors)"""
         async with self.conversation_websockets_lock:
@@ -1072,8 +869,8 @@ class LocalObjectManager:
         return False
     
     # Helper methods for reverse lookup
-    async def get_session_conversations(self, session_id: str) -> Set[int]:
-        """Get all conversation IDs a session is registered for"""
+    async def get_session_conversations(self, session_id: str) -> Set[str]:
+        """Get all client_chat_ids a session is registered for"""
         async with self.session_lookup_lock:
             return set(self.session_conversations.get(session_id, set()))
     
@@ -1082,48 +879,16 @@ class LocalObjectManager:
         async with self.session_lookup_lock:
             return self.session_websocket.get(session_id)
     
-    async def get_all_session_mappings(self) -> Dict[str, Set[int]]:
+    async def get_all_session_mappings(self) -> Dict[str, Set[str]]:
         """Get all session -> conversations mappings (for debugging/monitoring)"""
         async with self.session_lookup_lock:
             return {sid: set(convs) for sid, convs in self.session_conversations.items()}
-    
-    async def session_is_registered(self, session_id: str, conversation_id: int) -> bool:
+
+    async def session_is_registered(self, session_id: str, client_chat_id: str) -> bool:
         """Check if a session is registered for a specific conversation"""
         async with self.session_lookup_lock:
-            return conversation_id in self.session_conversations.get(session_id, set())
-    
-    # Optimistic ID cache methods
-    async def get_optimistic_id_cached(self, real_id: int) -> Optional[int]:
-        """Get cached optimistic ID for a real conversation ID"""
-        async with self.session_lookup_lock:
-            return self.real_to_optimistic.get(real_id)
-    
-    async def get_real_id_cached(self, optimistic_id: int) -> Optional[int]:
-        """Get cached real ID for an optimistic conversation ID"""
-        async with self.session_lookup_lock:
-            return self.optimistic_to_real.get(optimistic_id)
-    
-    async def cache_id_mapping(self, optimistic_id: int, real_id: int):
-        """Cache an optimistic->real ID mapping"""
-        async with self.session_lookup_lock:
-            self.optimistic_to_real[optimistic_id] = real_id
-            self.real_to_optimistic[real_id] = optimistic_id
-            logger.debug(f"Cached ID mapping: optimistic {optimistic_id} <-> real {real_id}")
-    
-    async def clear_id_mapping_cache(self, conversation_id: int):
-        """Clear cached mappings for a conversation (when it's deleted/completed)"""
-        async with self.session_lookup_lock:
-            if conversation_id in self.real_to_optimistic:
-                opt_id = self.real_to_optimistic[conversation_id]
-                del self.real_to_optimistic[conversation_id]
-                if opt_id in self.optimistic_to_real:
-                    del self.optimistic_to_real[opt_id]
-            elif conversation_id in self.optimistic_to_real:
-                real_id = self.optimistic_to_real[conversation_id]
-                del self.optimistic_to_real[conversation_id]
-                if real_id in self.real_to_optimistic:
-                    del self.real_to_optimistic[real_id]
-    
+            return client_chat_id in self.session_conversations.get(session_id, set())
+
     # Claude stream management
     async def add_stream(self, request_id: str, stream):
         """Store a Claude API stream for potential cancellation"""
@@ -1169,7 +934,6 @@ def create_managers(redis_client: redis.Redis) -> Dict[str, Any]:
         "user_sessions": UserSessionManager(redis_client),
         "session_timestamps": SessionTimestampManager(redis_client),
         "active_requests": ActiveRequestManager(redis_client),
-        "session_mappings": SessionMappingManager(redis_client),
         "request_states": RequestStateManager(redis_client),
         "request_messages": RequestMessageTracker(redis_client),
         "local_objects": LocalObjectManager()
