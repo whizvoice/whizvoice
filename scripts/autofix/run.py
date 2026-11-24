@@ -754,7 +754,7 @@ The `autofix_tests/` directory has `conftest.py` and `helpers.py` that provide:
 ## CRITICAL REQUIREMENTS FOR THE TEST
 
 - After opening a new chat, `time.sleep(2)` before calling `send_voice_command()` so the UI
-  and WebSocket have a moment to settle (matches the pattern in `run_screen_agent_tests.py`).
+  and WebSocket have a moment to settle.
 - The test MUST call `send_voice_command()` to send a voice command that triggers the screen agent
   feature that was fixed. This is NON-NEGOTIABLE.
 - The test MUST validate that the screen agent completed the **specific action** described by the
