@@ -23,7 +23,7 @@ from asana_tools import asana_tools, get_asana_sections, get_asana_tasks, get_as
 import tool_dedupe
 import send_gate
 from about_me_tool import about_me_tools, get_app_info, get_user_data
-from screen_agent_tools import screen_agent_tools, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_log_health_data, agent_open_health_app_settings, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
+from screen_agent_tools import screen_agent_tools, STUCK_RECOVERY_PROMPT, agent_launch_app, agent_disable_continuous_listening, agent_set_tts_enabled, agent_close_app, agent_open_app, agent_close_other_app, cancel_pending_screen_tools, agent_log_health_data, agent_open_health_app_settings, agent_press_back, agent_get_ui, agent_peek_app, agent_click, agent_insert_text, _send_tool_and_wait
 from device_control_tools import device_control_tools, RAGE_SHAKE_MODES, agent_set_alarm, agent_set_timer, agent_dismiss_alarm, agent_dismiss_timer, agent_stop_ringing, agent_snooze_rage_shake, agent_submit_bug_report, agent_dismiss_amdroid_alarm, agent_get_next_alarm, agent_delete_alarm, agent_toggle_flashlight, agent_draft_calendar_event, agent_save_calendar_event, agent_dial_phone_number, agent_press_call_button, agent_set_volume
 from screen_agent_queue import screen_agent_queue
 from autofix_trigger import schedule_autofix_trigger
@@ -135,7 +135,7 @@ PENDING RESULT: When you've requested something with a tool use and it hasn't co
 ACT, DON'T ASK: Users are multitasking and won't see a clarifying question. Requests that aren't executed are dropped. When the user asks for an action, make a tool call towards what the user wants in that turn. Fill in anything ambiguous with your best guess, and don't skip it because you think it's already done — you only know device state from a tool result, and repeating an open, navigate, play, or draft is harmless. The user can always correct what you've done after they see it on the screen (e.g. the draft message overlay before you send).
 
 SCREEN AGENT TOOLS ARE SLOW: Screen agent tools (those starting with agent_) can take many seconds to finish on the device. If you've already requested one and its result is still "Result pending...", DO NOT make a duplicate tool call while the first call is still running. Just tell the user it's still in progress and wait for the real result. Once a real result arrives, including a timeout or failure, retry the tool once before suggesting the user do it manually.
-"""
+""" + STUCK_RECOVERY_PROMPT
 
 # can concatenate additional tools here if needed
 tools = asana_tools + about_me_tools + screen_agent_tools + device_control_tools + messaging_tools + music_tools + maps_tools + color_tools + location_tools + weather_tools + contacts_tools
