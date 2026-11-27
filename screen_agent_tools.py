@@ -832,6 +832,14 @@ async def agent_insert_text(text: str, element_id: int = None, user_id: str = No
 
 
 # Define the Screen Agent tools for Claude
+# Appended to CLAUDE_SYSTEM_PROMPT (app.py). The phone attaches a `stuck` block to any screen agent
+# tool result with success=false: goal, failed_step, foreground_app, screen (the interactable element
+# list with [n] ids, already registered for agent_click) and recovery. This paragraph tells the model
+# what to do with it. Kept here so test_stuck_recovery.py can import it without importing app.py.
+STUCK_RECOVERY_PROMPT = """
+STUCK SCREEN AGENT TOOLS: When a screen agent tool result contains a "stuck" object, the tool gave up on an unexpected screen. Read stuck.goal and stuck.failed_step, then look at stuck.screen: it is the live list of on-screen elements with [n] ids, and those ids are valid for agent_click RIGHT NOW (no agent_get_ui needed). Look for an obstacle such as a permission prompt, an ad, a banner, a popup or a sign-in nag, and clear it with agent_click on a dismissive element ("Don't allow", "No thanks", "Not now", "Close", "Skip", "Cancel") or with agent_press_back. NEVER tap Allow/Accept on a permission prompt and NEVER tap anything that would send, pay, buy, delete, call or sign in. If stuck.foreground_app is not the app the tool needed, launch that app instead of clicking. Then call the original tool once more with the same arguments. If it fails again, tell the user briefly what is on screen and stop; do not loop.
+"""
+
 screen_agent_tools = [
     {
         "type": "custom",
@@ -881,7 +889,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_close_app",
-        "description": "Stop or close the WhizVoice app completely. This will exit the app, stopping all voice listening and background services. Use this when the user wants to close, exit, stop, or quit, or wants you to go away, or says something like 'that's it' or 'that's all' or 'I'm good now'. This function automatically full screens Google Maps if there is an active Google Maps navigation in overlay mode, so the user can continue their navigation.",
+        "description": "Stop or close the WhizVoice app completely. Use this when the user wants to close, exit, stop, or quit, or wants you to go away, or says something like 'that's it' or 'that's all' or 'I'm good now'. This function automatically full screens Google Maps if there is an active Google Maps navigation in overlay mode, so the user can continue their navigation.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -955,7 +963,7 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_get_ui",
-        "description": "Works in ANY app. Dump the current on-screen UI so you can pick an element to click or type into. Returns a list where each interactable node has a stable element_id prefix like [3]. Call this before agent_click or agent_insert_text. Re-call it if the UI has changed since your last dump (e.g. after navigating, typing, or dismissing something).",
+        "description": "Works in ANY app. Dump the current on-screen UI so you can pick an element to click or type into. Returns a list where each interactable node has a stable element_id prefix like [3]. Call this before agent_click or agent_insert_text, unless the previous tool result already carries a stuck.screen list: those ids are current and can be clicked directly. Re-call it if the UI has changed since your last dump (e.g. after navigating, typing, or dismissing something).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -991,13 +999,13 @@ screen_agent_tools = [
     {
         "type": "custom",
         "name": "agent_click",
-        "description": "Works in ANY app. Click an on-screen element by its element_id. You MUST call agent_get_ui first to obtain valid element_ids. If the element is not itself clickable, the closest clickable ancestor is used. Fails with an error asking you to re-dump if the UI has changed since the last agent_get_ui.",
+        "description": "Works in ANY app. Click an on-screen element by its element_id. Valid element_ids come from the most recent agent_get_ui output, or from the stuck.screen list in a failed screen agent tool result (those ids are registered on the phone and need no agent_get_ui first). If the element is not itself clickable, the closest clickable ancestor is used. Fails with an error asking you to re-dump if the UI has changed since the ids were produced.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "element_id": {
                     "type": "integer",
-                    "description": "The integer id shown in square brackets in the most recent agent_get_ui output, e.g. the 3 in [3]."
+                    "description": "The integer id shown in square brackets, e.g. the 3 in [3], from the most recent agent_get_ui output or from a tool result's stuck.screen list."
                 }
             },
             "required": ["element_id"]

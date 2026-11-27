@@ -29,6 +29,18 @@ class ToolResultHandler:
         # Metadata for mapping request_id -> {tool_use_id, session_id}
         self._metadata: Dict[str, Dict[str, Optional[str]]] = {}
 
+    def register_pending_tool(self, request_id: str, tool_name: str = "") -> None:
+        """
+        Pre-register a pending execution before the command is sent to the device,
+        so a reply that arrives before wait_for_tool_result() runs is not dropped
+        as an "unknown request". wait_for_tool_result() reuses the Future created here.
+        """
+        if request_id in self.pending_executions:
+            return
+        self.pending_executions[request_id] = asyncio.get_event_loop().create_future()
+        self.execution_times[request_id] = datetime.now()
+        logger.debug(f"Registered pending tool {tool_name or '?'} (request_id: {request_id})")
+
     async def wait_for_tool_result(self, request_id: str, timeout: float = 10.0) -> Dict[str, Any]:
         """
         Wait for a tool execution result with deadline-based timeout.
@@ -42,9 +54,11 @@ class ToolResultHandler:
         Returns:
             Tool execution result or timeout error
         """
-        # Create a Future for this execution
-        future = asyncio.Future()
-        self.pending_executions[request_id] = future
+        # Reuse a Future pre-created by register_pending_tool(), else create one now
+        future = self.pending_executions.get(request_id)
+        if future is None:
+            future = asyncio.Future()
+            self.pending_executions[request_id] = future
         self.execution_times[request_id] = datetime.now()
 
         # Store metadata from contextvars for later use by extend_deadline
